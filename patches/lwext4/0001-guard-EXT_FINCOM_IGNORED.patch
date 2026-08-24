@@ -1,0 +1,26 @@
+Subject: allow EXT_FINCOM_IGNORED to be overridden by the build
+
+lwext4 hard-codes which INCOMPAT feature bits it will tolerate on an otherwise
+supported volume. We need to add EXT4_FINCOM_BG_USE_META_CSUM (metadata_csum_seed,
+0x2000), which modern mke2fs enables by default, and which is safe to ignore
+precisely when the stored seed still matches the UUID-derived one -- a condition
+the bridge verifies in ext4b_probe() before it ever calls ext4_mount().
+
+Adding an #ifndef guard lets the build supply the value instead of us carrying a
+divergent copy of the macro. Upstreamable as-is.
+
+diff --git a/include/ext4_types.h b/include/ext4_types.h
+index c9cdd34..7bb482a 100644
+--- a/include/ext4_types.h
++++ b/include/ext4_types.h
+@@ -295,8 +295,10 @@ struct ext4_sblock {
+  *           (probably won't be ever...)
+  * MMP - multi-mout protection (impossible scenario)
+  * */
++#ifndef EXT_FINCOM_IGNORED
+ #define EXT_FINCOM_IGNORED                                 \
+ 	EXT4_FINCOM_RECOVER | EXT4_FINCOM_MMP
++#endif
+ 
+ #if 0
+ /*TODO: Features incompatible to implement*/

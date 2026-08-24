@@ -1,0 +1,113 @@
+# open_ext4_for_mac — build system
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Deliberately plain make + swiftc: full Xcode is NOT required to build this
+# project, only the Command Line Tools. Xcode is needed only if you prefer its
+# signing workflow; `make sign` uses codesign directly.
+
+DEPLOY_TARGET ?= 15.4
+ARCHS         ?= arm64
+BUILD         ?= build
+CONFIG        ?= release
+
+LWEXT4_DIR := Core/lwext4
+SHIM_DIR   := Core/shim
+
+# --- lwext4 tuning -----------------------------------------------------------
+# CONFIG_USE_DEFAULT_CFG   : skip lwext4's generated/ header, use its defaults
+# CONFIG_BLOCK_DEV_CACHE_SIZE: lwext4 defaults to 8 blocks (sized for MCUs);
+#                            a desktop volume needs a real metadata cache
+# CONFIG_DEBUG_PRINTF      : silence stdout; diagnostics go through ext4b_set_logger
+#
+# EXT_FINCOM_IGNORED adds metadata_csum_seed (0x2000) to the INCOMPAT bits
+# lwext4 tolerates. Modern mke2fs enables it by default. lwext4 has no notion of
+# s_checksum_seed and always derives the seed from the UUID, which is correct
+# exactly while the two still agree -- ext4b_probe() verifies that and forces
+# read-only when they diverge, so tolerating the bit here is safe.
+# Requires patches/lwext4/0001-guard-EXT_FINCOM_IGNORED.patch.
+LWEXT4_DEFS := -DCONFIG_USE_DEFAULT_CFG=1 \
+               -DCONFIG_BLOCK_DEV_CACHE_SIZE=1024 \
+               -DCONFIG_DEBUG_PRINTF=0 \
+               -DCONFIG_DEBUG_ASSERT=1 \
+               -D'EXT_FINCOM_IGNORED=(EXT4_FINCOM_RECOVER | EXT4_FINCOM_MMP | EXT4_FINCOM_BG_USE_META_CSUM)'
+
+INCLUDES := -I$(LWEXT4_DIR)/include -I$(LWEXT4_DIR)/include/misc -I$(SHIM_DIR)
+
+ifeq ($(CONFIG),debug)
+  OPT := -O0 -g -fsanitize=address,undefined
+else
+  OPT := -O2 -g
+endif
+
+CFLAGS := $(OPT) -fno-common -Wall $(INCLUDES) $(LWEXT4_DEFS)
+# lwext4 is third-party embedded C; its warnings are not actionable for us.
+LWEXT4_CFLAGS := $(CFLAGS) -Wno-everything
+SHIM_CFLAGS   := $(CFLAGS) -Wextra -Wno-unused-parameter
+
+TARGET_FLAG := -target arm64-apple-macos$(DEPLOY_TARGET)
+
+LWEXT4_SRCS := $(wildcard $(LWEXT4_DIR)/src/*.c)
+LWEXT4_OBJS := $(patsubst $(LWEXT4_DIR)/src/%.c,$(BUILD)/obj/lwext4/%.o,$(LWEXT4_SRCS))
+SHIM_OBJS   := $(BUILD)/obj/shim/ext4_bridge.o
+
+CORE_LIB := $(BUILD)/lib/libext4core.a
+
+.PHONY: all core clean test tools check-submodule patch unpatch
+
+all: core
+
+check-submodule:
+	@test -f $(LWEXT4_DIR)/include/ext4.h || { \
+	  echo "error: lwext4 submodule missing. Run: git submodule update --init"; \
+	  exit 1; }
+
+core: check-submodule patch $(CORE_LIB)
+
+# Vendored-dependency patches. Applied idempotently so a clean checkout builds
+# with a plain `make`, and re-running is harmless.
+PATCHES := $(sort $(wildcard patches/lwext4/*.patch))
+
+patch:
+	@for p in $(PATCHES); do \
+	  if git -C $(LWEXT4_DIR) apply --check --reverse "$(CURDIR)/$$p" 2>/dev/null; then \
+	    :; \
+	  elif git -C $(LWEXT4_DIR) apply "$(CURDIR)/$$p" 2>/dev/null; then \
+	    echo "applied $$p"; \
+	  else \
+	    echo "error: failed to apply $$p"; exit 1; \
+	  fi; \
+	done
+
+unpatch:
+	@for p in $(PATCHES); do \
+	  git -C $(LWEXT4_DIR) apply --reverse "$(CURDIR)/$$p" 2>/dev/null && echo "reverted $$p" || true; \
+	done
+
+$(BUILD)/obj/lwext4/%.o: $(LWEXT4_DIR)/src/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(TARGET_FLAG) $(LWEXT4_CFLAGS) -c $< -o $@
+
+$(BUILD)/obj/shim/%.o: $(SHIM_DIR)/%.c $(SHIM_DIR)/ext4_bridge.h
+	@mkdir -p $(dir $@)
+	$(CC) $(TARGET_FLAG) $(SHIM_CFLAGS) -c $< -o $@
+
+$(CORE_LIB): $(LWEXT4_OBJS) $(SHIM_OBJS)
+	@mkdir -p $(dir $@)
+	@rm -f $@
+	ar rcs $@ $^
+	@echo "built $@"
+
+# --- test tooling ------------------------------------------------------------
+# ext4dump drives the core against a plain file, with no FSKit, no signing and
+# no mounting. This is what makes the core testable in CI.
+tools: $(BUILD)/bin/ext4dump
+
+$(BUILD)/bin/ext4dump: tools/ext4dump.c $(CORE_LIB)
+	@mkdir -p $(dir $@)
+	$(CC) $(TARGET_FLAG) $(CFLAGS) $< $(CORE_LIB) -o $@
+
+test: tools
+	@bash Tests/run_tests.sh
+
+clean:
+	rm -rf $(BUILD)
