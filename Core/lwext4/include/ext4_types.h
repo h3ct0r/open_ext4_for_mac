@@ -295,8 +295,10 @@ struct ext4_sblock {
  *           (probably won't be ever...)
  * MMP - multi-mout protection (impossible scenario)
  * */
+#ifndef EXT_FINCOM_IGNORED
 #define EXT_FINCOM_IGNORED                                 \
 	EXT4_FINCOM_RECOVER | EXT4_FINCOM_MMP
+#endif
 
 #if 0
 /*TODO: Features incompatible to implement*/
