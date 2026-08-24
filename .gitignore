@@ -1,0 +1,25 @@
+# Build output
+build/
+.build/
+*.o
+*.a
+*.dSYM/
+DerivedData/
+
+# Bundle output
+*.appex/
+*.app/
+*.dmg
+
+# Signing (never commit secrets)
+*.p12
+*.mobileprovision
+*.provisionprofile
+signing.local.env
+
+# Test artifacts
+Tests/fixtures/*.img
+tools/difftest/out/
+
+# macOS
+.DS_Store
