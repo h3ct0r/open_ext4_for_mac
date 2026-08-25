@@ -1,6 +1,6 @@
 # open_ext4_for_mac
 
-A native, open-source **ext2/ext3/ext4** filesystem driver for macOS on Apple Silicon,
+A native, open-source **ext2/ext3/ext4** read-write filesystem driver for macOS,
 built on Apple's **FSKit**.
 
 No kernel extension. No FUSE. No SIP changes. No proprietary binaries.
