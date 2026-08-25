@@ -84,8 +84,43 @@ Note the `-a` on the second command. Without it, `find-certificate` returns only
 the **first** match, and since the G1 and G2 intermediates share a common name,
 it is easy to conclude the G2 intermediate is missing when it is present.
 
-If `verify-cert` succeeds, the chain is fine and something else is wrong. The
-usual cause is the **login keychain**, not the certificate:
+### First check: are the Apple certs in the *System* keychain?
+
+`codesign` builds its chain from `/Library/Keychains/System.keychain`. Having
+the intermediates only in your login keychain is not enough, and produces
+exactly this error even though `security verify-cert` succeeds and every
+certificate is individually present.
+
+```bash
+security find-certificate -a -c "Developer ID Certification Authority" \
+        /Library/Keychains/System.keychain | grep -c labl
+security find-certificate -a -c "Apple Root CA" \
+        /Library/Keychains/System.keychain | grep -c labl
+```
+
+If either prints `0`, install them (needs admin rights):
+
+```bash
+cd ~/Downloads
+curl -sLO https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+curl -sLO https://www.apple.com/appleca/AppleIncRootCertificate.cer
+sudo security import DeveloperIDG2CA.cer      -k /Library/Keychains/System.keychain
+sudo security import AppleIncRootCertificate.cer -k /Library/Keychains/System.keychain
+```
+
+Note there are **two** Developer ID intermediates sharing a common name: the
+original and G2. Check which one signed your certificate before assuming you
+have the right one:
+
+```bash
+security find-certificate -c "Developer ID Application: YOUR NAME" -p \
+  | openssl x509 -noout -issuer          # look for OU=G2
+```
+
+### Other causes
+
+If the System keychain already has them, the next suspect is the **login
+keychain**, not the certificate:
 
 - duplicate private-key entries — one certificate showing up as several
   identities in `security find-identity -v`
