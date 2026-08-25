@@ -1,0 +1,4 @@
+module Ext4Core {
+    header "ext4_bridge.h"
+    export *
+}

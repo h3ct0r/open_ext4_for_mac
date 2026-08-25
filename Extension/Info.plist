@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>open_ext4 (ext2/3/4)</string>
+	<key>CFBundleExecutable</key>
+	<string>Ext4FS</string>
+	<key>CFBundleIdentifier</key>
+	<string>dev.h3ct0r.ext4mac.Ext4FS</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Ext4FS</string>
+	<key>CFBundlePackageType</key>
+	<string>XPC!</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.4</string>
+	<key>EXAppExtensionAttributes</key>
+	<dict>
+		<key>EXExtensionPointIdentifier</key>
+		<string>com.apple.fskit.fsmodule</string>
+
+		<!-- Short name shown in System Settings > Login Items & Extensions. -->
+		<key>FSShortName</key>
+		<string>ext4</string>
+
+		<!-- We consume a raw block device (a disk partition), not a URL. -->
+		<key>FSSupportsBlockResources</key>
+		<true/>
+		<key>FSSupportsGenericURLResources</key>
+		<false/>
+		<key>FSSupportsPathURLs</key>
+		<false/>
+		<key>FSSupportsServerURLs</key>
+		<false/>
+		<key>FSRequiresSecurityScopedPathURLResources</key>
+		<false/>
+
+		<!-- Hand the kernel extent maps instead of copying file data over XPC. -->
+		<key>FSSupportsKernelOffloadedIO</key>
+		<true/>
+
+		<!--
+		    One personality per filesystem generation. FSSubType is what
+		    `mount -t` and Disk Utility use to tell them apart; the values
+		    match the convention Apple's own modules follow.
+		    ext filenames are byte strings compared exactly, hence
+		    FSfileObjectsAreCaseSensitive.
+		-->
+		<key>FSPersonalities</key>
+		<dict>
+			<key>ext2</key>
+			<dict>
+				<key>FSName</key>
+				<string>ext2</string>
+				<key>FSSubType</key>
+				<integer>0</integer>
+				<key>FSfileObjectsAreCaseSensitive</key>
+				<true/>
+			</dict>
+			<key>ext3</key>
+			<dict>
+				<key>FSName</key>
+				<string>ext3</string>
+				<key>FSSubType</key>
+				<integer>1</integer>
+				<key>FSfileObjectsAreCaseSensitive</key>
+				<true/>
+			</dict>
+			<key>ext4</key>
+			<dict>
+				<key>FSName</key>
+				<string>ext4</string>
+				<key>FSSubType</key>
+				<integer>2</integer>
+				<key>FSfileObjectsAreCaseSensitive</key>
+				<true/>
+			</dict>
+		</dict>
+
+		<!--
+		    Media this module will be offered. The GPT type GUID for a Linux
+		    filesystem, the MBR 0x83 content hint ("Linux"), and whole
+		    unpartitioned devices, which is how a raw-formatted USB stick or a
+		    disk image attached with hdiutil appears.
+		-->
+		<key>FSMediaTypes</key>
+		<dict>
+			<key>0FC63DAF-8483-4772-8E79-3D69D8477DE4</key>
+			<dict>
+				<key>FSMediaProperties</key>
+				<dict>
+					<key>Content Hint</key>
+					<string>0FC63DAF-8483-4772-8E79-3D69D8477DE4</string>
+					<key>Leaf</key>
+					<true/>
+				</dict>
+			</dict>
+			<key>Linux</key>
+			<dict>
+				<key>FSMediaProperties</key>
+				<dict>
+					<key>Content Hint</key>
+					<string>Linux</string>
+					<key>Leaf</key>
+					<true/>
+				</dict>
+			</dict>
+			<key>Whole</key>
+			<dict>
+				<key>FSMediaProperties</key>
+				<dict>
+					<key>Leaf</key>
+					<true/>
+					<key>Whole</key>
+					<true/>
+				</dict>
+			</dict>
+		</dict>
+
+		<!--
+		    getopt strings for options accepted by mount / fsck / mkfs.
+		    -o is the standard mount option list; --rdonly and -f are handled
+		    by FSKit itself for unary filesystems.
+		-->
+		<key>FSActivateOptionSyntax</key>
+		<dict>
+			<key>shortOptions</key>
+			<string>o:</string>
+		</dict>
+	</dict>
+</dict>
+</plist>

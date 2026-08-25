@@ -52,9 +52,9 @@ SHIM_OBJS   := $(BUILD)/obj/shim/ext4_bridge.o
 
 CORE_LIB := $(BUILD)/lib/libext4core.a
 
-.PHONY: all core clean test tools check-submodule patch unpatch
+.PHONY: all core clean test tools check-submodule patch unpatch extension app sign install typecheck
 
-all: core
+all: app
 
 check-submodule:
 	@test -f $(LWEXT4_DIR)/include/ext4.h || { \
@@ -111,3 +111,66 @@ test: tools
 
 clean:
 	rm -rf $(BUILD)
+
+# --- FSKit extension ---------------------------------------------------------
+
+APP_NAME   := Ext4Mac
+EXT_NAME   := Ext4FS
+BUNDLE_ID  := dev.h3ct0r.ext4mac
+APPEX      := $(BUILD)/$(APP_NAME).app/Contents/Extensions/$(EXT_NAME).appex
+SWIFT_SRCS := $(wildcard Extension/*.swift)
+
+SWIFTFLAGS := -target arm64-apple-macos$(DEPLOY_TARGET) \
+              -I Core/shim \
+              -framework FSKit \
+              -swift-version 5 \
+              -parse-as-library
+
+ifeq ($(CONFIG),debug)
+  SWIFTFLAGS += -Onone -g
+else
+  SWIFTFLAGS += -O
+endif
+
+typecheck: core
+	swiftc -typecheck $(SWIFT_SRCS) $(SWIFTFLAGS)
+
+extension: $(APPEX)
+
+$(APPEX): $(SWIFT_SRCS) $(CORE_LIB) Extension/Info.plist
+	@rm -rf "$(APPEX)"
+	@mkdir -p "$(APPEX)/Contents/MacOS"
+	swiftc $(SWIFT_SRCS) $(SWIFTFLAGS) $(CORE_LIB) \
+	    -o "$(APPEX)/Contents/MacOS/$(EXT_NAME)"
+	@cp Extension/Info.plist "$(APPEX)/Contents/Info.plist"
+	@echo "built $(APPEX)"
+
+# The container app exists only to host the extension: macOS discovers FSKit
+# modules through an installed application bundle, and the user enables it in
+# System Settings > General > Login Items & Extensions.
+app: extension $(BUILD)/$(APP_NAME).app/Contents/Info.plist $(BUILD)/$(APP_NAME).app/Contents/MacOS/$(APP_NAME)
+
+$(BUILD)/$(APP_NAME).app/Contents/Info.plist: App/Info.plist
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+$(BUILD)/$(APP_NAME).app/Contents/MacOS/$(APP_NAME): App/Ext4MacApp.swift
+	@mkdir -p $(dir $@)
+	swiftc App/Ext4MacApp.swift -target arm64-apple-macos$(DEPLOY_TARGET) -O -parse-as-library -o $@
+
+# --- signing -----------------------------------------------------------------
+# Requires a Developer ID Application certificate and a provisioning profile
+# carrying the com.apple.developer.fskit.fsmodule entitlement.
+# See docs/SIGNING.md. Override SIGN_ID on the command line:
+#   make sign SIGN_ID="Developer ID Application: Your Name (TEAMID)"
+
+SIGN_ID ?= -
+
+sign: app
+	@bash scripts/sign.sh "$(BUILD)/$(APP_NAME).app" "$(SIGN_ID)"
+
+install: sign
+	@rm -rf "/Applications/$(APP_NAME).app"
+	@cp -R "$(BUILD)/$(APP_NAME).app" /Applications/
+	@echo "installed to /Applications/$(APP_NAME).app"
+	@echo "Enable it in System Settings > General > Login Items & Extensions > File System Extensions"

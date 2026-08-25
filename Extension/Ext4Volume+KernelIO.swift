@@ -1,0 +1,101 @@
+//
+//  Ext4Volume+KernelIO.swift
+//  SPDX-License-Identifier: GPL-3.0-or-later
+//
+//  Kernel-offloaded I/O: instead of copying file bytes through XPC, we hand the
+//  kernel a logical->physical extent map and it moves the data itself. ext4
+//  stores its layout as extents already, so this is close to a direct
+//  translation, and it is what makes throughput competitive with a kext.
+//
+
+import Foundation
+import FSKit
+import Ext4Core
+
+extension Ext4Volume: FSVolumeKernelOffloadedIOOperations {
+
+    func blockmapFile(_ file: FSItem,
+                      offset: off_t,
+                      length: Int,
+                      flags: FSBlockmapFlags,
+                      operationID: FSOperationID,
+                      packer: FSExtentPacker) async throws {
+        guard let ext4Item = file as? Ext4Item else { throw Ext4Error.invalid }
+
+        // Writing would have to allocate blocks; refuse until the write path lands.
+        if flags.contains(.write) { throw Ext4Error.readOnly }
+
+        try await executor.run { [self] in
+            let maxExtents = 64
+            var extents = [ext4b_extent](repeating: ext4b_extent(), count: maxExtents)
+            var produced = 0
+
+            let rc = extents.withUnsafeMutableBufferPointer { buf -> Int32 in
+                ext4b_map_extents(device, ext4Item.inode,
+                                  UInt64(offset), UInt64(length),
+                                  buf.baseAddress, maxExtents, &produced)
+            }
+            try Ext4Error.check(rc, "blockmap(\(ext4Item.inode))")
+
+            for i in 0..<produced {
+                let e = extents[i]
+                // A hole is reported as unallocated so the kernel substitutes
+                // zeroes rather than reading stale blocks off the disk.
+                let packed = packer.packExtent(
+                    resource: bridge.resource,
+                    type: e.is_hole ? .zeroFill : .data,
+                    logicalOffset: off_t(e.logical_offset),
+                    physicalOffset: off_t(e.physical_offset),
+                    length: Int(e.length))
+
+                // The packer is full; FSKit will call again with the same
+                // operationID to collect the remainder.
+                if !packed { break }
+            }
+        }
+    }
+
+    func completeIO(for file: FSItem,
+                    offset: off_t,
+                    length: Int,
+                    status: any Error,
+                    flags: FSCompleteIOFlags,
+                    operationID: FSOperationID) async throws {
+        guard let ext4Item = file as? Ext4Item else { return }
+
+        // FSKit imports the header's nullable NSError as a non-optional
+        // `any Error`, so "no error" arrives as an NSError with code 0 rather
+        // than as nil. Treat that as success.
+        let error = status as NSError
+        if error.code != 0 {
+            Ext4Log.io.error("I/O on inode \(ext4Item.inode) failed: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+
+        // Reads do not change the inode, so there is nothing to write back yet.
+        // Once writes land, this is where size and mtime get updated.
+        if flags.contains(.write) {
+            ext4Item.invalidate()
+        }
+    }
+
+    // These two exist so a module can hand back extents opportunistically at
+    // create/lookup time and save a later blockmap round-trip. We do not
+    // speculate: the header is explicit that no extra I/O should be performed
+    // here, and computing a map costs an inode read. Both therefore delegate to
+    // the plain FSVolume.Operations implementations.
+
+    func createFile(name: FSFileName,
+                    in directory: FSItem,
+                    attributes: FSItem.SetAttributesRequest,
+                    packer: FSExtentPacker) async throws -> (FSItem, FSFileName) {
+        try await createItem(named: name, type: .file,
+                             inDirectory: directory, attributes: attributes)
+    }
+
+    func lookupItem(name: FSFileName,
+                    in directory: FSItem,
+                    packer: FSExtentPacker) async throws -> (FSItem, FSFileName) {
+        try await lookupItem(named: name, inDirectory: directory)
+    }
+}

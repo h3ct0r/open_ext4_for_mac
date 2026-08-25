@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Declares this extension as an FSKit filesystem module. Requires a
+	     provisioning profile from a paid Apple Developer account. -->
+	<key>com.apple.developer.fskit.fsmodule</key>
+	<true/>
+	<!-- FSKit modules run sandboxed. FSKit itself grants the extension access
+	     to the block device it is asked to mount; no other access is needed. -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+</dict>
+</plist>
