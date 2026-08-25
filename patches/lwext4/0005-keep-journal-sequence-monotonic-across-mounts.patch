@@ -1,0 +1,68 @@
+Subject: keep journal sequence numbers monotonic across mounts
+
+jbd_journal_start() sets the session's first transaction id from the on-disk
+journal superblock:
+
+    /*
+     * To invalidate any stale records we need to start from
+     * the checkpoint transaction ID of the previous journalling session
+     * plus 1.
+     */
+    journal->trans_id = jbd_get32(&jbd_fs->sb, sequence) + 1;
+
+but jbd_journal_stop() then writes that field back as 0:
+
+    journal->start = 0;
+    journal->trans_id = 0;
+    jbd_journal_write_sb(journal);
+
+so the stored sequence after every clean unmount is 0, the next session always
+computes 1, and the stale-record protection the comment describes never
+actually happens.
+
+The consequence is a real loss of crash consistency. jbd_journal_start()
+publishes s_start pointing at the head of the log before the first transaction
+of the session has committed. Crash in that window and the journal superblock
+advertises a log that was never written -- but the blocks it points at still
+hold records from the *previous* session, carrying the same sequence number 1.
+Recovery accepts them and replays stale metadata over the live filesystem.
+
+Observed with a cross-directory rename, cutting the write stream partway
+through. Before recovery the volume is intact; the damage is done by replay:
+
+    cut@5: journal sb says s_start=1 s_sequence=1, no commit block written
+           -> kernel replays previous session's records
+           -> "Unattached zero-length inode 526"
+    cut@6: -> "ext4_check_descriptors: Inode bitmap for group 0 not in group"
+              (kernel refuses the mount entirely)
+
+Keeping trans_id at stop makes sequence numbers monotonic across mounts, so
+records left over from an earlier session can no longer match and recovery
+rejects them.
+
+diff --git a/src/ext4_journal.c b/src/ext4_journal.c
+index 7874f58..bca3ae5 100644
+--- a/src/ext4_journal.c
++++ b/src/ext4_journal.c
+@@ -1443,7 +1443,20 @@ int jbd_journal_stop(struct jbd_journal *journal)
+ 		return r;
+ 
+ 	journal->start = 0;
+-	journal->trans_id = 0;
++	/*
++	 * Deliberately keep trans_id rather than resetting it to 0.
++	 *
++	 * jbd_journal_start() computes the next session's first transaction id
++	 * as on-disk sequence + 1, specifically so that records still
++	 * physically present in the log from an earlier session cannot be
++	 * mistaken for current ones. Writing 0 here defeats that: every session
++	 * then starts at 1, stale records also carry 1, and a crash that
++	 * advertises a log start before the new transaction commits lets
++	 * recovery replay the previous session's records over live metadata.
++	 *
++	 * Persisting the last id used keeps sequence numbers monotonic across
++	 * mounts, which is what makes the +1 meaningful.
++	 */
+ 	jbd_journal_write_sb(journal);
+ 	return jbd_write_sb(journal->jbd_fs);
+ }

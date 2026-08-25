@@ -50,6 +50,10 @@ static int file_write(void *ctx, const void *buf, uint64_t off, size_t len)
         c->writes++;
         return 0;           /* pretend it landed; the bytes are lost */
     }
+    if (getenv("EXT4DUMP_TRACE_WRITES"))
+        fprintf(stderr, "W%-3ld off=%-10llu blk=%-8llu len=%zu\n",
+                c->writes, (unsigned long long)off,
+                (unsigned long long)(off / 4096), len);
     c->writes++;
 
     ssize_t n = pwrite(c->fd, buf, len, (off_t)off);

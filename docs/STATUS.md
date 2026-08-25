@@ -6,7 +6,7 @@
 | 1 — read-only ext2/3/4 | **complete; 41 tests green** |
 | 2 — kernel-offloaded I/O | implemented (read path) |
 | 3 — write path | **complete; 82 tests green, opt-in via `-o rw`** |
-| 4 — correctness harness | image-level complete; **crash-consistency still pending** |
+| 4 — correctness harness | **complete: image, crash-consistency, and differential-vs-Linux** |
 | 5 — polish & distribution | not started |
 
 ## What works today
@@ -67,12 +67,30 @@ implementation, so the suite cannot agree with a bug in our own reader.
 `make test-asan` reruns everything under AddressSanitizer and UBSan. That is
 how two genuine lwext4 defects were found; see `patches/lwext4/README.md`.
 
-## Not yet done
+## Validation
 
-- **Crash-consistency testing** — truncate the write stream at randomised
-  points, replay the journal, verify with `e2fsck`. This is the gate for making
-  writes the default.
-- Differential testing against Linux ext4 in a VM
+```bash
+make validate        # all four stages, unattended
+make validate-asan   # the same under AddressSanitizer + UBSan
+```
+
+| Stage | What it proves |
+|---|---|
+| read suite | 41 assertions, content verified byte-for-byte against `debugfs` |
+| write suite | 82 assertions, `e2fsck` after **every** mutating operation |
+| crash consistency | 256 cut points across 12 operations; the write stream is severed at every point, the **real Linux kernel** replays the journal, and `e2fsck` must be clean |
+| differential vs Linux | 28 assertions; volumes round-trip between our driver and the real Linux ext4 driver in both directions, with the kernel log required to be silent |
+
+Stages 3 and 4 use Docker, which on Apple Silicon is a real Linux VM — so the
+oracle is the actual ext4 implementation, not another copy of our assumptions.
+They skip with a warning if Docker is not running.
+
+The power-failure model matters: after the cut point, writes are **silently
+discarded while still reporting success**. A real power loss does not hand the
+filesystem an errno it can react to. Returning `EIO` would exercise error
+handling instead, which is a far easier test to pass.
+
+## Not yet done
 - Kernel-offloaded I/O for writes (reads already use it)
 - `startCheck` / `startFormat` for Disk Utility integration
 - Notarised DMG

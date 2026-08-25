@@ -52,7 +52,7 @@ SHIM_OBJS   := $(BUILD)/obj/shim/ext4_bridge.o
 
 CORE_LIB := $(BUILD)/lib/libext4core.a
 
-.PHONY: all core clean test test-asan tools check-submodule patch unpatch extension app sign install typecheck
+.PHONY: all core clean test test-asan test-crash test-diff validate tools check-submodule patch unpatch extension app sign install typecheck
 
 all: app
 
@@ -119,6 +119,19 @@ test: tools
 	@bash Tests/run_tests.sh
 	@echo
 	@bash Tests/run_write_tests.sh
+
+test-crash: tools
+	@bash Tests/run_crash_tests.sh
+
+test-diff: tools
+	@bash Tests/run_diff_tests.sh
+
+# Everything, unattended, one stage after another. Stages 3 and 4 need Docker.
+validate:
+	@bash scripts/run_full_validation.sh
+
+validate-asan:
+	@bash scripts/run_full_validation.sh --asan
 
 # Same suites under AddressSanitizer + UBSan. Slower, but this is how the
 # NULL dereference in lwext4's xattr removal was found.
