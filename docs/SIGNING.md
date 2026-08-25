@@ -84,7 +84,51 @@ Note the `-a` on the second command. Without it, `find-certificate` returns only
 the **first** match, and since the G1 and G2 intermediates share a common name,
 it is easy to conclude the G2 intermediate is missing when it is present.
 
-### First check: are the Apple certs in the *System* keychain?
+### First check: a trust override on the certificate itself
+
+This is the one that actually bit us, and it is invisible to every other check.
+
+If someone has clicked **Always Trust** on the Developer ID certificate in
+Keychain Access, macOS records a user-domain trust setting of
+`kSecTrustSettingsResultTrustAsRoot` — that is, "treat this certificate as a
+self-signed root". The certificate is a leaf, not a root, so chain building
+tries to terminate at a root that is not self-signed and gives up. The error
+message is describing exactly what it was asked to do:
+
+```
+Warning: unable to build chain to self-signed root for signer "Developer ID Application: ..."
+<target>: errSecInternalComponent
+```
+
+Everything else still looks healthy while this is set: the identity is listed,
+`security verify-cert -p codeSign` succeeds, the intermediates are present, and
+the leaf's Authority Key Identifier matches the intermediate's Subject Key
+Identifier. Only the trust dump reveals it.
+
+```bash
+security dump-trust-settings          # USER domain — the default, no flag
+security dump-trust-settings -d       # admin domain
+security dump-trust-settings -s       # system domain
+```
+
+Note the flags: **no flag is the user domain**, `-d` is admin. Checking `-d`
+and seeing "No Trust Settings were found" proves nothing about the user domain,
+which is where Keychain Access writes.
+
+If your certificate appears in the user-domain dump, remove the override:
+
+```bash
+security find-certificate -c "Developer ID Application: YOUR NAME" -p > /tmp/devid.pem
+security remove-trusted-cert /tmp/devid.pem
+```
+
+Or in Keychain Access: select the certificate, **Get Info → Trust**, set
+*When using this certificate* back to **Use System Defaults**.
+
+Never mark a code-signing certificate "Always Trust". It is not a root, and
+telling macOS it is breaks signing with it.
+
+### Next check: are the Apple certs in the *System* keychain?
 
 `codesign` builds its chain from `/Library/Keychains/System.keychain`. Having
 the intermediates only in your login keychain is not enough, and produces
