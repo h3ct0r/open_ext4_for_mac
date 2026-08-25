@@ -1,0 +1,43 @@
+diff --git a/include/ext4_debug.h b/include/ext4_debug.h
+index c558e20..4966ad4 100644
+--- a/include/ext4_debug.h
++++ b/include/ext4_debug.h
+@@ -164,15 +164,32 @@ uint32_t ext4_dmask_get(void);
+ /**@brief   Debug assertion.*/
+ #if CONFIG_HAVE_OWN_ASSERT
+ #include <stdio.h>
++#include <stdlib.h>
++
++/* A failed assertion used to spin here forever. On an MCU with no scheduler
++ * and nowhere to report to, that is a defensible last resort. Hosted on a real
++ * operating system, driving a volume the kernel has mounted, it is the worst
++ * available outcome: the driver stops answering while still holding the mount,
++ * every process that touches the volume enters uninterruptible wait, umount
++ * hangs, and the only way out is SIGKILL -- all while burning a core.
++ *
++ * Ending the process instead tears the mount down, gives callers EIO, and
++ * leaves a crash report naming the invariant that broke.
++ *
++ * This lives in a function rather than in the macro body because ext4_journal.c
++ * has parameters named `abort`, which shadow the libc function at the point of
++ * expansion. */
++static inline void ext4_assert_failed(const char *file, int line)
++{
++	printf("assertion failed:\nfile: %s\nline: %d\n", file, line);
++	fflush(stdout);
++	abort();
++}
+ 
+ #define ext4_assert(_v)                                                        \
+ 	do {                                                                   \
+-		if (!(_v)) {                                                   \
+-			printf("assertion failed:\nfile: %s\nline: %d\n",      \
+-			       __FILE__, __LINE__);                            \
+-			       while (1)				       \
+-				       ;				       \
+-		}                                                              \
++		if (!(_v))                                                     \
++			ext4_assert_failed(__FILE__, __LINE__);                \
+ 	} while (0)
+ #else
+ #define ext4_assert(_v) assert(_v)

@@ -52,7 +52,7 @@ SHIM_OBJS   := $(BUILD)/obj/shim/ext4_bridge.o
 
 CORE_LIB := $(BUILD)/lib/libext4core.a
 
-.PHONY: all core clean test test-asan test-crash test-diff validate tools entitlements check-submodule patch unpatch extension app sign install typecheck
+.PHONY: all core clean test test-asan test-crash test-diff test-mount-crash validate tools entitlements check-submodule patch unpatch extension app sign install typecheck
 
 all: app
 
@@ -125,6 +125,12 @@ test-crash: tools
 
 test-diff: tools
 	@bash Tests/run_diff_tests.sh
+
+# Crash consistency against the mounted driver rather than the offline core.
+# Needs the extension signed, installed and enabled; skips with a message if
+# it is not. This is the only suite that exercises FSBlockDeviceResource.
+test-mount-crash:
+	@bash Tests/run_mount_crash_tests.sh
 
 # Everything, unattended, one stage after another. Stages 3 and 4 need Docker.
 validate:

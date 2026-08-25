@@ -28,7 +28,23 @@ final class Ext4Volume: FSVolume {
     /// downgraded it.
     let isReadOnly: Bool
 
-    var device: OpaquePointer { bridge.device! }
+    /// The live core handle.
+    ///
+    /// FSKit can still deliver operations after `unmount()` has closed the
+    /// volume — `synchronize` reliably arrives afterwards — so this has to be
+    /// able to fail. Force-unwrapping here turned every one of those late
+    /// calls into a SIGTRAP that killed the extension. The volume was already
+    /// safely on disk by then, which is exactly why it went unnoticed: the
+    /// only visible trace was a crash report per unmount.
+    var device: OpaquePointer {
+        get throws {
+            guard let dev = bridge.device else { throw Ext4Error.gone }
+            return dev
+        }
+    }
+
+    /// Non-throwing form, for the two places FSKit gives us no way to fail.
+    var deviceIfOpen: OpaquePointer? { bridge.device }
 
     /// Items handed out to FSKit, keyed by inode, so that repeated lookups of
     /// the same object return the same instance. FSKit balances these against
@@ -109,9 +125,21 @@ final class Ext4Volume: FSVolume {
 
     // MARK: - Attribute translation
 
+    /// Translate on-disk attributes into an `FSItem.Attributes`.
+    ///
+    /// **Must run on the executor.** Resolving `parentID` reads the directory's
+    /// ".." entry, which is another call into the core. Calling this after the
+    /// executor block rather than inside it lets two kernel threads enter
+    /// lwext4 at once; they corrupt the block cache's LRU list and spin
+    /// forever inside `ext4_bcache_free`, wedging the whole volume.
+    ///
+    /// `parentHint` supplies the parent when the caller already knows it —
+    /// during enumeration every entry's parent is the directory being read —
+    /// which avoids the ".." lookup entirely.
     func populate(_ target: FSItem.Attributes,
                           from a: ext4b_attrs,
-                          requested: FSItem.Attribute) {
+                          requested: FSItem.Attribute,
+                          parentHint: UInt32? = nil) {
         let isDir = a.type == EXT4B_TYPE_DIR
 
         if requested.contains(.type)      { target.type = a.type.fsItemType }
@@ -134,7 +162,8 @@ final class Ext4Volume: FSVolume {
             target.flags = 0
         }
         if requested.contains(.parentID) {
-            target.parentID = FSItem.Identifier(rawValue: UInt64(parentInode(of: a)))
+            let parent = parentHint ?? parentInode(of: a)
+            target.parentID = FSItem.Identifier(rawValue: UInt64(parent))
                 ?? FSItem.Identifier.parentOfRoot
         }
 
@@ -168,11 +197,11 @@ final class Ext4Volume: FSVolume {
     private func parentInode(of a: ext4b_attrs) -> UInt32 {
         if a.inode == UInt32(EXT4B_ROOT_INO) { return UInt32(EXT4B_ROOT_INO) }
 
-        if a.type == EXT4B_TYPE_DIR {
+        if a.type == EXT4B_TYPE_DIR, let dev = deviceIfOpen {
             var found: UInt32 = 0
             var type = EXT4B_TYPE_UNKNOWN
             let rc = "..".withCString { dotdot in
-                ext4b_lookup(device, a.inode, dotdot, 2, &found, &type)
+                ext4b_lookup(dev, a.inode, dotdot, 2, &found, &type)
             }
             if rc == 0, found != 0 { return found }
         }

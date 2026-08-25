@@ -1,0 +1,22 @@
+diff --git a/src/ext4_blockdev.c b/src/ext4_blockdev.c
+index c01093a..4c8de3a 100644
+--- a/src/ext4_blockdev.c
++++ b/src/ext4_blockdev.c
+@@ -224,6 +224,17 @@ int ext4_block_get_noread(struct ext4_blockdev *bdev, struct ext4_block *b,
+ 	if (!(lba < bdev->lg_bcnt))
+ 		return ENXIO;
+ 
++	/* Block 0 is ext4's hole marker: ext4_fs_get_inode_dblk_idx() returns
++	 * it for a logical block that has no physical block behind it, and no
++	 * real metadata ever lives there. Fetching it anyway caches a buffer
++	 * with lb_id == 0, which then trips the ext4_assert(b->lb_id) in
++	 * ext4_bcache_free() on release -- so a directory with a hole in it,
++	 * or an inode whose blocks have been freed underneath a stale lookup,
++	 * takes the whole driver down instead of returning an error.
++	 * Refusing here turns every one of those into a clean failure. */
++	if (lba == 0)
++		return ENXIO;
++
+ 	b->lb_id = lba;
+ 
+ 	/*If cache is full we have to (flush and) drop it anyway :(*/

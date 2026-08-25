@@ -22,8 +22,8 @@ extension Ext4Volume: FSVolume.ReadWriteOperations {
 
         return try await executor.run { [self] in
             var got = 0
-            let rc = buffer.withUnsafeMutableBytes { raw -> Int32 in
-                ext4b_read(device, ext4Item.inode,
+            let rc = try buffer.withUnsafeMutableBytes { raw -> Int32 in
+                ext4b_read(try device, ext4Item.inode,
                            UInt64(offset), raw.baseAddress!,
                            min(length, raw.count), &got)
             }
@@ -41,8 +41,8 @@ extension Ext4Volume: FSVolume.ReadWriteOperations {
 
         let written = try await executor.run { [self] in
             var count = 0
-            let rc = contents.withUnsafeBytes { raw -> Int32 in
-                ext4b_write(device, ext4Item.inode, UInt64(offset),
+            let rc = try contents.withUnsafeBytes { raw -> Int32 in
+                ext4b_write(try device, ext4Item.inode, UInt64(offset),
                             raw.baseAddress!, raw.count, &count)
             }
             try Ext4Error.check(rc, "write(\(ext4Item.inode) @\(offset))")
@@ -64,7 +64,7 @@ extension Ext4Volume: FSVolume.XattrOperations {
         return try await executor.run { [self] in
             var buffer = [UInt8](repeating: 0, count: Int(bridge.blockSize))
             var length = 0
-            let rc = ext4b_getxattr(device, ext4Item.inode,
+            let rc = ext4b_getxattr(try device, ext4Item.inode,
                                     attrName, &buffer, buffer.count, &length)
             try Ext4Error.check(rc)
             return Data(buffer.prefix(length))
@@ -94,13 +94,13 @@ extension Ext4Volume: FSVolume.XattrOperations {
         try await executor.run { [self] in
             let rc: Int32
             if let value {
-                rc = value.withUnsafeBytes { raw -> Int32 in
-                    ext4b_setxattr(device, ext4Item.inode, attrName,
+                rc = try value.withUnsafeBytes { raw -> Int32 in
+                    ext4b_setxattr(try device, ext4Item.inode, attrName,
                                    raw.baseAddress, raw.count)
                 }
             } else {
                 // A nil value means remove.
-                rc = ext4b_removexattr(device, ext4Item.inode, attrName)
+                rc = ext4b_removexattr(try device, ext4Item.inode, attrName)
             }
             try Ext4Error.check(rc, "setxattr(\(attrName))")
         }
@@ -112,8 +112,8 @@ extension Ext4Volume: FSVolume.XattrOperations {
 
         return try await executor.run { [self] in
             var names: [FSFileName] = []
-            let rc = withUnsafeMutablePointer(to: &names) { ptr -> Int32 in
-                ext4b_listxattr(device, ext4Item.inode,
+            let rc = try withUnsafeMutablePointer(to: &names) { ptr -> Int32 in
+                ext4b_listxattr(try device, ext4Item.inode,
                                 collectXattr, ptr)
             }
             try Ext4Error.check(rc)

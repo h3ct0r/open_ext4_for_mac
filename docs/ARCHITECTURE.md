@@ -57,20 +57,40 @@ without a paid Apple account can still work on the core.
   `delayedMetadataWrite` / `metadataFlush` family. That is a kernel-managed
   cache, and `metadataFlush` is the write barrier journalling depends on.
 
-- **File data** does not pass through the extension at all. `blockmapFile`
+- **File data** was meant to bypass the extension entirely: `blockmapFile`
   packs ext4's extents into an `FSExtentPacker` and the kernel moves the bytes
-  itself. ext4 is natively extent-based, so this is nearly a direct
-  translation, and it is what keeps throughput competitive with a kext.
+  itself, which is nearly a direct translation from ext4's own extent layout.
 
-  Inodes the kernel cannot map — ext2/ext3 indirect-block files, inline-data
-  inodes — set `inhibitKernelOffloadedIO` and fall back to the byte-copy path.
+  That is **not what runs today.** Conforming to
+  `FSVolumeKernelOffloadedIOOperations` makes FSKit route writes through
+  `blockmapFile` even for files that report `inhibitKernelOffloadedIO`, and a
+  write blockmap has to allocate blocks and journal the extent-tree change
+  before returning, with nothing to undo it if the kernel then fails the I/O.
+  Until that is built, all I/O goes through `FSVolume.ReadWriteOperations`,
+  where allocation stays inside a transaction we control. The code is kept as
+  `Ext4Volume+KernelIO.swift.disabled`.
 
 ### Serialisation
 
 FSKit issues volume operations concurrently. lwext4 keeps global mount-point
 state and its block cache has no locking, so every call into the core funnels
-through `Ext4Executor`'s serial queue. This is a correctness requirement.
-Bulk data throughput is unaffected because file data bypasses it entirely.
+through `Ext4Executor`'s serial queue. This is a correctness requirement, not a
+tuning knob, and the boundary is easy to leak across by accident: attribute
+translation looks like pure data-shuffling, but resolving `parentID` reads the
+directory's `..` entry, so it is a core call too. Doing it just outside the
+executor block was enough to let two kernel threads into lwext4 at once, which
+double-freed a block-cache buffer and hung the volume. `Ext4Volume.populate`
+now documents that it must run on the executor.
+
+`volumeStatistics` is the single deliberate exception. FSKit declares it
+synchronous, so there is nowhere to await, and blocking a kernel thread on the
+executor would deadlock whenever the executor was busy. It is safe only because
+`ext4_mount_point_stats` reads fields out of the in-memory superblock and
+touches neither the cache nor the device.
+
+Serialisation is not the same as liveness. FSKit delivers operations after the
+volume has been closed — `synchronize` reliably arrives after `unmount` — so
+the core handle has to be fallible rather than force-unwrapped.
 
 ### The feature gate
 

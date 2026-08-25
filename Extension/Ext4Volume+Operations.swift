@@ -34,11 +34,17 @@ extension Ext4Volume: FSVolume.Operations {
         isReadOnly ? .readOnly : []
     }
 
+    /// The one core call that does not go through the executor.
+    ///
+    /// FSKit declares this as a synchronous property, so there is nowhere to
+    /// await; blocking a kernel thread on the executor here would deadlock any
+    /// time the executor is busy. It is safe because `ext4_mount_point_stats`
+    /// only reads fields out of the in-memory superblock -- no block cache, no
+    /// I/O. The worst outcome is a free-block count one transaction stale.
     var volumeStatistics: FSStatFSResult {
         let result = FSStatFSResult(fileSystemTypeName: "ext\(probe.generation)")
         var stats = ext4b_statfs_info()
-        guard bridge.device != nil,
-              ext4b_statfs(device, &stats) == 0 else {
+        guard let dev = deviceIfOpen, ext4b_statfs(dev, &stats) == 0 else {
             return result
         }
         result.blockSize = Int(stats.block_size)
@@ -81,7 +87,7 @@ extension Ext4Volume: FSVolume.Operations {
         // unloadResource for umount(8), so this is the last chance to stop the
         // journal and write back the superblock.
         try? await executor.run { [self] in
-            _ = ext4b_sync(device)
+            _ = ext4b_sync(try device)
         }
         await fileSystem?.closeVolume()
     }
@@ -89,7 +95,11 @@ extension Ext4Volume: FSVolume.Operations {
     func synchronize(flags: FSSyncFlags) async throws {
         guard !isReadOnly else { return }
         try await executor.run { [self] in
-            try Ext4Error.check(ext4b_sync(device), "sync")
+            // FSKit issues this after unmount() has already closed the volume.
+            // Everything was flushed on the way out, so there is nothing left
+            // to do and nothing to report.
+            guard let dev = deviceIfOpen else { return }
+            try Ext4Error.check(ext4b_sync(dev), "sync")
         }
     }
 
@@ -98,12 +108,15 @@ extension Ext4Volume: FSVolume.Operations {
     func attributes(_ desired: FSItem.GetAttributesRequest,
                     of item: FSItem) async throws -> FSItem.Attributes {
         guard let ext4Item = item as? Ext4Item else { throw Ext4Error.invalid }
-        let attrs = try await executor.run { [self] in
-            try fetchAttributes(inode: ext4Item.inode)
+        let wanted = desired.wantedAttributes
+        // populate() is a core call too -- it reads ".." to answer parentID --
+        // so it belongs inside the executor block, not after it.
+        return try await executor.run { [self] in
+            let attrs = try fetchAttributes(inode: ext4Item.inode)
+            let out = FSItem.Attributes()
+            populate(out, from: attrs, requested: wanted)
+            return out
         }
-        let out = FSItem.Attributes()
-        populate(out, from: attrs, requested: desired.wantedAttributes)
-        return out
     }
 
     func setAttributes(_ request: FSItem.SetAttributesRequest,
@@ -132,7 +145,7 @@ extension Ext4Volume: FSVolume.Operations {
             try await executor.run { [self] in
                 var a = finalAttrs
                 try Ext4Error.check(
-                    ext4b_setattr(device, ext4Item.inode,
+                    ext4b_setattr(try device, ext4Item.inode,
                                   ext4b_setattr_mask(rawValue: finalMask), &a),
                     "setattr(\(ext4Item.inode))")
             }
@@ -154,8 +167,8 @@ extension Ext4Volume: FSVolume.Operations {
         let inode = try await executor.run { [self] in
             var found: UInt32 = 0
             var type = EXT4B_TYPE_UNKNOWN
-            let rc = nameData.withUnsafeBytes { raw -> Int32 in
-                ext4b_lookup(device, dir.inode,
+            let rc = try nameData.withUnsafeBytes { raw -> Int32 in
+                ext4b_lookup(try device, dir.inode,
                              raw.baseAddress!.assumingMemoryBound(to: CChar.self),
                              raw.count, &found, &type)
             }
@@ -179,9 +192,10 @@ extension Ext4Volume: FSVolume.Operations {
             // passed through the C callback via an unmanaged context pointer.
             var state = PackState(packer: packer,
                                   volume: self,
-                                  wanted: attributes?.wantedAttributes)
-            let rc = withUnsafeMutablePointer(to: &state) { statePtr -> Int32 in
-                ext4b_readdir(device, dir.inode,
+                                  wanted: attributes?.wantedAttributes,
+                                  parent: dir.inode)
+            let rc = try withUnsafeMutablePointer(to: &state) { statePtr -> Int32 in
+                ext4b_readdir(try device, dir.inode,
                               UInt64(cookie.rawValue), packEntry, statePtr)
             }
             if let error = state.thrown { throw error }
@@ -202,7 +216,7 @@ extension Ext4Volume: FSVolume.Operations {
         let target = try await executor.run { [self] in
             var buffer = [CChar](repeating: 0, count: 4096)
             var length = 0
-            let rc = ext4b_readlink(device, ext4Item.inode,
+            let rc = ext4b_readlink(try device, ext4Item.inode,
                                     &buffer, buffer.count, &length)
             try Ext4Error.check(rc, "readlink(\(ext4Item.inode))")
             return String(cString: buffer)
@@ -234,8 +248,8 @@ extension Ext4Volume: FSVolume.Operations {
 
         let inode = try await executor.run { [self] in
             var created: UInt32 = 0
-            let rc = nameData.withUnsafeBytes { raw -> Int32 in
-                ext4b_create(device, dir.inode,
+            let rc = try nameData.withUnsafeBytes { raw -> Int32 in
+                ext4b_create(try device, dir.inode,
                              raw.baseAddress!.assumingMemoryBound(to: CChar.self),
                              raw.count, coreType, mode, uid, gid, &created)
             }
@@ -264,10 +278,11 @@ extension Ext4Volume: FSVolume.Operations {
             requested: attributes, isDirectory: false)
 
         let inode = try await executor.run { [self] in
+            let dev = try device
             var created: UInt32 = 0
             let rc = nameData.withUnsafeBytes { n -> Int32 in
                 targetData.withUnsafeBytes { t -> Int32 in
-                    ext4b_symlink(device, dir.inode,
+                    ext4b_symlink(dev, dir.inode,
                                   n.baseAddress!.assumingMemoryBound(to: CChar.self), n.count,
                                   t.baseAddress!.assumingMemoryBound(to: CChar.self), t.count,
                                   uid, gid, &created)
@@ -292,8 +307,8 @@ extension Ext4Volume: FSVolume.Operations {
 
         let nameData = try Self.nameBytes(name)
         try await executor.run { [self] in
-            let rc = nameData.withUnsafeBytes { raw -> Int32 in
-                ext4b_hardlink(device, dir.inode,
+            let rc = try nameData.withUnsafeBytes { raw -> Int32 in
+                ext4b_hardlink(try device, dir.inode,
                                raw.baseAddress!.assumingMemoryBound(to: CChar.self),
                                raw.count, target.inode)
             }
@@ -314,8 +329,8 @@ extension Ext4Volume: FSVolume.Operations {
 
         let nameData = try Self.nameBytes(name)
         try await executor.run { [self] in
-            let rc = nameData.withUnsafeBytes { raw -> Int32 in
-                ext4b_unlink(device, dir.inode,
+            let rc = try nameData.withUnsafeBytes { raw -> Int32 in
+                ext4b_unlink(try device, dir.inode,
                              raw.baseAddress!.assumingMemoryBound(to: CChar.self),
                              raw.count)
             }
@@ -340,9 +355,10 @@ extension Ext4Volume: FSVolume.Operations {
         let dstData = try Self.nameBytes(destinationName)
 
         try await executor.run { [self] in
+            let dev = try device
             let rc = srcData.withUnsafeBytes { s -> Int32 in
                 dstData.withUnsafeBytes { d -> Int32 in
-                    ext4b_rename(device,
+                    ext4b_rename(dev,
                                  src.inode, s.baseAddress!.assumingMemoryBound(to: CChar.self), s.count,
                                  dst.inode, d.baseAddress!.assumingMemoryBound(to: CChar.self), d.count)
                 }
@@ -360,7 +376,9 @@ extension Ext4Volume: FSVolume.Operations {
     // MARK: - Helpers
 
     func requireWritable() throws {
-        guard !isReadOnly, ext4b_is_writable(device) else { throw Ext4Error.readOnly }
+        guard !isReadOnly, ext4b_is_writable(try device) else {
+            throw Ext4Error.readOnly
+        }
     }
 
     /// ext4 names are raw byte strings, not Unicode. Take the bytes FSKit gives
@@ -385,6 +403,8 @@ private struct PackState {
     let packer: FSDirectoryEntryPacker
     unowned let volume: Ext4Volume
     let wanted: FSItem.Attribute?
+    /// The directory being enumerated: every entry's parent, known for free.
+    let parent: UInt32
     var thrown: Error?
 }
 
@@ -410,7 +430,8 @@ private let packEntry: @convention(c) (UnsafeMutableRawPointer?,
     if let wanted = state.pointee.wanted {
         if let a = try? state.pointee.volume.fetchAttributes(inode: inode) {
             let out = FSItem.Attributes()
-            state.pointee.volume.populate(out, from: a, requested: wanted)
+            state.pointee.volume.populate(out, from: a, requested: wanted,
+                                          parentHint: state.pointee.parent)
             attributes = out
         }
     }

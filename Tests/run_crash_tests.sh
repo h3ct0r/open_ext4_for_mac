@@ -128,6 +128,10 @@ note ""
 note "checking each recovered volume"
 note ""
 
+# Each image is a full copy of a 256 MB fixture, so 256 cut points is 64 GB.
+# Delete the ones that passed as they are checked -- an image that recovered
+# has nothing left to tell us, and leaving them behind fills the disk.
+KEPT=0
 for dir in "$WORK"/*/; do
   label=$(basename "$dir")
   [ "$label" = "count.img" ] && continue
@@ -136,8 +140,10 @@ for dir in "$WORK"/*/; do
     [ -f "$img" ] || continue
     if e2fsck -fn "$img" >/dev/null 2>&1; then
       ok
+      rm -f "$img"
     else
       local_fail=$((local_fail+1))
+      KEPT=$((KEPT+1))
       if [ "$local_fail" -le 3 ]; then
         bad "$label $(basename "$img" .img): $(e2fsck -fn "$img" 2>&1 | grep -m1 -vE '^e2fsck|^Pass|^$' | cut -c1-70)"
       fi
@@ -150,9 +156,14 @@ for dir in "$WORK"/*/; do
   fi
 done
 
+rm -f "$WORK/count.img"
+
 note ""
 note "─────────────────────────────────"
 note "cut points: $CUTS   recovered: $PASS   unrecovered: $FAIL   mounts refused: $refused"
+if [ "$KEPT" -gt 0 ]; then
+  note "kept $KEPT unrecovered image(s) under $WORK for inspection"
+fi
 note "report: $REPORT"
 
 [ "$FAIL" -eq 0 ] && [ "$refused" -eq 0 ] || exit 1

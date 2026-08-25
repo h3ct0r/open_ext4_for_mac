@@ -33,4 +33,6 @@ enum Ext4Error {
     static var notDirectory: Error { posix(ENOTDIR) }
     static var invalid: Error { posix(EINVAL) }
     static var ioError: Error { posix(EIO) }
+    /// The volume has been closed and the core handle is gone.
+    static var gone: Error { posix(ENXIO) }
 }

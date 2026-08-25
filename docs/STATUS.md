@@ -6,7 +6,7 @@
 | 1 — read-only ext2/3/4 | **complete; 41 tests green** |
 | 2 — kernel-offloaded I/O | **disabled** — see below |
 | 3 — write path | **complete and working on real mounts** |
-| 4 — correctness harness | **complete: image, crash-consistency, and differential-vs-Linux** |
+| 4 — correctness harness | **complete: image, crash-consistency, differential-vs-Linux, and mounted-driver** |
 | 5 — polish & distribution | not started |
 
 ## What works today
@@ -82,11 +82,13 @@ see `docs/SIGNING.md`). Building and testing the core needs none of that.
 
 - **No explicit write barrier.** `metadataRead` fails with EIO both during
   probe *and* after load, so the metadata-cache family — and with it
-  `metadataFlush` — is unusable here. Direct device I/O is what runs. Ordering
-  therefore rests on `FSBlockDeviceResource.write` reaching the medium in issue
-  order, which is likely but undocumented. **The crash-consistency suite has
-  not been run against this path**, so crash safety is proven for the offline
-  core only, not for the mounted driver.
+  `metadataFlush` — is unusable here. Direct device I/O is what runs, so
+  ordering rests on `FSBlockDeviceResource.write` reaching the medium in issue
+  order, which FSKit does not document.
+
+  That assumption is now tested rather than asserted: see *Crash safety on the
+  mounted path* below. It holds in every case measured, but it is an
+  observation about this macOS version, not a guarantee.
 
 - **Mount options do not reach the module.** FSKit's `mount(options:)` states
   "there are no defined options currently", and `taskOptions` arrives empty for
@@ -119,10 +121,13 @@ directions, sparse regions, chmod/chown/times, and xattr set/remove.
 Each operation is a single JBD2 transaction that either commits or aborts
 leaving the volume untouched.
 
-**Writes are opt-in.** Mounts are read-only unless `-o rw` is passed. The
-image-level suite is green, but the write path has not been through
-crash-consistency testing, and defaulting to writable on somebody's only copy
-of a disk is not defensible until it has.
+**Writes are not opt-in, because they cannot be.** The intent was to mount
+read-only unless the user passed `-o rw`. FSKit gives the module no way to see
+that: `taskOptions` arrives empty for `-o rw`, `-o ro` and `-r` alike, and the
+header states there are no defined mount options. A volume therefore mounts
+read-write whenever the probe rates it safe, and read-only otherwise —
+unsupported features, a dirty journal, or a `metadata_csum_seed` that no longer
+matches the UUID all force read-only.
 
 ### How it is tested
 
@@ -137,8 +142,9 @@ how two genuine lwext4 defects were found; see `patches/lwext4/README.md`.
 ## Validation
 
 ```bash
-make validate        # all four stages, unattended
-make validate-asan   # the same under AddressSanitizer + UBSan
+make validate           # all five stages, unattended
+make validate-asan      # the same under AddressSanitizer + UBSan
+make test-mount-crash   # stage 5 on its own
 ```
 
 | Stage | What it proves |
@@ -147,17 +153,79 @@ make validate-asan   # the same under AddressSanitizer + UBSan
 | write suite | 82 assertions, `e2fsck` after **every** mutating operation |
 | crash consistency | 256 cut points across 12 operations; the write stream is severed at every point, the **real Linux kernel** replays the journal, and `e2fsck` must be clean |
 | differential vs Linux | 28 assertions; volumes round-trip between our driver and the real Linux ext4 driver in both directions, with the kernel log required to be silent |
+| mounted driver | 15 assertions against a **real mount** — the only stage that goes through FSKit |
 
-Stages 3 and 4 use Docker, which on Apple Silicon is a real Linux VM — so the
+Stages 3–5 use Docker, which on Apple Silicon is a real Linux VM — so the
 oracle is the actual ext4 implementation, not another copy of our assumptions.
-They skip with a warning if Docker is not running.
+They skip with a warning if Docker is not running; stage 5 also skips if the
+signed extension is not installed and enabled.
 
 The power-failure model matters: after the cut point, writes are **silently
 discarded while still reporting success**. A real power loss does not hand the
 filesystem an errno it can react to. Returning `EIO` would exercise error
 handling instead, which is a far easier test to pass.
 
+## Crash safety on the mounted path
+
+Stages 1–4 all drive the core through a plain file. They say nothing about
+`FSBlockDeviceResource`, which is what a real mount uses. Stage 5 closes that.
+
+The cut is made by stopping the **extension process** with `SIGSTOP`. Every
+thread freezes where it stands, so whatever has reached the medium at that
+instant is exactly what a power failure would have left — no cooperation from
+the driver, no errno it could have reacted to. The device is then imaged, the
+driver resumed, and the image handed to the Linux kernel to replay.
+
+| What it checks | Why |
+|---|---|
+| concurrent readers and writers finish, and the extension goes idle afterwards | FSKit issues volume operations in parallel; every core entry must be serialised or lwext4's block cache corrupts and the volume wedges |
+| seven metadata operations survive a cut taken the instant they return | recovering to *some* consistent state is not enough — a driver that discarded everything would also pass |
+| every snapshot taken under load recovers clean | the actual crash-consistency claim |
+| no snapshot falsely reports filesystem errors | a volume that recovers but reports itself damaged sends the user to a repair tool they do not need |
+| the extension produced no crash report | FSKit relaunches a dead extension and the volume keeps working, so a driver that traps on every unmount otherwise looks perfectly green |
+
+In the last five consecutive runs every snapshot caught the volume
+mid-transaction — 24 of 24 needing journal replay each time — and every one
+recovered clean with no repairs.
+
+Only file *data* is exempt from the durability check. It travels through the
+unified buffer cache, which is entitled to hold it; metadata operations are
+synchronous by VFS design and are held to the stricter standard.
+
+### What this suite found
+
+Four defects, none of which the offline stages could see:
+
+- **Core entry outside the executor.** `getAttributes` resolved `parentID` by
+  reading the directory's `..` entry *after* leaving the serial executor, so two
+  kernel threads could enter lwext4 at once. One freed a block-cache buffer the
+  other had already released, tripping `ext4_assert(buf->refctr)` — which spun.
+  The volume wedged at 200% CPU and `umount` hung in uninterruptible wait, and
+  only `kill -9` on the extension cleared it. During enumeration the parent is
+  known for free, so it is now passed in and the `..` lookup skipped entirely.
+- **`ext4_assert` spun forever** rather than failing (`patches/lwext4/0007`).
+  This is what turned each of the two bugs above and below from a failed
+  syscall into a lost volume.
+- **Block 0 was accepted as a real block** rather than treated as ext4's hole
+  marker (`patches/lwext4/0008`), so a lookup in a directory with a hole cached
+  a buffer with `lb_id == 0` and then tripped `ext4_assert(b->lb_id)`.
+- **A nil dereference on every unmount.** `synchronize` arrives *after*
+  `unmount` has closed the volume, and the `device` accessor force-unwrapped.
+  Every stage passed while the extension trapped and was relaunched each time —
+  the data was already safely on disk, so nothing failed. The only evidence was
+  a crash report per run, which is why the suite now checks for those. The
+  accessor is fallible now, and a sync of a closed volume is a no-op.
+
+Stage 0 exists for the first of these and runs first: reverting the fix makes
+it fail in 120 seconds with the extension at 195% CPU.
+
+The pattern worth noting is that three of the four were invisible in the test
+results. Two hung instead of failing, and one crashed a process the system
+silently restarts. A suite that only checks whether the filesystem is correct
+afterwards would have called all of them green.
+
 ## Not yet done
+- Auto-mount in Finder without an explicit `mount -F -t ext4`
 - Kernel-offloaded I/O for writes (reads already use it)
 - `startCheck` / `startFormat` for Disk Utility integration
 - Notarised DMG

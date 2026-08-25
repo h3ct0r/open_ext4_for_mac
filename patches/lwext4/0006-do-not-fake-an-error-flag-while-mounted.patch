@@ -1,0 +1,34 @@
+diff --git a/src/ext4_fs.c b/src/ext4_fs.c
+index c7a99e7..88d5fbd 100644
+--- a/src/ext4_fs.c
++++ b/src/ext4_fs.c
+@@ -110,8 +110,14 @@ int ext4_fs_init(struct ext4_fs *fs, struct ext4_blockdev *bdev,
+ 
+ 
+ 	if (!fs->read_only) {
+-		/* Mark system as mounted */
+-		ext4_set16(&fs->sb, state, EXT4_SUPERBLOCK_STATE_ERROR_FS);
++		/* Mark the volume as mounted by clearing VALID_FS, the way Linux
++		 * does. Setting ERROR_FS here instead -- as this code used to --
++		 * makes every unclean shutdown indistinguishable from detected
++		 * corruption: the volume comes back reading "not clean with
++		 * errors" even though nothing ever went wrong. Any genuine error
++		 * flag already on the volume is preserved. */
++		ext4_set16(&fs->sb, state,
++			   tmp & ~(uint16_t)EXT4_SUPERBLOCK_STATE_VALID_FS);
+ 		r = ext4_sb_write(fs->bdev, &fs->sb);
+ 		if (r != EOK)
+ 			return r;
+@@ -128,7 +134,11 @@ int ext4_fs_fini(struct ext4_fs *fs)
+ 	ext4_assert(fs);
+ 
+ 	/*Set superblock state*/
+-	ext4_set16(&fs->sb, state, EXT4_SUPERBLOCK_STATE_VALID_FS);
++	/* OR the flag in rather than assigning it: a volume that really does
++	 * have errors recorded must keep saying so until e2fsck clears it. */
++	ext4_set16(&fs->sb, state,
++		   ext4_get16(&fs->sb, state) |
++		       EXT4_SUPERBLOCK_STATE_VALID_FS);
+ 
+ 	if (!fs->read_only)
+ 		return ext4_sb_write(fs->bdev, &fs->sb);
