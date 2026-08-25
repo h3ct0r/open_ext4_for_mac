@@ -22,10 +22,33 @@ import Ext4Core
 /// family, which is backed by a kernel-managed cache and gives us
 /// `metadataFlush` as an explicit write barrier for journal ordering.
 ///
-/// Bulk file data does *not* pass through here. That is mapped into extents and
-/// transferred by the kernel itself (see `Ext4Volume+KernelIO`).
+/// File data currently passes through here too, via
+/// `FSVolume.ReadWriteOperations`. Kernel-offloaded I/O is disabled until the
+/// write blockmap is implemented; see the note in the Makefile.
 final class BlockDeviceBridge {
 
+    /// Which FSKit I/O family to use.
+    ///
+    /// `.metadataCache` is the family the design wants: kernel-cached, with
+    /// `metadataFlush` as an explicit write barrier for journal ordering. It
+    /// does not work here. `metadataRead` fails with EIO both during
+    /// `probeResource` *and* after the resource is loaded, so every mount that
+    /// tries it dies with "Loading resource: Input/output error". Whatever
+    /// additional setup FSKit wants for that family, we have not found it.
+    ///
+    /// `.direct` is therefore what actually runs. The consequence is that
+    /// there is no explicit barrier: durability and ordering rest on
+    /// `FSBlockDeviceResource.write` reaching the medium in issue order.
+    /// That is very likely true -- it is a synchronous call against the device
+    /// -- but it is an assumption, not something FSKit documents, and the
+    /// crash-consistency suite has not been run against this path. Revisit
+    /// before claiming crash safety for the mounted driver.
+    enum Mode {
+        case direct
+        case metadataCache
+    }
+
+    let mode: Mode
     let resource: FSBlockDeviceResource
     private(set) var device: OpaquePointer?
 
@@ -33,8 +56,9 @@ final class BlockDeviceBridge {
     let blockCount: UInt64
     let isWritable: Bool
 
-    init?(resource: FSBlockDeviceResource, forceReadOnly: Bool) {
+    init?(resource: FSBlockDeviceResource, forceReadOnly: Bool, mode: Mode = .direct) {
         self.resource = resource
+        self.mode = mode
         // Never trust a zero or non-power-of-two block size from the device.
         let bs = UInt32(truncatingIfNeeded: resource.blockSize)
         guard bs >= 512, bs.nonzeroBitCount == 1 else {
@@ -92,15 +116,11 @@ final class BlockDeviceBridge {
         do {
             if w.shift == 0 && w.length == count {
                 let dst = UnsafeMutableRawBufferPointer(start: buffer, count: count)
-                _ = try resource.read(into: dst,
-                                      startingAt: off_t(offset),
-                                      length: count)
+                try readRaw(into: dst, at: off_t(offset), length: count)
             } else {
                 var scratch = [UInt8](repeating: 0, count: w.length)
                 try scratch.withUnsafeMutableBytes { raw in
-                    _ = try resource.read(into: raw,
-                                          startingAt: off_t(w.start),
-                                          length: w.length)
+                    try readRaw(into: raw, at: off_t(w.start), length: w.length)
                 }
                 scratch.withUnsafeBytes { raw in
                     buffer.copyMemory(from: raw.baseAddress! + w.shift, byteCount: count)
@@ -120,26 +140,20 @@ final class BlockDeviceBridge {
         do {
             if w.shift == 0 && w.length == count {
                 let src = UnsafeRawBufferPointer(start: buffer, count: count)
-                _ = try resource.write(from: src,
-                                       startingAt: off_t(offset),
-                                       length: count)
+                try writeRaw(from: src, at: off_t(offset), length: count)
             } else {
                 // Partial block: read the surrounding blocks, patch in the
                 // caller's bytes, write the whole window back. Skipping the
                 // read would zero the bytes either side of the update.
                 var scratch = [UInt8](repeating: 0, count: w.length)
                 try scratch.withUnsafeMutableBytes { raw in
-                    _ = try resource.read(into: raw,
-                                          startingAt: off_t(w.start),
-                                          length: w.length)
+                    try readRaw(into: raw, at: off_t(w.start), length: w.length)
                 }
                 scratch.withUnsafeMutableBytes { raw in
                     (raw.baseAddress! + w.shift).copyMemory(from: buffer, byteCount: count)
                 }
                 try scratch.withUnsafeBytes { raw in
-                    _ = try resource.write(from: raw,
-                                           startingAt: off_t(w.start),
-                                           length: w.length)
+                    try writeRaw(from: raw, at: off_t(w.start), length: w.length)
                 }
             }
             return 0
@@ -151,12 +165,37 @@ final class BlockDeviceBridge {
 
     fileprivate func flush() -> Int32 {
         guard isWritable else { return 0 }
+        // Direct writes have already been handed to the device; there is no
+        // cache to drain and metadataFlush would fail.
+        guard mode == .metadataCache else { return 0 }
         do {
             try resource.metadataFlush()
             return 0
         } catch {
             Ext4Log.io.error("metadata flush failed: \(error.localizedDescription, privacy: .public)")
             return EIO
+        }
+    }
+
+    // MARK: - The two I/O families
+
+    private func readRaw(into buf: UnsafeMutableRawBufferPointer,
+                         at offset: off_t, length: Int) throws {
+        switch mode {
+        case .direct:        _ = try resource.read(into: buf, startingAt: offset, length: length)
+        case .metadataCache: try resource.metadataRead(into: buf, startingAt: offset, length: length)
+        }
+    }
+
+    private func writeRaw(from buf: UnsafeRawBufferPointer,
+                          at offset: off_t, length: Int) throws {
+        switch mode {
+        case .direct:
+            _ = try resource.write(from: buf, startingAt: offset, length: length)
+        case .metadataCache:
+            // Delayed so the kernel can coalesce; ordering is imposed by
+            // flush() at journal commit points.
+            try resource.delayedMetadataWrite(from: buf, startingAt: offset, length: length)
         }
     }
 }

@@ -4,8 +4,8 @@
 |---|---|
 | 0 — pipeline & packaging | **complete — signed, installed, loads** |
 | 1 — read-only ext2/3/4 | **complete; 41 tests green** |
-| 2 — kernel-offloaded I/O | implemented (read path) |
-| 3 — write path | **complete; 82 tests green, opt-in via `-o rw`** |
+| 2 — kernel-offloaded I/O | **disabled** — see below |
+| 3 — write path | **complete and working on real mounts** |
 | 4 — correctness harness | **complete: image, crash-consistency, and differential-vs-Linux** |
 | 5 — polish & distribution | not started |
 
@@ -32,6 +32,26 @@ against `debugfs`, and every fixture is checked with `e2fsck`.
 `FSVolume.XattrOperations` — plus Info.plist, entitlements and bundle layout
 matching what shipping FSKit modules use.
 
+## It reads and writes
+
+A volume written entirely from macOS through the driver, then read back by the
+real Linux kernel:
+
+```
+content : created on macOS
+symlink : /docs/nested/mac.txt
+hardlink: shares inode
+xattr   : macos
+payload : 2d52119dcb45412e...   (sha256 matches byte-for-byte)
+kernel complaints: 0
+```
+
+`e2fsck` reports the volume clean afterwards with no journal replay required.
+
+Working through a real mount: nested `mkdir`, file create and write, multi-MB
+files, `cp`, symlinks, hard links, rename, `rm`, `rmdir`, extended attributes,
+and a clean unmount that closes the journal and writes back the superblock.
+
 ## It mounts
 
 ```
@@ -49,6 +69,30 @@ clean after a mount/unmount cycle.
 Loading requires a **Developer ID certificate and a provisioning profile**
 carrying `com.apple.developer.fskit.fsmodule` (a paid Apple Developer account;
 see `docs/SIGNING.md`). Building and testing the core needs none of that.
+
+### Known gaps on the mounted path
+
+- **Kernel-offloaded I/O is off.** Conforming to
+  `FSVolumeKernelOffloadedIOOperations` makes FSKit route writes through
+  `blockmapFile` even for files reporting `inhibitKernelOffloadedIO`, and a
+  write blockmap must allocate blocks and journal the extent-tree change before
+  returning, with no way to undo it if the kernel then fails the I/O. All I/O
+  currently goes through `FSVolume.ReadWriteOperations`. The code is kept as
+  `Ext4Volume+KernelIO.swift.disabled`.
+
+- **No explicit write barrier.** `metadataRead` fails with EIO both during
+  probe *and* after load, so the metadata-cache family — and with it
+  `metadataFlush` — is unusable here. Direct device I/O is what runs. Ordering
+  therefore rests on `FSBlockDeviceResource.write` reaching the medium in issue
+  order, which is likely but undocumented. **The crash-consistency suite has
+  not been run against this path**, so crash safety is proven for the offline
+  core only, not for the mounted driver.
+
+- **Mount options do not reach the module.** FSKit's `mount(options:)` states
+  "there are no defined options currently", and `taskOptions` arrives empty for
+  `-o rw`, `-o ro` and `-r` alike. The volume therefore mounts read-write when
+  the probe says that is safe and read-only otherwise; a user-supplied
+  preference is not expressible.
 
 ### Getting from "signed" to "mounts"
 

@@ -25,7 +25,7 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             return .notRecognized
         }
 
-        guard let bridge = BlockDeviceBridge(resource: device, forceReadOnly: true),
+        guard let bridge = BlockDeviceBridge(resource: device, forceReadOnly: true, mode: .direct),
               let dev = bridge.device else {
             return .notRecognized
         }
@@ -64,25 +64,22 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         }
 
         //
-        // Mount mode. FSUnaryFileSystem defines -f (force) and --rdonly;
-        // anything else arrives via -o.
+        // Mount mode.
         //
-        // Read-only is the default *even when the caller did not ask for it*.
-        // The write path passes its image-level suite (every operation checked
-        // with e2fsck, cross-checked against debugfs), but it has not yet been
-        // through crash-consistency testing, so enabling it silently on
-        // somebody's only copy of a disk is not a defensible default. Opt in
-        // explicitly with `-o rw`.
+        // FSKit gives the module no way to receive user mount options: the
+        // header for mount(options:) states "there are no defined options
+        // currently", and taskOptions arrives empty for -o rw, -o ro and -r
+        // alike. An opt-in flag is therefore not expressible, so the volume
+        // mounts read-write whenever that is safe and read-only when it is not
+        // -- the same contract every other filesystem offers.
         //
-        let opts = options.taskOptions
-        let requestedReadOnly = opts.contains("--rdonly")
-        let requestedWrite = opts.contains { $0 == "rw" || $0.hasSuffix(",rw") || $0.hasPrefix("rw,") }
-        let readOnly = requestedReadOnly || !requestedWrite
-
-        if readOnly && !requestedReadOnly {
-            Ext4Log.info("mounting read-only; pass -o rw to enable writes "
-                         + "(write support has not completed crash-consistency testing)")
-        }
+        // "Safe" is decided by the probe, not by optimism. A volume is refused
+        // write access when the media is read-only, when it uses features we
+        // do not implement, or when its checksum seed no longer matches its
+        // UUID. A dirty journal is replayed before the volume is written.
+        //
+        let mediaWritable = device.isWritable
+        let readOnly = !mediaWritable
 
         guard let bridge = BlockDeviceBridge(resource: device, forceReadOnly: readOnly),
               let dev = bridge.device else {
@@ -91,6 +88,10 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
 
         var info = ext4b_probe_info()
         try Ext4Error.check(ext4b_probe(dev, &info), "probe")
+
+        // A volume the probe only rates usable-but-limited must never be
+        // written, whatever the media allows.
+        let effectiveReadOnly = readOnly || info.verdict == EXT4B_PROBE_READ_ONLY
 
         guard info.verdict == EXT4B_PROBE_USABLE || info.verdict == EXT4B_PROBE_READ_ONLY else {
             bridge.close()
@@ -101,13 +102,13 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         try executor.runSync {
             // ext4b_mount replays the journal and attaches it for read-write
             // mounts; it fails rather than proceeding if either step fails.
-            try Ext4Error.check(ext4b_mount(dev, readOnly), "mount")
+            try Ext4Error.check(ext4b_mount(dev, effectiveReadOnly), "mount")
         }
 
         let volume = Ext4Volume(bridge: bridge,
                                 executor: executor,
                                 probe: info,
-                                readOnly: readOnly,
+                                readOnly: effectiveReadOnly,
                                 identity: IdentityMapper())
         volume.fileSystem = self
         self.bridge = bridge
@@ -119,19 +120,40 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         // available"; activate() moves it on to Active.
         containerStatus = FSContainerStatus.ready
 
-        Ext4Log.info("mounted ext\(info.generation) volume \(readOnly ? "read-only" : "read-write"), "
+        Ext4Log.info("mounted ext\(info.generation) volume \(effectiveReadOnly ? "read-only" : "read-write"), "
                      + "\(info.block_count) blocks of \(info.block_size)B")
         return volume
     }
 
-    func unloadResource(resource: FSResource, options: FSTaskOptions) async throws {
+    /// Cleanly close the volume: stop the journal (which clears the
+    /// needs-recovery flag and writes the final superblock), unmount, flush.
+    ///
+    /// This has to be driven from the volume's `unmount`/`deactivate`, not from
+    /// `unloadResource`: FSKit does not call `unloadResource` on umount(8) at
+    /// all, so doing it there left every volume with an unreplayed journal and
+    /// stale free counts, needing recovery on the next mount.
+    ///
+    /// Idempotent -- whichever callback arrives first does the work.
+    ///
+    /// Async on purpose. A synchronous version deadlocks: the callers are async
+    /// and resume on the executor's own queue after awaiting it, so a
+    /// `queue.sync` from there blocks the queue against itself.
+    func closeVolume() async {
         guard let bridge, let dev = bridge.device else { return }
-        executor.runSync {
-            _ = ext4b_unmount(dev)
+        // Carried across the concurrency boundary as an integer: OpaquePointer
+        // is not Sendable, and the executor guarantees serial access anyway.
+        let handle = UInt(bitPattern: dev)
+        try? await executor.run {
+            _ = ext4b_unmount(OpaquePointer(bitPattern: handle))
         }
         bridge.close()
         self.bridge = nil
         self.volume = nil
+        Ext4Log.info("volume closed")
+    }
+
+    func unloadResource(resource: FSResource, options: FSTaskOptions) async throws {
+        await closeVolume()
         containerStatus = FSContainerStatus.notReady(status: Ext4Error.posix(ENODEV) as NSError)
         Ext4Log.info("unloaded resource")
     }

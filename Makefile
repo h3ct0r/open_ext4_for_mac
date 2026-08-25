@@ -151,6 +151,14 @@ APP_NAME   := Ext4Mac
 EXT_NAME   := Ext4FS
 BUNDLE_ID  := dev.h3ct0r.ext4mac
 APPEX      := $(BUILD)/$(APP_NAME).app/Contents/Extensions/$(EXT_NAME).appex
+# Ext4Volume+KernelIO.swift is deliberately excluded (kept as .disabled).
+#
+# Conforming to FSVolumeKernelOffloadedIOOperations makes FSKit route I/O
+# through blockmapFile even for files reporting inhibitKernelOffloadedIO, and a
+# write blockmap has to allocate blocks and journal the extent-tree change
+# before returning, with no way to undo it if the kernel then fails the I/O.
+# Until that is implemented, all I/O goes through FSVolume.ReadWriteOperations,
+# where allocation stays inside a transaction we control.
 SWIFT_SRCS := $(wildcard Extension/*.swift)
 
 SWIFTFLAGS := -target arm64-apple-macos$(DEPLOY_TARGET) \

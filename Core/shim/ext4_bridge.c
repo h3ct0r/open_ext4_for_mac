@@ -944,6 +944,36 @@ int ext4b_map_extents(ext4b_device *dev,
     return (n > 0) ? EOK : r;
 }
 
+/* ------------------------------------------------------- xattr namespaces -- */
+/*
+ * ext4 stores an attribute as (namespace index, suffix): "user.colour" is
+ * index 1 plus "colour". macOS attribute names carry no such namespace --
+ * Finder and the kernel set names like com.apple.provenance,
+ * com.apple.FinderInfo and com.apple.quarantine directly.
+ *
+ * Names that already carry an ext4 namespace pass through untouched, so a
+ * volume shared with Linux keeps its user and security semantics. Anything
+ * else is filed under the user namespace with its full name preserved, which
+ * is what lets macOS metadata round-trip; on Linux it shows up as
+ * "user.com.apple.provenance".
+ */
+#define EXT4B_XATTR_INDEX_USER 1
+
+static const char *xattr_split(const char *name, uint8_t *index, size_t *len)
+{
+    bool found = false;
+    size_t sub_len = 0;
+    const char *sub =
+        ext4_extract_xattr_name(name, strlen(name), index, &sub_len, &found);
+    if (found) {
+        *len = sub_len;
+        return sub;
+    }
+    *index = EXT4B_XATTR_INDEX_USER;
+    *len = strlen(name);
+    return name;
+}
+
 /* ================================================================ xattr == */
 
 int ext4b_listxattr(ext4b_device *dev, uint32_t inode,
@@ -1014,13 +1044,7 @@ int ext4b_getxattr(ext4b_device *dev, uint32_t inode,
 
     uint8_t name_index = 0;
     size_t  name_len   = 0;
-    bool    found      = false;
-    const char *short_name =
-        ext4_extract_xattr_name(name, strlen(name), &name_index, &name_len, &found);
-    if (!found) {
-        ext4_fs_put_inode_ref(&ref);
-        return ENODATA;
-    }
+    const char *short_name = xattr_split(name, &name_index, &name_len);
 
     r = ext4_xattr_get(&ref, name_index, short_name, name_len,
                        buf, buf_size, out_len);
@@ -1859,6 +1883,7 @@ int ext4b_setattr(ext4b_device *dev,
 
 /* ----------------------------------------------------------- xattr write -- */
 
+
 int ext4b_setxattr(ext4b_device *dev, uint32_t inode,
                    const char *name,
                    const void *value, size_t value_len)
@@ -1869,11 +1894,7 @@ int ext4b_setxattr(ext4b_device *dev, uint32_t inode,
 
     uint8_t name_index = 0;
     size_t  short_len  = 0;
-    bool    found      = false;
-    const char *short_name =
-        ext4_extract_xattr_name(name, strlen(name), &name_index, &short_len, &found);
-    if (!found)
-        return ENOTSUP;
+    const char *short_name = xattr_split(name, &name_index, &short_len);
 
     int r = txn_begin(fs);
     if (r != EOK)
@@ -1900,11 +1921,7 @@ int ext4b_removexattr(ext4b_device *dev, uint32_t inode, const char *name)
 
     uint8_t name_index = 0;
     size_t  short_len  = 0;
-    bool    found      = false;
-    const char *short_name =
-        ext4_extract_xattr_name(name, strlen(name), &name_index, &short_len, &found);
-    if (!found)
-        return ENODATA;
+    const char *short_name = xattr_split(name, &name_index, &short_len);
 
     int r = txn_begin(fs);
     if (r != EOK)

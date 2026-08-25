@@ -24,6 +24,20 @@ final class Ext4Item: FSItem {
     private var cached: ext4b_attrs?
     private let lock = NSLock()
 
+    /// Best known parent directory inode.
+    ///
+    /// FSKit insists on a parentID in every attribute response, but ext4 has no
+    /// back-pointer for non-directories, and a hard-linked inode genuinely has
+    /// several parents. We therefore record the directory an item was reached
+    /// through. Directories are exact -- their ".." entry is authoritative and
+    /// is resolved on demand.
+    private var parentHint: UInt32 = UInt32(EXT4B_ROOT_INO)
+
+    var parent: UInt32 {
+        get { lock.lock(); defer { lock.unlock() }; return parentHint }
+        set { lock.lock(); parentHint = newValue; lock.unlock() }
+    }
+
     init(inode: UInt32) {
         self.inode = inode
         super.init()

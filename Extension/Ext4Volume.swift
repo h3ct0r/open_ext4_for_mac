@@ -123,16 +123,64 @@ final class Ext4Volume: FSVolume {
         if requested.contains(.allocSize) { target.allocSize = a.alloc_size }
         if requested.contains(.fileID)    { target.fileID = FSItem.Identifier(rawValue: UInt64(a.inode))! }
 
+        // FSKit rejects the whole response if any requested attribute is
+        // missing ("Reported attributes are incomplete"), which then stops it
+        // reading inhibitKernelOffloadedIO and sends every write down the
+        // blockmap path. Both of these must always be answered.
+        if requested.contains(.flags) {
+            // BSD flags (UF_HIDDEN, UF_IMMUTABLE, ...). ext4's own inode flags
+            // are a different space and are reported separately; nothing here
+            // maps onto them, so report none set.
+            target.flags = 0
+        }
+        if requested.contains(.parentID) {
+            target.parentID = FSItem.Identifier(rawValue: UInt64(parentInode(of: a)))
+                ?? FSItem.Identifier.parentOfRoot
+        }
+
         if requested.contains(.accessTime) { target.accessTime = timespec(tv_sec: Int(a.atime), tv_nsec: Int(a.atime_ns)) }
         if requested.contains(.modifyTime) { target.modifyTime = timespec(tv_sec: Int(a.mtime), tv_nsec: Int(a.mtime_ns)) }
         if requested.contains(.changeTime) { target.changeTime = timespec(tv_sec: Int(a.ctime), tv_nsec: Int(a.ctime_ns)) }
         if requested.contains(.birthTime)  { target.birthTime  = timespec(tv_sec: Int(a.crtime), tv_nsec: Int(a.crtime_ns)) }
 
-        // ext2/ext3 inodes and inline-data inodes have no extent tree, so the
-        // kernel cannot map them directly; those fall back to read/write.
+        // Which I/O path the kernel uses for this file.
+        //
+        // Kernel-offloaded I/O hands the kernel an extent map and lets it move
+        // the bytes itself. That is only safe for *reads* today: a write
+        // blockmap would have to allocate blocks and journal the extent-tree
+        // changes before returning, and there is no way to roll that back if
+        // the kernel then fails the I/O. Until that is implemented, any file
+        // opened for writing must use the byte-copy path, where allocation
+        // happens inside a transaction we control.
+        //
+        // ext2/ext3 indirect-block and inline-data inodes have no extent tree
+        // at all, so they always take the byte-copy path.
         if requested.contains(.inhibitKernelOffloadedIO) {
-            target.inhibitKernelOffloadedIO = !a.uses_extents || a.inline_data
+            // The volume does not vend kernel-offloaded I/O at all right now,
+            // so every file takes the byte-copy path.
+            target.inhibitKernelOffloadedIO = true
         }
+    }
+
+    /// Resolve an item's parent. A directory's ".." is authoritative; for
+    /// anything else the best available answer is the directory it was reached
+    /// through, since a hard-linked inode has no single parent.
+    private func parentInode(of a: ext4b_attrs) -> UInt32 {
+        if a.inode == UInt32(EXT4B_ROOT_INO) { return UInt32(EXT4B_ROOT_INO) }
+
+        if a.type == EXT4B_TYPE_DIR {
+            var found: UInt32 = 0
+            var type = EXT4B_TYPE_UNKNOWN
+            let rc = "..".withCString { dotdot in
+                ext4b_lookup(device, a.inode, dotdot, 2, &found, &type)
+            }
+            if rc == 0, found != 0 { return found }
+        }
+
+        itemsLock.lock()
+        let hint = liveItems[a.inode]?.parent
+        itemsLock.unlock()
+        return hint ?? UInt32(EXT4B_ROOT_INO)
     }
 
     // MARK: - Capabilities

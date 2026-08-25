@@ -26,6 +26,14 @@ extension Ext4Volume: FSVolume.Operations {
         supportedCapabilities
     }
 
+    /// Ask FSKit to mark the mount read-only when the volume must not be
+    /// written, so the restriction is enforced at the VFS layer rather than
+    /// only by our own operations returning EROFS.
+    @available(macOS 26.4, *)
+    var requestedMountOptions: FSVolume.MountOptions {
+        isReadOnly ? .readOnly : []
+    }
+
     var volumeStatistics: FSStatFSResult {
         let result = FSStatFSResult(fileSystemTypeName: "ext\(probe.generation)")
         var stats = ext4b_statfs_info()
@@ -56,9 +64,8 @@ extension Ext4Volume: FSVolume.Operations {
         Ext4Log.volume.info("deactivating volume")
         // Active -> Ready: still loaded, but no live volume.
         fileSystem?.containerStatus = FSContainerStatus.ready
-        try await executor.run { [self] in
-            _ = ext4b_sync(device)
-        }
+        // Belt and braces: if unmount() did not run, close here instead.
+        await fileSystem?.closeVolume()
         forgetAllItems()
     }
 
@@ -70,9 +77,13 @@ extension Ext4Volume: FSVolume.Operations {
 
     func unmount() async {
         Ext4Log.volume.info("unmount()")
+        // Flush, then close the volume properly. FSKit never calls
+        // unloadResource for umount(8), so this is the last chance to stop the
+        // journal and write back the superblock.
         try? await executor.run { [self] in
             _ = ext4b_sync(device)
         }
+        await fileSystem?.closeVolume()
     }
 
     func synchronize(flags: FSSyncFlags) async throws {
@@ -151,7 +162,9 @@ extension Ext4Volume: FSVolume.Operations {
             try Ext4Error.check(rc)
             return found
         }
-        return (self.item(for: inode), name)
+        let found = self.item(for: inode)
+        found.parent = dir.inode
+        return (found, name)
     }
 
     func enumerateDirectory(_ directory: FSItem,
@@ -231,7 +244,9 @@ extension Ext4Volume: FSVolume.Operations {
         }
 
         dir.invalidate()
-        return (item(for: inode), name)
+        let created = item(for: inode)
+        created.parent = dir.inode
+        return (created, name)
     }
 
     func createSymbolicLink(named name: FSFileName,
@@ -263,7 +278,9 @@ extension Ext4Volume: FSVolume.Operations {
         }
 
         dir.invalidate()
-        return (item(for: inode), name)
+        let link = item(for: inode)
+        link.parent = dir.inode
+        return (link, name)
     }
 
     func createLink(to item: FSItem,
