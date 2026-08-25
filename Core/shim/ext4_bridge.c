@@ -399,12 +399,6 @@ int ext4b_mount(ext4b_device *dev, bool read_only)
         bridge_log(3, info.unsupported);
         return EROFS;
     }
-    if (info.needs_recovery && !read_only) {
-        bridge_log(3, "volume needs journal recovery; refusing read-write "
-                      "mount until ext4b_journal_recover() succeeds");
-        return EROFS;
-    }
-
     if (!read_only && dev->read_only)
         return EROFS;
 
@@ -420,6 +414,44 @@ int ext4b_mount(ext4b_device *dev, bool read_only)
 
     dev->mounted   = true;
     dev->read_only = read_only || dev->read_only;
+
+    if (!dev->read_only) {
+        /*
+         * Replay before touching anything. lwext4 lists RECOVER under
+         * EXT_FINCOM_IGNORED, so ext4_mount() above will happily attach to a
+         * volume with an unreplayed journal and let us write over it.
+         */
+        if (info.needs_recovery) {
+            bridge_log(1, "replaying journal");
+            r = ext4_recover(BRIDGE_MOUNT_POINT);
+            if (r != EOK) {
+                bridge_log(3, "journal recovery failed; refusing read-write mount");
+                ext4_umount(BRIDGE_MOUNT_POINT);
+                ext4_device_unregister(BRIDGE_DEV_NAME);
+                dev->mounted = false;
+                return r;
+            }
+        }
+
+        /*
+         * Attach the journal. Without this fs->jbd_journal stays NULL, every
+         * transaction we open is a silent no-op, and mutations land on the
+         * medium unjournaled -- which a power cut then leaves torn with no way
+         * to recover. Crash-consistency testing is what exposed this.
+         */
+        if (info.has_journal) {
+            r = ext4_journal_start(BRIDGE_MOUNT_POINT);
+            if (r != EOK) {
+                bridge_log(3, "could not start journal; refusing read-write mount");
+                ext4_umount(BRIDGE_MOUNT_POINT);
+                ext4_device_unregister(BRIDGE_DEV_NAME);
+                dev->mounted = false;
+                return r;
+            }
+            dev->journal_running = true;
+        }
+    }
+
     return EOK;
 }
 

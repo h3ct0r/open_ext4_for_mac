@@ -99,16 +99,9 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         }
 
         try executor.runSync {
+            // ext4b_mount replays the journal and attaches it for read-write
+            // mounts; it fails rather than proceeding if either step fails.
             try Ext4Error.check(ext4b_mount(dev, readOnly), "mount")
-
-            // A volume with an unreplayed journal must not be written until it
-            // has been recovered; ext4b_mount refuses the read-write mount
-            // outright, so recovery happens here on the read-only mount and the
-            // caller can retry.
-            if info.needs_recovery && !readOnly {
-                Ext4Log.info("replaying journal")
-                try Ext4Error.check(ext4b_journal_recover(dev), "journal recovery")
-            }
         }
 
         let volume = Ext4Volume(bridge: bridge,

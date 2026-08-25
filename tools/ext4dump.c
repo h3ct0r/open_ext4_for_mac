@@ -20,6 +20,18 @@
 
 typedef struct {
     int fd;
+    /*
+     * Power-failure simulation. After `fail_after` successful writes, every
+     * later write is silently discarded while still reporting success.
+     *
+     * Discarding rather than returning an error is the point: a real power cut
+     * does not hand the filesystem an errno it can react to, it simply stops
+     * persisting. Returning EIO would exercise error handling instead, which is
+     * a different (and much easier) test.
+     */
+    long fail_after;
+    long writes;
+    bool crashed;
 } file_ctx;
 
 static int file_read(void *ctx, void *buf, uint64_t off, size_t len)
@@ -32,6 +44,14 @@ static int file_read(void *ctx, void *buf, uint64_t off, size_t len)
 static int file_write(void *ctx, const void *buf, uint64_t off, size_t len)
 {
     file_ctx *c = ctx;
+
+    if (c->fail_after >= 0 && c->writes >= c->fail_after) {
+        c->crashed = true;
+        c->writes++;
+        return 0;           /* pretend it landed; the bytes are lost */
+    }
+    c->writes++;
+
     ssize_t n = pwrite(c->fd, buf, len, (off_t)off);
     return (n == (ssize_t)len) ? 0 : EIO;
 }
@@ -39,6 +59,8 @@ static int file_write(void *ctx, const void *buf, uint64_t off, size_t len)
 static int file_flush(void *ctx)
 {
     file_ctx *c = ctx;
+    if (c->crashed)
+        return 0;           /* a flush after the cut reaches nothing */
     return fsync(c->fd) == 0 ? 0 : EIO;
 }
 
@@ -271,7 +293,10 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    file_ctx fc = { .fd = fd };
+    file_ctx fc = { .fd = fd, .fail_after = -1 };
+    const char *fail_env = getenv("EXT4DUMP_FAIL_AFTER");
+    if (fail_env)
+        fc.fail_after = strtol(fail_env, NULL, 10);
     const uint32_t bs = 512;
     ext4b_device *dev = ext4b_device_create(&fc, bs, (uint64_t)st.st_size / bs,
                                             !writable, file_read, file_write, file_flush);
@@ -486,6 +511,8 @@ unmount:
 out:
     ext4b_device_destroy(dev);
     close(fd);
+    if (getenv("EXT4DUMP_REPORT_WRITES"))
+        fprintf(stderr, "writes=%ld\n", fc.writes);
     return rc;
 }
 
