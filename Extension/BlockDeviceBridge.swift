@@ -69,16 +69,46 @@ final class BlockDeviceBridge {
 
     // MARK: - I/O actually performed against the resource
 
+    // MARK: - Alignment
+    //
+    // FSKit's metadata I/O is block-addressed: offset and length must both be
+    // multiples of the device block size. lwext4 does not honour that -- the
+    // very first thing it does is read the 1024-byte superblock at offset 1024,
+    // which is unaligned on any device with 4 KiB blocks. Requests are
+    // therefore widened to block boundaries here and the caller's slice copied
+    // out of the aligned window.
+
+    private func alignedWindow(offset: UInt64, count: Int) -> (start: UInt64, length: Int, shift: Int) {
+        let bs = UInt64(blockSize)
+        let start = (offset / bs) * bs
+        let end = offset + UInt64(count)
+        let alignedEnd = ((end + bs - 1) / bs) * bs
+        return (start, Int(alignedEnd - start), Int(offset - start))
+    }
+
     fileprivate func read(into buffer: UnsafeMutableRawPointer,
                           offset: UInt64, count: Int) -> Int32 {
-        let dst = UnsafeMutableRawBufferPointer(start: buffer, count: count)
+        let w = alignedWindow(offset: offset, count: count)
         do {
-            try resource.metadataRead(into: dst,
+            if w.shift == 0 && w.length == count {
+                let dst = UnsafeMutableRawBufferPointer(start: buffer, count: count)
+                _ = try resource.read(into: dst,
                                       startingAt: off_t(offset),
                                       length: count)
+            } else {
+                var scratch = [UInt8](repeating: 0, count: w.length)
+                try scratch.withUnsafeMutableBytes { raw in
+                    _ = try resource.read(into: raw,
+                                          startingAt: off_t(w.start),
+                                          length: w.length)
+                }
+                scratch.withUnsafeBytes { raw in
+                    buffer.copyMemory(from: raw.baseAddress! + w.shift, byteCount: count)
+                }
+            }
             return 0
         } catch {
-            Ext4Log.io.error("read \(count)B @\(offset) failed: \(error.localizedDescription, privacy: .public)")
+            Ext4Log.io.error("read \(count)B @\(offset) (aligned \(w.length)B @\(w.start)) failed: \(error.localizedDescription, privacy: .public)")
             return EIO
         }
     }
@@ -86,16 +116,35 @@ final class BlockDeviceBridge {
     fileprivate func write(from buffer: UnsafeRawPointer,
                            offset: UInt64, count: Int) -> Int32 {
         guard isWritable else { return EROFS }
-        let src = UnsafeRawBufferPointer(start: buffer, count: count)
+        let w = alignedWindow(offset: offset, count: count)
         do {
-            // Delayed writes let the kernel coalesce; ordering is imposed
-            // explicitly by flush() at journal commit points.
-            try resource.delayedMetadataWrite(from: src,
-                                              startingAt: off_t(offset),
-                                              length: count)
+            if w.shift == 0 && w.length == count {
+                let src = UnsafeRawBufferPointer(start: buffer, count: count)
+                _ = try resource.write(from: src,
+                                       startingAt: off_t(offset),
+                                       length: count)
+            } else {
+                // Partial block: read the surrounding blocks, patch in the
+                // caller's bytes, write the whole window back. Skipping the
+                // read would zero the bytes either side of the update.
+                var scratch = [UInt8](repeating: 0, count: w.length)
+                try scratch.withUnsafeMutableBytes { raw in
+                    _ = try resource.read(into: raw,
+                                          startingAt: off_t(w.start),
+                                          length: w.length)
+                }
+                scratch.withUnsafeMutableBytes { raw in
+                    (raw.baseAddress! + w.shift).copyMemory(from: buffer, byteCount: count)
+                }
+                try scratch.withUnsafeBytes { raw in
+                    _ = try resource.write(from: raw,
+                                           startingAt: off_t(w.start),
+                                           length: w.length)
+                }
+            }
             return 0
         } catch {
-            Ext4Log.io.error("write \(count)B @\(offset) failed: \(error.localizedDescription, privacy: .public)")
+            Ext4Log.io.error("write \(count)B @\(offset) (aligned \(w.length)B @\(w.start)) failed: \(error.localizedDescription, privacy: .public)")
             return EIO
         }
     }

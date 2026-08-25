@@ -26,9 +26,12 @@ struct IdentityMapper {
     /// When true, report the true on-disk uid/gid instead of the mapped ones.
     let honorOwners: Bool
 
-    /// Permission bits OR-ed into what is reported, so the mounting user can
-    /// always traverse and read their own volume.
-    private let minimumMode: UInt32 = 0o700
+    /// Minimum owner permissions reported, so the mounting user can always
+    /// reach their own volume. Note this differs by type: granting execute on
+    /// a regular file would make every file on the volume look runnable, so
+    /// files get rw and only directories get the traverse bit.
+    private let minimumFileMode: UInt32 = 0o600
+    private let minimumDirMode: UInt32  = 0o700
 
     init(uid: UInt32 = UInt32(getuid()),
          gid: UInt32 = UInt32(getgid()),
@@ -59,10 +62,8 @@ struct IdentityMapper {
 
     func mode(onDisk: UInt32, isDirectory: Bool) -> UInt32 {
         guard !honorOwners else { return onDisk }
-        // Grant the owner full access, but keep the group/other bits so the
-        // original Linux permissions remain visible.
-        var m = onDisk | minimumMode
-        if isDirectory { m |= 0o100 }   // a readable directory must be traversable
-        return m
+        // Grant the owner access, but keep the group/other bits so the original
+        // Linux permissions stay visible.
+        return onDisk | (isDirectory ? minimumDirMode : minimumFileMode)
     }
 }

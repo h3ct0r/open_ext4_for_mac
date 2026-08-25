@@ -17,6 +17,10 @@ final class Ext4Volume: FSVolume {
     let bridge: BlockDeviceBridge
     let executor: Ext4Executor
     let identity: IdentityMapper
+
+    /// The owning filesystem, so volume lifecycle can drive the container
+    /// state machine FSKit requires. Weak: the filesystem owns the volume.
+    weak var fileSystem: Ext4FileSystem?
     let probe: ext4b_probe_info
 
     /// True when the volume is mounted read-only, either because the media is

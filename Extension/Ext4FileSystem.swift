@@ -109,8 +109,15 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
                                 probe: info,
                                 readOnly: readOnly,
                                 identity: IdentityMapper())
+        volume.fileSystem = self
         self.bridge = bridge
         self.volume = volume
+
+        // FSKit tracks a container state machine and rejects the load with
+        // EAGAIN ("unexpected container state") if the resource is still
+        // NotReady when loadResource returns. Ready means "loaded, volume
+        // available"; activate() moves it on to Active.
+        containerStatus = FSContainerStatus.ready
 
         Ext4Log.info("mounted ext\(info.generation) volume \(readOnly ? "read-only" : "read-write"), "
                      + "\(info.block_count) blocks of \(info.block_size)B")
@@ -125,6 +132,7 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         bridge.close()
         self.bridge = nil
         self.volume = nil
+        containerStatus = FSContainerStatus.notReady(status: Ext4Error.posix(ENODEV) as NSError)
         Ext4Log.info("unloaded resource")
     }
 

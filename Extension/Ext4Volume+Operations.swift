@@ -47,11 +47,15 @@ extension Ext4Volume: FSVolume.Operations {
 
     func activate(options: FSTaskOptions) async throws -> FSItem {
         Ext4Log.volume.info("activating ext\(self.probe.generation, privacy: .public) volume, readOnly=\(self.isReadOnly, privacy: .public)")
+        // Ready -> Active: the volume now has a live root.
+        fileSystem?.containerStatus = FSContainerStatus.active
         return item(for: UInt32(EXT4B_ROOT_INO))
     }
 
     func deactivate(options: FSDeactivateOptions = []) async throws {
         Ext4Log.volume.info("deactivating volume")
+        // Active -> Ready: still loaded, but no live volume.
+        fileSystem?.containerStatus = FSContainerStatus.ready
         try await executor.run { [self] in
             _ = ext4b_sync(device)
         }
@@ -374,6 +378,12 @@ private let packEntry: @convention(c) (UnsafeMutableRawPointer?,
 
     guard let ctx, let namePtr else { return false }
     let state = ctx.assumingMemoryBound(to: PackState.self)
+
+    // ext4 stores "." and ".." as real directory entries, but the VFS layer
+    // above FSKit synthesises them. Packing them as well makes every listing
+    // show each twice.
+    if nameLen == 1, namePtr[0] == 0x2E { return true }                       // "."
+    if nameLen == 2, namePtr[0] == 0x2E, namePtr[1] == 0x2E { return true }   // ".."
 
     let name = FSFileName(data: Data(bytes: namePtr, count: nameLen))
 

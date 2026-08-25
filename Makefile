@@ -52,7 +52,7 @@ SHIM_OBJS   := $(BUILD)/obj/shim/ext4_bridge.o
 
 CORE_LIB := $(BUILD)/lib/libext4core.a
 
-.PHONY: all core clean test test-asan test-crash test-diff validate tools check-submodule patch unpatch extension app sign install typecheck
+.PHONY: all core clean test test-asan test-crash test-diff validate tools entitlements check-submodule patch unpatch extension app sign install typecheck
 
 all: app
 
@@ -157,7 +157,11 @@ SWIFTFLAGS := -target arm64-apple-macos$(DEPLOY_TARGET) \
               -I Core/shim \
               -framework FSKit \
               -swift-version 5 \
-              -parse-as-library
+              -parse-as-library \
+              -application-extension \
+              -framework ExtensionFoundation \
+              -Xlinker -u -Xlinker _EXExtensionMain \
+              -Xlinker -e -Xlinker _EXExtensionMain
 
 ifeq ($(CONFIG),debug)
   SWIFTFLAGS += -Onone -g
@@ -198,12 +202,24 @@ $(BUILD)/$(APP_NAME).app/Contents/MacOS/$(APP_NAME): App/Ext4MacApp.swift
 #   make sign SIGN_ID="Developer ID Application: Your Name (TEAMID)"
 
 SIGN_ID ?= -
+# Team ID is baked into the entitlements at sign time. Derived from the
+# provisioning profile so there is one source of truth.
+TEAM_ID ?= $(shell security cms -D -i Extension/Ext4FS.provisionprofile 2>/dev/null | \
+             plutil -extract TeamIdentifier.0 raw - 2>/dev/null)
 # Optional: a dedicated keychain holding only the signing identity. Use this if
 # codesign reports errSecInternalComponent from a cluttered login keychain.
 SIGN_KEYCHAIN ?=
 
-sign: app
+sign: app entitlements
 	@SIGN_KEYCHAIN="$(SIGN_KEYCHAIN)" bash scripts/sign.sh "$(BUILD)/$(APP_NAME).app" "$(SIGN_ID)"
+
+# Expand the entitlements template with the team ID from the profile.
+entitlements:
+	@test -n "$(TEAM_ID)" || { echo "error: could not read TeamIdentifier from Extension/Ext4FS.provisionprofile"; exit 1; }
+	@sed -e 's/@TEAM_ID@/$(TEAM_ID)/g' \
+	     -e 's/@BUNDLE_ID@/$(BUNDLE_ID).$(EXT_NAME)/g' \
+	     Extension/Ext4FS.entitlements.in > Extension/Ext4FS.entitlements
+	@echo "entitlements: team $(TEAM_ID), app id $(TEAM_ID).$(BUNDLE_ID).$(EXT_NAME)"
 
 install: sign
 	@rm -rf "/Applications/$(APP_NAME).app"
