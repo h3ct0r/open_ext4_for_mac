@@ -899,13 +899,8 @@ int ext4_xattr_list(struct ext4_inode_ref *inode_ref,
 					    *)(list->name + name_len + 1);
 			}
 
-			/*
-			 * Size calculation by pointer arithmetics.
-			 */
-			buf_len +=
-			    (char *)((struct ext4_xattr_list_entry *)0 + 1) +
-			    name_len + 1 -
-			    (char *)(struct ext4_xattr_list_entry *)0;
+			buf_len += sizeof(struct ext4_xattr_list_entry) +
+				   name_len + 1;
 		}
 	}
 
