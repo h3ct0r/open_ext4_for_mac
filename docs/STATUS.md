@@ -2,7 +2,7 @@
 
 | Phase | State |
 |---|---|
-| 0 — pipeline & packaging | complete except signing (needs a Developer ID cert) |
+| 0 — pipeline & packaging | **complete — signed, installed, loads** |
 | 1 — read-only ext2/3/4 | **complete; 41 tests green** |
 | 2 — kernel-offloaded I/O | implemented (read path) |
 | 3 — write path | **complete; 82 tests green, opt-in via `-o rw`** |
@@ -32,15 +32,38 @@ against `debugfs`, and every fixture is checked with `e2fsck`.
 `FSVolume.XattrOperations` — plus Info.plist, entitlements and bundle layout
 matching what shipping FSKit modules use.
 
-## The one blocker
+## It mounts
 
-Loading the extension needs a **Developer ID certificate and a provisioning
-profile** carrying `com.apple.developer.fskit.fsmodule`. That requires a paid
-Apple Developer account and cannot be worked around; see `docs/SIGNING.md`.
+```
+/dev/disk5 on /private/tmp/ext4mnt (ext4, local, nodev, nosuid, noowners,
+                                    noatime, fskit, mounted by h3ct0r)
+```
 
-Until then the extension can be built and structurally verified, but macOS
-will not load it. The ext4 core is unaffected — it is tested independently of
-FSKit.
+Verified on a real mount of the full fixture: directory listings, nested
+directories, symlink targets (including a deliberately broken one), hard links
+sharing an inode, a 500-entry HTree directory enumerated completely, `statfs`
+reporting correct capacity, and file contents byte-identical to the same reads
+through the offline core — including a 3 MB extent-mapped file. `e2fsck` is
+clean after a mount/unmount cycle.
+
+Loading requires a **Developer ID certificate and a provisioning profile**
+carrying `com.apple.developer.fskit.fsmodule` (a paid Apple Developer account;
+see `docs/SIGNING.md`). Building and testing the core needs none of that.
+
+### Getting from "signed" to "mounts"
+
+Four defects sat between a correctly signed bundle and a working mount, none of
+them in the filesystem code:
+
+| Symptom | Cause |
+|---|---|
+| Extension exits 0 after ~50 ms; `Couldn't communicate with a helper application` | Wrong entry point. Xcode's `extensionkit-extension` product type links with `-e _EXExtensionMain`; the default `_main` sets up and returns |
+| `probe: I/O error` reading the superblock | `metadataRead` is unusable before the resource is loaded; use direct device I/O |
+| `Loading resource: Resource temporarily unavailable` (EAGAIN) | `containerStatus` left at NotReady. FSKit needs Ready before `loadResource` returns, then Ready ⇄ Active around activation |
+| Extension never launches | Missing `application-identifier` / `team-identifier` entitlements, so the provisioning profile cannot be matched |
+
+A minimal do-nothing extension reproduced the first one identically, which is
+what proved it was packaging rather than our code.
 
 ## Writing
 

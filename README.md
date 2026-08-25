@@ -8,7 +8,14 @@ Volumes mount in Finder and behave like any other native disk.
 
 ## Status
 
-> **Under active development.** See `docs/STATUS.md` for the current phase.
+**Working.** ext2/3/4 volumes mount natively through FSKit and read correctly:
+
+```
+/dev/disk5 on /private/tmp/ext4mnt (ext4, local, nodev, nosuid, noowners,
+                                    noatime, fskit, mounted by h3ct0r)
+```
+
+See `docs/STATUS.md` for detail.
 >
 > Write support is **disabled by default** and is gated behind a correctness suite
 > (`e2fsck` oracle + crash-consistency sweeps). Do not point the write path at data
