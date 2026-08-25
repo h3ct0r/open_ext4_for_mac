@@ -23,10 +23,27 @@ Volumes mount in Finder and behave like any other native disk.
 ## Building
 
 ```bash
-make            # build the extension bundle
-make sign       # sign with your Developer ID (see docs/SIGNING.md)
-make install    # install to /Applications
+git submodule update --init
+make            # build Ext4Mac.app with the FSKit extension inside
+make test       # run the correctness suite (needs: brew install e2fsprogs)
 ```
+
+Loading the extension additionally requires a Developer ID certificate:
+
+```bash
+make sign SIGN_ID="Developer ID Application: Your Name (TEAMID)"
+make install
+```
+
+See [docs/SIGNING.md](docs/SIGNING.md). The ext4 core is deliberately
+decoupled from FSKit, so `make test` exercises the real filesystem code
+against disk images with no Apple account, no signing and no mounting.
+
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md) — how it fits together and why
+- [Status](docs/STATUS.md) — what works today
+- [Signing](docs/SIGNING.md) — certificates and entitlements
 
 ## Licence
 

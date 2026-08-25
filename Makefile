@@ -61,13 +61,19 @@ check-submodule:
 	  echo "error: lwext4 submodule missing. Run: git submodule update --init"; \
 	  exit 1; }
 
-core: check-submodule patch $(CORE_LIB)
+core: check-submodule $(CORE_LIB)
 
-# Vendored-dependency patches. Applied idempotently so a clean checkout builds
-# with a plain `make`, and re-running is harmless.
-PATCHES := $(sort $(wildcard patches/lwext4/*.patch))
+# Vendored-dependency patches.
+#
+# The stamp file makes patching a real prerequisite of every object file. An
+# earlier version listed a phony `patch` target on `core`, which compiled fine
+# but was silently skipped whenever make reached $(CORE_LIB) through another
+# path (`make app`), producing a library built from unpatched sources.
+PATCHES     := $(sort $(wildcard patches/lwext4/*.patch))
+PATCH_STAMP := $(BUILD)/.lwext4-patched
 
-patch:
+$(PATCH_STAMP): $(PATCHES) | check-submodule
+	@mkdir -p $(dir $@)
 	@for p in $(PATCHES); do \
 	  if git -C $(LWEXT4_DIR) apply --check --reverse "$(CURDIR)/$$p" 2>/dev/null; then \
 	    :; \
@@ -77,17 +83,20 @@ patch:
 	    echo "error: failed to apply $$p"; exit 1; \
 	  fi; \
 	done
+	@touch $@
+
+patch: $(PATCH_STAMP)
 
 unpatch:
 	@for p in $(PATCHES); do \
 	  git -C $(LWEXT4_DIR) apply --reverse "$(CURDIR)/$$p" 2>/dev/null && echo "reverted $$p" || true; \
 	done
 
-$(BUILD)/obj/lwext4/%.o: $(LWEXT4_DIR)/src/%.c
+$(BUILD)/obj/lwext4/%.o: $(LWEXT4_DIR)/src/%.c $(PATCH_STAMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(LWEXT4_CFLAGS) -c $< -o $@
 
-$(BUILD)/obj/shim/%.o: $(SHIM_DIR)/%.c $(SHIM_DIR)/ext4_bridge.h
+$(BUILD)/obj/shim/%.o: $(SHIM_DIR)/%.c $(SHIM_DIR)/ext4_bridge.h $(PATCH_STAMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(SHIM_CFLAGS) -c $< -o $@
 
