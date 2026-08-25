@@ -1260,8 +1260,8 @@ int ext4_xattr_remove(struct ext4_inode_ref *inode_ref, uint8_t name_index,
 		}
 
 	} else {
-		/* Now remove the entry */
-		ext4_xattr_set_entry(&i, &block_finder.s, false);
+		/* Now remove the entry from the inode body */
+		ext4_xattr_set_entry(&i, &ibody_finder.s, false);
 		inode_ref->dirty = true;
 	}
 out:
