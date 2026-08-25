@@ -995,3 +995,898 @@ int ext4b_getxattr(ext4b_device *dev, uint32_t inode,
     ext4_fs_put_inode_ref(&ref);
     return r;
 }
+
+/* ============================================================== writing == */
+
+#include <ext4_balloc.h>
+#include <ext4_ialloc.h>
+#include <ext4_journal.h>
+#include <ext4_dir_idx.h>
+#include <ext4_trans.h>
+#include <time.h>
+
+bool ext4b_is_writable(ext4b_device *dev)
+{
+    return dev && dev->mounted && !dev->read_only;
+}
+
+/* --------------------------------------------------------- transactions -- */
+/*
+ * Mirrors lwext4's own __ext4_trans_start/stop/abort, which are static inside
+ * ext4.c. We reach the same state through fs->jbd_journal / fs->curr_trans.
+ */
+
+static int txn_begin(struct ext4_fs *fs)
+{
+#if CONFIG_JOURNALING_ENABLE
+    if (fs->jbd_journal && !fs->curr_trans) {
+        struct jbd_trans *trans = jbd_journal_new_trans(fs->jbd_journal);
+        if (!trans)
+            return ENOMEM;
+        fs->curr_trans = trans;
+    }
+#endif
+    return EOK;
+}
+
+static int txn_commit(struct ext4_fs *fs)
+{
+#if CONFIG_JOURNALING_ENABLE
+    if (fs->jbd_journal && fs->curr_trans) {
+        int r = jbd_journal_commit_trans(fs->jbd_journal, fs->curr_trans);
+        fs->curr_trans = NULL;
+        return r;
+    }
+#endif
+    return EOK;
+}
+
+static void txn_abort(struct ext4_fs *fs)
+{
+#if CONFIG_JOURNALING_ENABLE
+    if (fs->jbd_journal && fs->curr_trans) {
+        jbd_journal_free_trans(fs->jbd_journal, fs->curr_trans, true);
+        fs->curr_trans = NULL;
+    }
+#endif
+}
+
+/* Close a mutation: commit on success, abort on failure, then push the
+ * result to stable storage so a crash cannot lose an acknowledged change. */
+static int txn_finish(ext4b_device *dev, struct ext4_fs *fs, int r)
+{
+    if (r != EOK) {
+        txn_abort(fs);
+        return r;
+    }
+    r = txn_commit(fs);
+    if (r == EOK) {
+        ext4_block_cache_flush(&dev->bdev);
+        if (dev->flush_fn)
+            dev->flush_fn(dev->ctx);
+    }
+    return r;
+}
+
+/* Guard shared by every mutating entry point. */
+#define WRITE_PROLOGUE(dev, fs)                                                \
+    struct ext4_fs *fs;                                                        \
+    do {                                                                       \
+        if (!(dev) || !(dev)->mounted)                                         \
+            return EINVAL;                                                     \
+        if ((dev)->read_only)                                                  \
+            return EROFS;                                                      \
+        fs = bridge_fs(dev);                                                   \
+        if (!fs)                                                               \
+            return EINVAL;                                                     \
+    } while (0)
+
+/* ----------------------------------------------------------- timestamps -- */
+
+typedef enum {
+    TOUCH_ATIME = 1 << 0,
+    TOUCH_MTIME = 1 << 1,
+    TOUCH_CTIME = 1 << 2,
+    TOUCH_CRTIME = 1 << 3,
+} touch_flags;
+
+static uint32_t now_seconds(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0)
+        return 0;
+    return (uint32_t)ts.tv_sec;
+}
+
+/*
+ * lwext4 never updates inode times; filling that gap is ours to do. The
+ * sub-second *_extra fields only exist on inodes large enough to carry them.
+ */
+static void touch(struct ext4_fs *fs, struct ext4_inode_ref *ref,
+                  touch_flags which)
+{
+    uint32_t t = now_seconds();
+
+    if (which & TOUCH_ATIME) ext4_inode_set_access_time(ref->inode, t);
+    if (which & TOUCH_MTIME) ext4_inode_set_modif_time(ref->inode, t);
+    if (which & TOUCH_CTIME) ext4_inode_set_change_inode_time(ref->inode, t);
+
+    if (ext4_inode_get_extra_isize(&fs->sb, ref->inode) >= 24) {
+        if (which & TOUCH_CRTIME)
+            ref->inode->crtime = to_le32(t);
+    }
+    ref->dirty = true;
+}
+
+/* ------------------------------------------------------------ directory -- */
+
+/* lwext4's equivalent (ext4_has_children) is static; this reimplements it. */
+static int dir_has_children(struct ext4_inode_ref *dir, bool *out)
+{
+    struct ext4_fs *fs = dir->fs;
+    *out = false;
+
+    if (!ext4_inode_is_type(&fs->sb, dir->inode, EXT4_INODE_MODE_DIRECTORY))
+        return ENOTDIR;
+
+    struct ext4_dir_iter it;
+    int r = ext4_dir_iterator_init(&it, dir, 0);
+    if (r != EOK)
+        return r;
+
+    while (it.curr != NULL) {
+        uint32_t ino = ext4_dir_en_get_inode(it.curr);
+        if (ino != 0) {
+            uint16_t len = ext4_dir_en_get_name_len(&fs->sb, it.curr);
+            const char *nm = (const char *)it.curr->name;
+            bool dot    = (len == 1 && nm[0] == '.');
+            bool dotdot = (len == 2 && nm[0] == '.' && nm[1] == '.');
+            if (!dot && !dotdot) {
+                *out = true;
+                break;
+            }
+        }
+        r = ext4_dir_iterator_next(&it);
+        if (r != EOK)
+            break;
+    }
+
+    ext4_dir_iterator_fini(&it);
+    return r == EOK ? EOK : r;
+}
+
+static int type_to_filetype(ext4b_item_type t)
+{
+    switch (t) {
+    case EXT4B_TYPE_FILE:     return EXT4_DE_REG_FILE;
+    case EXT4B_TYPE_DIR:      return EXT4_DE_DIR;
+    case EXT4B_TYPE_SYMLINK:  return EXT4_DE_SYMLINK;
+    case EXT4B_TYPE_FIFO:     return EXT4_DE_FIFO;
+    case EXT4B_TYPE_CHARDEV:  return EXT4_DE_CHRDEV;
+    case EXT4B_TYPE_BLOCKDEV: return EXT4_DE_BLKDEV;
+    case EXT4B_TYPE_SOCKET:   return EXT4_DE_SOCK;
+    default:                  return -1;
+    }
+}
+
+/*
+ * Port of lwext4's static ext4_link(). Adds `child` to `parent` under `name`,
+ * creating the "." and ".." entries (or the HTree index) for a new directory
+ * and maintaining link counts. `rename` suppresses the link-count increment
+ * and dot-entry creation, since a rename moves an existing entry.
+ */
+static int link_child(struct ext4_fs *fs,
+                      struct ext4_inode_ref *parent,
+                      struct ext4_inode_ref *child,
+                      const char *name, uint32_t name_len,
+                      bool rename)
+{
+    if (name_len > EXT4_DIRECTORY_FILENAME_LEN)
+        return ENAMETOOLONG;
+
+    int r = ext4_dir_add_entry(parent, name, name_len, child);
+    if (r != EOK)
+        return r;
+
+    bool is_dir = ext4_inode_is_type(&fs->sb, child->inode,
+                                     EXT4_INODE_MODE_DIRECTORY);
+
+    if (is_dir && !rename) {
+#if CONFIG_DIR_INDEX_ENABLE
+        if (ext4_sb_feature_com(&fs->sb, EXT4_FCOM_DIR_INDEX)) {
+            r = ext4_dir_dx_init(child, parent);
+            if (r != EOK)
+                return r;
+            ext4_inode_set_flag(child->inode, EXT4_INODE_FLAG_INDEX);
+            child->dirty = true;
+        } else
+#endif
+        {
+            r = ext4_dir_add_entry(child, ".", 1, child);
+            if (r != EOK) {
+                ext4_dir_remove_entry(parent, name, name_len);
+                return r;
+            }
+            r = ext4_dir_add_entry(child, "..", 2, parent);
+            if (r != EOK) {
+                ext4_dir_remove_entry(parent, name, name_len);
+                ext4_dir_remove_entry(child, ".", 1);
+                return r;
+            }
+        }
+
+        /* A fresh directory has two links: its name, and its own ".". */
+        ext4_inode_set_links_cnt(child->inode, 2);
+        ext4_fs_inode_links_count_inc(parent);
+        child->dirty = true;
+        parent->dirty = true;
+        return EOK;
+    }
+
+    /* Re-parenting an existing directory: repoint its "..". */
+    if (is_dir) {
+        if (!ext4_inode_has_flag(child->inode, EXT4_INODE_FLAG_INDEX)) {
+            struct ext4_dir_search_result res;
+            r = ext4_dir_find_entry(&res, child, "..", 2);
+            if (r != EOK)
+                return EIO;
+            ext4_dir_en_set_inode(res.dentry, parent->index);
+            ext4_trans_set_block_dirty(res.block.buf);
+            r = ext4_dir_destroy_result(child, &res);
+            if (r != EOK)
+                return r;
+        } else {
+#if CONFIG_DIR_INDEX_ENABLE
+            r = ext4_dir_dx_reset_parent_inode(child, parent->index);
+            if (r != EOK)
+                return r;
+#endif
+        }
+        ext4_fs_inode_links_count_inc(parent);
+        parent->dirty = true;
+    }
+
+    if (!rename) {
+        ext4_fs_inode_links_count_inc(child);
+        child->dirty = true;
+    }
+    return EOK;
+}
+
+/* Port of lwext4's static ext4_unlink(), plus the parent timestamp updates
+ * lwext4 leaves as a TODO. */
+static int unlink_child(struct ext4_fs *fs,
+                        struct ext4_inode_ref *parent,
+                        struct ext4_inode_ref *child,
+                        const char *name, uint32_t name_len)
+{
+    bool has_children = false;
+    bool is_dir = ext4_inode_is_type(&fs->sb, child->inode,
+                                     EXT4_INODE_MODE_DIRECTORY);
+
+    if (is_dir) {
+        int rc = dir_has_children(child, &has_children);
+        if (rc != EOK)
+            return rc;
+        if (has_children)
+            return ENOTEMPTY;
+    }
+
+    int rc = ext4_dir_remove_entry(parent, name, name_len);
+    if (rc != EOK)
+        return rc;
+
+    if (is_dir) {
+        /* The child's ".." no longer counts against the parent. */
+        ext4_fs_inode_links_count_dec(parent);
+        parent->dirty = true;
+        /* Drop the directory's own "." link as well as its name. */
+        ext4_inode_set_links_cnt(child->inode, 0);
+    } else {
+        ext4_fs_inode_links_count_dec(child);
+    }
+
+    touch(fs, parent, TOUCH_MTIME | TOUCH_CTIME);
+    touch(fs, child, TOUCH_CTIME);
+    child->dirty = true;
+    return EOK;
+}
+
+/* ---------------------------------------------------------------- create -- */
+
+static int create_common(ext4b_device *dev, struct ext4_fs *fs,
+                         uint32_t parent_inode,
+                         const char *name, size_t name_len,
+                         int filetype,
+                         uint32_t mode, uint32_t uid, uint32_t gid,
+                         const char *symlink_target, size_t target_len,
+                         uint32_t *out_inode)
+{
+    if (name_len == 0 || name_len > EXT4_DIRECTORY_FILENAME_LEN)
+        return ENAMETOOLONG;
+
+    int r = txn_begin(fs);
+    if (r != EOK)
+        return r;
+
+    struct ext4_inode_ref parent;
+    r = ext4_fs_get_inode_ref(fs, parent_inode, &parent);
+    if (r != EOK)
+        return txn_finish(dev, fs, r);
+
+    if (!ext4_inode_is_type(&fs->sb, parent.inode, EXT4_INODE_MODE_DIRECTORY)) {
+        ext4_fs_put_inode_ref(&parent);
+        return txn_finish(dev, fs, ENOTDIR);
+    }
+
+    /* Refuse to shadow an existing name rather than silently replacing it. */
+    struct ext4_dir_search_result probe_res;
+    if (ext4_dir_find_entry(&probe_res, &parent, name, (uint32_t)name_len) == EOK) {
+        ext4_dir_destroy_result(&parent, &probe_res);
+        ext4_fs_put_inode_ref(&parent);
+        return txn_finish(dev, fs, EEXIST);
+    }
+
+    struct ext4_inode_ref child;
+    r = ext4_fs_alloc_inode(fs, &child, filetype);
+    if (r != EOK) {
+        ext4_fs_put_inode_ref(&parent);
+        return txn_finish(dev, fs, r);
+    }
+    ext4_fs_inode_blocks_init(fs, &child);
+
+    /* alloc_inode applies a default mode; override with what was asked for,
+     * preserving the type bits it set. */
+    uint32_t full_mode = ext4_inode_get_mode(&fs->sb, child.inode);
+    full_mode = (full_mode & EXT4_INODE_MODE_TYPE_MASK) | (mode & 0x0FFF);
+    ext4_inode_set_mode(&fs->sb, child.inode, full_mode);
+    ext4_inode_set_uid(child.inode, uid);
+    ext4_inode_set_gid(child.inode, gid);
+    touch(fs, &child, TOUCH_ATIME | TOUCH_MTIME | TOUCH_CTIME | TOUCH_CRTIME);
+    child.dirty = true;
+
+    r = link_child(fs, &parent, &child, name, (uint32_t)name_len, false);
+    if (r != EOK) {
+        ext4_fs_free_inode(&child);
+        child.dirty = false;
+        ext4_fs_put_inode_ref(&child);
+        ext4_fs_put_inode_ref(&parent);
+        return txn_finish(dev, fs, r);
+    }
+
+    /* Symlink payload: short targets live inline in the block-pointer array,
+     * longer ones need a real data block. */
+    if (symlink_target && target_len > 0) {
+        if (target_len < sizeof(child.inode->blocks)) {
+            memset(child.inode->blocks, 0, sizeof(child.inode->blocks));
+            memcpy(child.inode->blocks, symlink_target, target_len);
+            ext4_inode_set_size(child.inode, target_len);
+            child.dirty = true;
+        } else {
+            ext4_fsblk_t fblk = 0;
+            uint32_t iblk = 0;
+            r = ext4_fs_append_inode_dblk(&child, &fblk, &iblk);
+            if (r == EOK) {
+                uint32_t bsize = ext4_sb_get_block_size(&fs->sb);
+                uint8_t *tmp = calloc(1, bsize);
+                if (!tmp) {
+                    r = ENOMEM;
+                } else {
+                    memcpy(tmp, symlink_target, target_len);
+                    r = ext4_block_writebytes(&dev->bdev,
+                                              (uint64_t)fblk * bsize, tmp, bsize);
+                    free(tmp);
+                    if (r == EOK) {
+                        ext4_inode_set_size(child.inode, target_len);
+                        child.dirty = true;
+                    }
+                }
+            }
+            if (r != EOK) {
+                ext4_fs_put_inode_ref(&child);
+                ext4_fs_put_inode_ref(&parent);
+                return txn_finish(dev, fs, r);
+            }
+        }
+    }
+
+    touch(fs, &parent, TOUCH_MTIME | TOUCH_CTIME);
+
+    if (out_inode)
+        *out_inode = child.index;
+
+    ext4_fs_put_inode_ref(&child);
+    ext4_fs_put_inode_ref(&parent);
+    return txn_finish(dev, fs, EOK);
+}
+
+int ext4b_create(ext4b_device *dev,
+                 uint32_t parent_inode,
+                 const char *name, size_t name_len,
+                 ext4b_item_type type,
+                 uint32_t mode, uint32_t uid, uint32_t gid,
+                 uint32_t *out_inode)
+{
+    WRITE_PROLOGUE(dev, fs);
+    int filetype = type_to_filetype(type);
+    if (filetype < 0 || type == EXT4B_TYPE_SYMLINK)
+        return EINVAL;   /* symlinks go through ext4b_symlink */
+    return create_common(dev, fs, parent_inode, name, name_len, filetype,
+                         mode, uid, gid, NULL, 0, out_inode);
+}
+
+int ext4b_symlink(ext4b_device *dev,
+                  uint32_t parent_inode,
+                  const char *name, size_t name_len,
+                  const char *target, size_t target_len,
+                  uint32_t uid, uint32_t gid,
+                  uint32_t *out_inode)
+{
+    WRITE_PROLOGUE(dev, fs);
+    if (!target || target_len == 0)
+        return EINVAL;
+    if (target_len > 4095)
+        return ENAMETOOLONG;
+    return create_common(dev, fs, parent_inode, name, name_len,
+                         EXT4_DE_SYMLINK, 0777, uid, gid,
+                         target, target_len, out_inode);
+}
+
+int ext4b_hardlink(ext4b_device *dev,
+                   uint32_t parent_inode,
+                   const char *name, size_t name_len,
+                   uint32_t target_inode)
+{
+    WRITE_PROLOGUE(dev, fs);
+    if (name_len == 0 || name_len > EXT4_DIRECTORY_FILENAME_LEN)
+        return ENAMETOOLONG;
+
+    int r = txn_begin(fs);
+    if (r != EOK)
+        return r;
+
+    struct ext4_inode_ref parent, child;
+    r = ext4_fs_get_inode_ref(fs, parent_inode, &parent);
+    if (r != EOK)
+        return txn_finish(dev, fs, r);
+
+    r = ext4_fs_get_inode_ref(fs, target_inode, &child);
+    if (r != EOK) {
+        ext4_fs_put_inode_ref(&parent);
+        return txn_finish(dev, fs, r);
+    }
+
+    /* POSIX forbids hard links to directories: they would let a user create
+     * cycles that fsck cannot untangle. */
+    if (ext4_inode_is_type(&fs->sb, child.inode, EXT4_INODE_MODE_DIRECTORY)) {
+        ext4_fs_put_inode_ref(&child);
+        ext4_fs_put_inode_ref(&parent);
+        return txn_finish(dev, fs, EPERM);
+    }
+
+    r = link_child(fs, &parent, &child, name, (uint32_t)name_len, false);
+    if (r == EOK) {
+        touch(fs, &child, TOUCH_CTIME);
+        touch(fs, &parent, TOUCH_MTIME | TOUCH_CTIME);
+    }
+
+    ext4_fs_put_inode_ref(&child);
+    ext4_fs_put_inode_ref(&parent);
+    return txn_finish(dev, fs, r);
+}
+
+/* ---------------------------------------------------------------- unlink -- */
+
+int ext4b_unlink(ext4b_device *dev,
+                 uint32_t parent_inode,
+                 const char *name, size_t name_len)
+{
+    WRITE_PROLOGUE(dev, fs);
+    if (name_len == 0)
+        return EINVAL;
+    if ((name_len == 1 && name[0] == '.') ||
+        (name_len == 2 && name[0] == '.' && name[1] == '.'))
+        return EINVAL;
+
+    int r = txn_begin(fs);
+    if (r != EOK)
+        return r;
+
+    struct ext4_inode_ref parent;
+    r = ext4_fs_get_inode_ref(fs, parent_inode, &parent);
+    if (r != EOK)
+        return txn_finish(dev, fs, r);
+
+    struct ext4_dir_search_result res;
+    r = ext4_dir_find_entry(&res, &parent, name, (uint32_t)name_len);
+    if (r != EOK) {
+        ext4_fs_put_inode_ref(&parent);
+        return txn_finish(dev, fs, ENOENT);
+    }
+    uint32_t child_ino = ext4_dir_en_get_inode(res.dentry);
+    ext4_dir_destroy_result(&parent, &res);
+
+    struct ext4_inode_ref child;
+    r = ext4_fs_get_inode_ref(fs, child_ino, &child);
+    if (r != EOK) {
+        ext4_fs_put_inode_ref(&parent);
+        return txn_finish(dev, fs, r);
+    }
+
+    r = unlink_child(fs, &parent, &child, name, (uint32_t)name_len);
+    if (r != EOK) {
+        ext4_fs_put_inode_ref(&child);
+        ext4_fs_put_inode_ref(&parent);
+        return txn_finish(dev, fs, r);
+    }
+
+    /* Last name gone: release the blocks and the inode itself. */
+    if (ext4_inode_get_links_cnt(child.inode) == 0) {
+        ext4_inode_set_del_time(child.inode, now_seconds());
+        r = ext4_fs_truncate_inode(&child, 0);
+        if (r == EOK)
+            r = ext4_fs_free_inode(&child);
+    }
+
+    ext4_fs_put_inode_ref(&child);
+    ext4_fs_put_inode_ref(&parent);
+    return txn_finish(dev, fs, r);
+}
+
+/* ---------------------------------------------------------------- rename -- */
+
+int ext4b_rename(ext4b_device *dev,
+                 uint32_t src_parent, const char *src_name, size_t src_len,
+                 uint32_t dst_parent, const char *dst_name, size_t dst_len)
+{
+    WRITE_PROLOGUE(dev, fs);
+    if (src_len == 0 || dst_len == 0 || dst_len > EXT4_DIRECTORY_FILENAME_LEN)
+        return EINVAL;
+
+    int r = txn_begin(fs);
+    if (r != EOK)
+        return r;
+
+    struct ext4_inode_ref sp, dp, child;
+    bool have_sp = false, have_dp = false, have_child = false;
+
+    r = ext4_fs_get_inode_ref(fs, src_parent, &sp);
+    if (r != EOK)
+        goto out;
+    have_sp = true;
+
+    if (dst_parent == src_parent) {
+        dp = sp;    /* same inode; do not take a second reference */
+    } else {
+        r = ext4_fs_get_inode_ref(fs, dst_parent, &dp);
+        if (r != EOK)
+            goto out;
+        have_dp = true;
+    }
+
+    /* Locate the entry being moved. */
+    struct ext4_dir_search_result res;
+    r = ext4_dir_find_entry(&res, &sp, src_name, (uint32_t)src_len);
+    if (r != EOK) {
+        r = ENOENT;
+        goto out;
+    }
+    uint32_t child_ino = ext4_dir_en_get_inode(res.dentry);
+    ext4_dir_destroy_result(&sp, &res);
+
+    r = ext4_fs_get_inode_ref(fs, child_ino, &child);
+    if (r != EOK)
+        goto out;
+    have_child = true;
+
+    /* If something already occupies the destination, remove it first --
+     * rename(2) replaces the target atomically. */
+    struct ext4_dir_search_result dst_res;
+    if (ext4_dir_find_entry(&dst_res, &dp, dst_name, (uint32_t)dst_len) == EOK) {
+        uint32_t victim_ino = ext4_dir_en_get_inode(dst_res.dentry);
+        ext4_dir_destroy_result(&dp, &dst_res);
+
+        if (victim_ino != child_ino) {
+            struct ext4_inode_ref victim;
+            r = ext4_fs_get_inode_ref(fs, victim_ino, &victim);
+            if (r != EOK)
+                goto out;
+
+            r = unlink_child(fs, &dp, &victim, dst_name, (uint32_t)dst_len);
+            if (r == EOK && ext4_inode_get_links_cnt(victim.inode) == 0) {
+                ext4_inode_set_del_time(victim.inode, now_seconds());
+                r = ext4_fs_truncate_inode(&victim, 0);
+                if (r == EOK)
+                    r = ext4_fs_free_inode(&victim);
+            }
+            ext4_fs_put_inode_ref(&victim);
+            if (r != EOK)
+                goto out;
+        }
+    }
+
+    /* Link under the new name, then drop the old one. Ordering matters: if the
+     * link fails we must not have already destroyed the only reference. */
+    r = link_child(fs, &dp, &child, dst_name, (uint32_t)dst_len, true);
+    if (r != EOK)
+        goto out;
+
+    r = ext4_dir_remove_entry(&sp, src_name, (uint32_t)src_len);
+    if (r != EOK)
+        goto out;
+
+    /* Moving a directory out of sp removes its ".." reference to sp. */
+    if (ext4_inode_is_type(&fs->sb, child.inode, EXT4_INODE_MODE_DIRECTORY) &&
+        src_parent != dst_parent) {
+        ext4_fs_inode_links_count_dec(&sp);
+        sp.dirty = true;
+    }
+
+    touch(fs, &child, TOUCH_CTIME);
+    touch(fs, &sp, TOUCH_MTIME | TOUCH_CTIME);
+    if (src_parent != dst_parent)
+        touch(fs, &dp, TOUCH_MTIME | TOUCH_CTIME);
+
+out:
+    if (have_child) ext4_fs_put_inode_ref(&child);
+    if (have_dp)    ext4_fs_put_inode_ref(&dp);
+    if (have_sp)    ext4_fs_put_inode_ref(&sp);
+    return txn_finish(dev, fs, r);
+}
+
+/* ------------------------------------------------------------------ data -- */
+
+int ext4b_write(ext4b_device *dev,
+                uint32_t inode,
+                uint64_t offset,
+                const void *buf,
+                size_t count,
+                size_t *out_written)
+{
+    WRITE_PROLOGUE(dev, fs);
+    if (!buf || !out_written)
+        return EINVAL;
+
+    *out_written = 0;
+    if (count == 0)
+        return EOK;
+
+    int r = txn_begin(fs);
+    if (r != EOK)
+        return r;
+
+    struct ext4_inode_ref ref;
+    r = ext4_fs_get_inode_ref(fs, inode, &ref);
+    if (r != EOK)
+        return txn_finish(dev, fs, r);
+
+    if (ext4_inode_is_type(&fs->sb, ref.inode, EXT4_INODE_MODE_DIRECTORY)) {
+        ext4_fs_put_inode_ref(&ref);
+        return txn_finish(dev, fs, EISDIR);
+    }
+
+    const uint32_t bsize = ext4_sb_get_block_size(&fs->sb);
+    uint64_t fsize = ext4_inode_get_size(&fs->sb, ref.inode);
+
+    /* Blocks the file already has backing for. */
+    uint32_t have_blocks = (uint32_t)((fsize + bsize - 1) / bsize);
+
+    const uint8_t *src = buf;
+    size_t remaining = count;
+    uint64_t pos = offset;
+
+    /* Batch the block writes; the cache is flushed by txn_finish. */
+    ext4_block_cache_write_back(&dev->bdev, 1);
+
+    while (remaining > 0) {
+        uint32_t lblk = (uint32_t)(pos / bsize);
+        uint32_t in_off = (uint32_t)(pos % bsize);
+        uint32_t chunk = bsize - in_off;
+        if (chunk > remaining)
+            chunk = (uint32_t)remaining;
+
+        ext4_fsblk_t fblk = 0;
+        if (lblk < have_blocks) {
+            /* Within the allocated range: map, allocating if it is a hole. */
+            r = ext4_fs_init_inode_dblk_idx(&ref, lblk, &fblk);
+        } else {
+            /*
+             * Past the end. append_inode_dblk only ever adds at the current
+             * end, so walk out to lblk one block at a time. Intermediate
+             * blocks are left unwritten, which is what makes a sparse write
+             * past EOF read back as zeroes.
+             */
+            while (have_blocks <= lblk) {
+                uint32_t appended = 0;
+                r = ext4_fs_append_inode_dblk(&ref, &fblk, &appended);
+                if (r != EOK)
+                    break;
+                have_blocks++;
+            }
+        }
+        if (r != EOK)
+            break;
+
+        if (fblk == 0) {
+            r = EIO;
+            break;
+        }
+
+        r = ext4_block_writebytes(&dev->bdev,
+                                  (uint64_t)fblk * bsize + in_off, src, chunk);
+        if (r != EOK)
+            break;
+
+        src        += chunk;
+        pos        += chunk;
+        remaining  -= chunk;
+        *out_written += chunk;
+    }
+
+    ext4_block_cache_write_back(&dev->bdev, 0);
+
+    /* Growing the file is only visible once i_size says so. */
+    if (*out_written > 0) {
+        if (pos > fsize)
+            ext4_inode_set_size(ref.inode, pos);
+        touch(fs, &ref, TOUCH_MTIME | TOUCH_CTIME);
+        ref.dirty = true;
+    }
+
+    /* A partial write that made progress is still a success; the caller sees
+     * how far it got. Report an error only when nothing was written. */
+    if (*out_written > 0)
+        r = EOK;
+
+    ext4_fs_put_inode_ref(&ref);
+    return txn_finish(dev, fs, r);
+}
+
+int ext4b_truncate(ext4b_device *dev, uint32_t inode, uint64_t new_size)
+{
+    WRITE_PROLOGUE(dev, fs);
+
+    int r = txn_begin(fs);
+    if (r != EOK)
+        return r;
+
+    struct ext4_inode_ref ref;
+    r = ext4_fs_get_inode_ref(fs, inode, &ref);
+    if (r != EOK)
+        return txn_finish(dev, fs, r);
+
+    if (ext4_inode_is_type(&fs->sb, ref.inode, EXT4_INODE_MODE_DIRECTORY)) {
+        ext4_fs_put_inode_ref(&ref);
+        return txn_finish(dev, fs, EISDIR);
+    }
+
+    uint64_t old_size = ext4_inode_get_size(&fs->sb, ref.inode);
+
+    if (new_size < old_size) {
+        r = ext4_fs_truncate_inode(&ref, new_size);
+    } else if (new_size > old_size) {
+        /* Growing leaves a hole: no blocks are allocated, and the region
+         * reads back as zeroes. */
+        ext4_inode_set_size(ref.inode, new_size);
+        ref.dirty = true;
+    }
+
+    if (r == EOK && new_size != old_size)
+        touch(fs, &ref, TOUCH_MTIME | TOUCH_CTIME);
+
+    ext4_fs_put_inode_ref(&ref);
+    return txn_finish(dev, fs, r);
+}
+
+int ext4b_setattr(ext4b_device *dev,
+                  uint32_t inode,
+                  ext4b_setattr_mask mask,
+                  const ext4b_attrs *attrs)
+{
+    WRITE_PROLOGUE(dev, fs);
+    if (!attrs)
+        return EINVAL;
+
+    /* Resizing reallocates blocks, so route it through the truncate path
+     * rather than duplicating that logic here. */
+    if (mask & EXT4B_SET_SIZE) {
+        int tr = ext4b_truncate(dev, inode, attrs->size);
+        if (tr != EOK)
+            return tr;
+        mask &= ~EXT4B_SET_SIZE;
+        if (mask == 0)
+            return EOK;
+    }
+
+    int r = txn_begin(fs);
+    if (r != EOK)
+        return r;
+
+    struct ext4_inode_ref ref;
+    r = ext4_fs_get_inode_ref(fs, inode, &ref);
+    if (r != EOK)
+        return txn_finish(dev, fs, r);
+
+    if (mask & EXT4B_SET_MODE) {
+        uint32_t m = ext4_inode_get_mode(&fs->sb, ref.inode);
+        m = (m & EXT4_INODE_MODE_TYPE_MASK) | (attrs->mode & 0x0FFF);
+        ext4_inode_set_mode(&fs->sb, ref.inode, m);
+    }
+    if (mask & EXT4B_SET_UID)   ext4_inode_set_uid(ref.inode, attrs->uid);
+    if (mask & EXT4B_SET_GID)   ext4_inode_set_gid(ref.inode, attrs->gid);
+    if (mask & EXT4B_SET_ATIME) ext4_inode_set_access_time(ref.inode, (uint32_t)attrs->atime);
+    if (mask & EXT4B_SET_MTIME) ext4_inode_set_modif_time(ref.inode, (uint32_t)attrs->mtime);
+
+    /* Any attribute change updates ctime, by definition. */
+    touch(fs, &ref, TOUCH_CTIME);
+    ref.dirty = true;
+
+    ext4_fs_put_inode_ref(&ref);
+    return txn_finish(dev, fs, EOK);
+}
+
+/* ----------------------------------------------------------- xattr write -- */
+
+int ext4b_setxattr(ext4b_device *dev, uint32_t inode,
+                   const char *name,
+                   const void *value, size_t value_len)
+{
+    WRITE_PROLOGUE(dev, fs);
+    if (!name)
+        return EINVAL;
+
+    uint8_t name_index = 0;
+    size_t  short_len  = 0;
+    bool    found      = false;
+    const char *short_name =
+        ext4_extract_xattr_name(name, strlen(name), &name_index, &short_len, &found);
+    if (!found)
+        return ENOTSUP;
+
+    int r = txn_begin(fs);
+    if (r != EOK)
+        return r;
+
+    struct ext4_inode_ref ref;
+    r = ext4_fs_get_inode_ref(fs, inode, &ref);
+    if (r != EOK)
+        return txn_finish(dev, fs, r);
+
+    r = ext4_xattr_set(&ref, name_index, short_name, short_len, value, value_len);
+    if (r == EOK)
+        touch(fs, &ref, TOUCH_CTIME);
+
+    ext4_fs_put_inode_ref(&ref);
+    return txn_finish(dev, fs, r);
+}
+
+int ext4b_removexattr(ext4b_device *dev, uint32_t inode, const char *name)
+{
+    WRITE_PROLOGUE(dev, fs);
+    if (!name)
+        return EINVAL;
+
+    uint8_t name_index = 0;
+    size_t  short_len  = 0;
+    bool    found      = false;
+    const char *short_name =
+        ext4_extract_xattr_name(name, strlen(name), &name_index, &short_len, &found);
+    if (!found)
+        return ENODATA;
+
+    int r = txn_begin(fs);
+    if (r != EOK)
+        return r;
+
+    struct ext4_inode_ref ref;
+    r = ext4_fs_get_inode_ref(fs, inode, &ref);
+    if (r != EOK)
+        return txn_finish(dev, fs, r);
+
+    r = ext4_xattr_remove(&ref, name_index, short_name, short_len);
+    if (r == EOK)
+        touch(fs, &ref, TOUCH_CTIME);
+
+    ext4_fs_put_inode_ref(&ref);
+    return txn_finish(dev, fs, r);
+}

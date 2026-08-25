@@ -1,0 +1,31 @@
+Subject: compute entry size with sizeof instead of null-pointer arithmetic
+
+ext4_xattr_list() sized its buffer with the old
+(char *)((T *)0 + 1) - (char *)(T *)0 idiom. That is undefined behaviour, and
+UBSan flags it on every call:
+
+    ext4_xattr.c:906:51: runtime error: applying non-zero offset 32 to null pointer
+
+sizeof is exactly equivalent and well-defined. Worth fixing not because the
+generated code is wrong today, but because the noise buries genuine findings on
+a sanitizer run -- which is how the xattr-remove NULL dereference fixed in the
+previous patch was found.
+
+--- a/src/ext4_xattr.c
++++ b/src/ext4_xattr.c
+@@ -899,13 +899,8 @@
+ 					    *)(list->name + name_len + 1);
+ 			}
+ 
+-			/*
+-			 * Size calculation by pointer arithmetics.
+-			 */
+-			buf_len +=
+-			    (char *)((struct ext4_xattr_list_entry *)0 + 1) +
+-			    name_len + 1 -
+-			    (char *)(struct ext4_xattr_list_entry *)0;
++			buf_len += sizeof(struct ext4_xattr_list_entry) +
++				   name_len + 1;
+ 		}
+ 	}
+ 

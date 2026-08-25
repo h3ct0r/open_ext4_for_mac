@@ -1,0 +1,39 @@
+Subject: fix NULL dereference removing an xattr stored in the inode body
+
+ext4_xattr_remove() searches the inode body first. When the attribute is found
+there, use_block stays false and block_finder.s is never populated -- only
+block_finder.i was assigned. The non-block branch nonetheless passed
+&block_finder.s to ext4_xattr_set_entry(), whose first act is to walk the entry
+list starting at s->first. That pointer is NULL, so EXT4_XATTR_IS_LAST_ENTRY()
+dereferences address 0 and the process dies with SIGSEGV.
+
+ext4_xattr_set() gets this right in the equivalent branch: it passes
+&ibody_finder.s. This makes remove match.
+
+Reproduces with any attribute small enough to live in the inode body, which is
+the common case -- mke2fs defaults to 256-byte inodes:
+
+    setxattr /file user.colour blue
+    removexattr /file user.colour      -> SIGSEGV
+
+Found with -fsanitize=address,undefined:
+
+    ext4_xattr.c:327:10: runtime error: load of null pointer of type 'uint32_t'
+    #0 ext4_xattr_set_entry ext4_xattr.c:327
+    #1 ext4_xattr_remove    ext4_xattr.c:1264
+
+diff --git a/src/ext4_xattr.c b/src/ext4_xattr.c
+index f8a5778..84687f9 100644
+--- a/src/ext4_xattr.c
++++ b/src/ext4_xattr.c
+@@ -1260,8 +1260,8 @@ int ext4_xattr_remove(struct ext4_inode_ref *inode_ref, uint8_t name_index,
+ 		}
+ 
+ 	} else {
+-		/* Now remove the entry */
+-		ext4_xattr_set_entry(&i, &block_finder.s, false);
++		/* Now remove the entry from the inode body */
++		ext4_xattr_set_entry(&i, &ibody_finder.s, false);
+ 		inode_ref->dirty = true;
+ 	}
+ out:

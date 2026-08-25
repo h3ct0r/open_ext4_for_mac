@@ -243,6 +243,97 @@ int ext4b_map_extents(ext4b_device *dev,
                       size_t max_extents,
                       size_t *out_count);
 
+
+/* ============================================================== writing == */
+/*
+ * All mutations are inode-oriented: they take a parent directory inode plus a
+ * name, which is exactly what FSKit provides. Each call is atomic -- it opens
+ * a journal transaction, does its work, and commits, or aborts and leaves the
+ * volume untouched.
+ *
+ * Every one of these returns EROFS unless the device was created writable AND
+ * mounted read-write.
+ *
+ * A note on timestamps: lwext4 zeroes all inode times on allocation and leaves
+ * updating them as a TODO ("when we have wall-clock time"), because it targets
+ * microcontrollers. We do have a clock, so the bridge maintains atime/mtime/
+ * ctime/crtime itself. Without this, Finder shows every file as created in
+ * 1970 and never notices a directory changing.
+ */
+
+/// Attribute fields to change in ext4b_setattr.
+typedef enum {
+    EXT4B_SET_MODE  = 1 << 0,
+    EXT4B_SET_UID   = 1 << 1,
+    EXT4B_SET_GID   = 1 << 2,
+    EXT4B_SET_SIZE  = 1 << 3,
+    EXT4B_SET_ATIME = 1 << 4,
+    EXT4B_SET_MTIME = 1 << 5,
+} ext4b_setattr_mask;
+
+/// Create a regular file, directory, FIFO or socket in `parent_inode`.
+/// `mode` carries permission bits only; the type comes from `type`.
+int ext4b_create(ext4b_device *dev,
+                 uint32_t parent_inode,
+                 const char *name, size_t name_len,
+                 ext4b_item_type type,
+                 uint32_t mode, uint32_t uid, uint32_t gid,
+                 uint32_t *out_inode);
+
+/// Create a symbolic link pointing at `target`.
+int ext4b_symlink(ext4b_device *dev,
+                  uint32_t parent_inode,
+                  const char *name, size_t name_len,
+                  const char *target, size_t target_len,
+                  uint32_t uid, uint32_t gid,
+                  uint32_t *out_inode);
+
+/// Add another directory entry for an existing inode (a hard link).
+int ext4b_hardlink(ext4b_device *dev,
+                   uint32_t parent_inode,
+                   const char *name, size_t name_len,
+                   uint32_t target_inode);
+
+/// Remove a name. Directories must already be empty; ENOTEMPTY otherwise.
+/// The inode itself is freed once its last link goes away.
+int ext4b_unlink(ext4b_device *dev,
+                 uint32_t parent_inode,
+                 const char *name, size_t name_len);
+
+/// Move/rename an entry, optionally between directories. If a plain file
+/// already exists at the destination it is replaced.
+int ext4b_rename(ext4b_device *dev,
+                 uint32_t src_parent, const char *src_name, size_t src_len,
+                 uint32_t dst_parent, const char *dst_name, size_t dst_len);
+
+/// Write file data, allocating blocks as needed. Extends the file when the
+/// write runs past the current end.
+int ext4b_write(ext4b_device *dev,
+                uint32_t inode,
+                uint64_t offset,
+                const void *buf,
+                size_t count,
+                size_t *out_written);
+
+/// Grow or shrink a file. Growing creates a sparse region.
+int ext4b_truncate(ext4b_device *dev, uint32_t inode, uint64_t new_size);
+
+/// Change ownership, permissions, size or times.
+int ext4b_setattr(ext4b_device *dev,
+                  uint32_t inode,
+                  ext4b_setattr_mask mask,
+                  const ext4b_attrs *attrs);
+
+int ext4b_setxattr(ext4b_device *dev, uint32_t inode,
+                   const char *name,
+                   const void *value, size_t value_len);
+
+int ext4b_removexattr(ext4b_device *dev, uint32_t inode, const char *name);
+
+/// True when the volume was mounted read-write.
+bool ext4b_is_writable(ext4b_device *dev);
+
+/* --------------------------------------------------------------- xattr -- */
 /* ------------------------------------------------------------------ xattr -- */
 
 typedef bool (*ext4b_xattr_fn)(void *ctx, const char *name, size_t name_len);

@@ -186,6 +186,45 @@ static uint32_t resolve(ext4b_device *dev, const char *path, ext4b_item_type *t)
     return ino;
 }
 
+
+/* Split "/a/b/c" into the inode of "/a/b" and the name "c". */
+static uint32_t resolve_parent(ext4b_device *dev, const char *path,
+                               const char **out_name, size_t *out_name_len)
+{
+    const char *last = strrchr(path, '/');
+    if (!last) {
+        *out_name = path;
+        *out_name_len = strlen(path);
+        return EXT4B_ROOT_INO;
+    }
+    *out_name = last + 1;
+    *out_name_len = strlen(last + 1);
+    if (*out_name_len == 0) {
+        fprintf(stderr, "path must not end in '/': %s\n", path);
+        return 0;
+    }
+    if (last == path)
+        return EXT4B_ROOT_INO;
+
+    char parent[4096];
+    size_t plen = (size_t)(last - path);
+    if (plen >= sizeof(parent)) return 0;
+    memcpy(parent, path, plen);
+    parent[plen] = '\0';
+    return resolve(dev, parent, NULL);
+}
+
+/* Commands that mutate the image; these force an O_RDWR open and an rw mount. */
+static bool is_write_cmd(const char *c)
+{
+    static const char *w[] = { "mkdir", "create", "write", "append", "rm",
+                               "mv", "ln", "symlink", "truncate", "chmod",
+                               "chown", "setxattr", "rmxattr", "script", NULL };
+    for (int i = 0; w[i]; i++)
+        if (strcmp(c, w[i]) == 0) return true;
+    return false;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 3) {
@@ -197,7 +236,20 @@ int main(int argc, char **argv)
             "  stat <path>        show inode attributes\n"
             "  cat <path>         write file contents to stdout\n"
             "  extents <path>     show the logical->physical extent map\n"
-            "  xattr <path>       list extended attributes\n",
+            "  xattr <path>       list extended attributes\n"
+            "\nwrite commands (open the image read-write):\n"
+            "  mkdir <path>            create a directory\n"
+            "  create <path> [mode]    create an empty file\n"
+            "  write <path> <text>     write text at offset 0\n"
+            "  append <path> <text>    append text at end of file\n"
+            "  rm <path>               remove a file or empty directory\n"
+            "  mv <src> <dst>          rename/move\n"
+            "  ln <target> <name>      create a hard link\n"
+            "  symlink <target> <name> create a symbolic link\n"
+            "  truncate <path> <size>  set file size\n"
+            "  chmod <path> <mode>     set permission bits\n"
+            "  setxattr <path> <n> <v> set an extended attribute\n"
+            "  rmxattr <path> <name>   remove an extended attribute\n",
             argv[0]);
         return 2;
     }
@@ -207,7 +259,8 @@ int main(int argc, char **argv)
 
     ext4b_set_logger(logger, NULL);
 
-    int fd = open(image, O_RDONLY);
+    bool writable = is_write_cmd(cmd);
+    int fd = open(image, writable ? O_RDWR : O_RDONLY);
     if (fd < 0) {
         perror("open");
         return 1;
@@ -221,7 +274,7 @@ int main(int argc, char **argv)
     file_ctx fc = { .fd = fd };
     const uint32_t bs = 512;
     ext4b_device *dev = ext4b_device_create(&fc, bs, (uint64_t)st.st_size / bs,
-                                            true, file_read, file_write, file_flush);
+                                            !writable, file_read, file_write, file_flush);
     if (!dev) {
         fprintf(stderr, "failed to create device\n");
         return 1;
@@ -261,7 +314,7 @@ int main(int argc, char **argv)
         goto out;
     }
 
-    int r = ext4b_mount(dev, true);
+    int r = ext4b_mount(dev, !writable);
     if (r != 0) {
         fprintf(stderr, "mount failed: %s\n", ext4b_strerror(r));
         rc = 1;
@@ -320,6 +373,108 @@ int main(int argc, char **argv)
         r = ext4b_listxattr(dev, ino, on_xattr, NULL);
         if (r != 0)
             fprintf(stderr, "listxattr: %s\n", ext4b_strerror(r));
+
+    } else if (writable) {
+        /* ---------------------------------------------------- mutations -- */
+        const char *name = NULL;
+        size_t name_len = 0;
+
+        if (strcmp(cmd, "mkdir") == 0 || strcmp(cmd, "create") == 0) {
+            if (argc < 4) { fprintf(stderr, "%s needs a path\n", cmd); rc = 2; goto unmount; }
+            uint32_t parent = resolve_parent(dev, argv[3], &name, &name_len);
+            if (!parent) { rc = 1; goto unmount; }
+            bool is_dir = (strcmp(cmd, "mkdir") == 0);
+            uint32_t mode = is_dir ? 0755 : 0644;
+            if (argc > 4) mode = (uint32_t)strtol(argv[4], NULL, 8);
+            uint32_t ino = 0;
+            r = ext4b_create(dev, parent, name, name_len,
+                             is_dir ? EXT4B_TYPE_DIR : EXT4B_TYPE_FILE,
+                             mode, (uint32_t)getuid(), (uint32_t)getgid(), &ino);
+            if (r != 0) { fprintf(stderr, "%s: %s\n", cmd, ext4b_strerror(r)); rc = 1; }
+            else printf("created inode %u\n", ino);
+
+        } else if (strcmp(cmd, "write") == 0 || strcmp(cmd, "append") == 0) {
+            if (argc < 5) { fprintf(stderr, "%s needs <path> <text>\n", cmd); rc = 2; goto unmount; }
+            uint32_t ino = resolve(dev, argv[3], NULL);
+            if (!ino) { rc = 1; goto unmount; }
+            uint64_t off = 0;
+            if (strcmp(cmd, "append") == 0) {
+                ext4b_attrs a;
+                if (ext4b_getattr(dev, ino, &a) == 0) off = a.size;
+            }
+            size_t written = 0;
+            r = ext4b_write(dev, ino, off, argv[4], strlen(argv[4]), &written);
+            if (r != 0) { fprintf(stderr, "write: %s\n", ext4b_strerror(r)); rc = 1; }
+            else printf("wrote %zu bytes at %llu\n", written, (unsigned long long)off);
+
+        } else if (strcmp(cmd, "rm") == 0) {
+            if (argc < 4) { fprintf(stderr, "rm needs a path\n"); rc = 2; goto unmount; }
+            uint32_t parent = resolve_parent(dev, argv[3], &name, &name_len);
+            if (!parent) { rc = 1; goto unmount; }
+            r = ext4b_unlink(dev, parent, name, name_len);
+            if (r != 0) { fprintf(stderr, "rm: %s\n", ext4b_strerror(r)); rc = 1; }
+
+        } else if (strcmp(cmd, "mv") == 0) {
+            if (argc < 5) { fprintf(stderr, "mv needs <src> <dst>\n"); rc = 2; goto unmount; }
+            const char *sname, *dname; size_t slen, dlen;
+            uint32_t sp = resolve_parent(dev, argv[3], &sname, &slen);
+            uint32_t dp = resolve_parent(dev, argv[4], &dname, &dlen);
+            if (!sp || !dp) { rc = 1; goto unmount; }
+            r = ext4b_rename(dev, sp, sname, slen, dp, dname, dlen);
+            if (r != 0) { fprintf(stderr, "mv: %s\n", ext4b_strerror(r)); rc = 1; }
+
+        } else if (strcmp(cmd, "ln") == 0) {
+            if (argc < 5) { fprintf(stderr, "ln needs <target> <name>\n"); rc = 2; goto unmount; }
+            uint32_t target = resolve(dev, argv[3], NULL);
+            if (!target) { rc = 1; goto unmount; }
+            uint32_t parent = resolve_parent(dev, argv[4], &name, &name_len);
+            if (!parent) { rc = 1; goto unmount; }
+            r = ext4b_hardlink(dev, parent, name, name_len, target);
+            if (r != 0) { fprintf(stderr, "ln: %s\n", ext4b_strerror(r)); rc = 1; }
+
+        } else if (strcmp(cmd, "symlink") == 0) {
+            if (argc < 5) { fprintf(stderr, "symlink needs <target> <name>\n"); rc = 2; goto unmount; }
+            uint32_t parent = resolve_parent(dev, argv[4], &name, &name_len);
+            if (!parent) { rc = 1; goto unmount; }
+            uint32_t ino = 0;
+            r = ext4b_symlink(dev, parent, name, name_len, argv[3], strlen(argv[3]),
+                              (uint32_t)getuid(), (uint32_t)getgid(), &ino);
+            if (r != 0) { fprintf(stderr, "symlink: %s\n", ext4b_strerror(r)); rc = 1; }
+
+        } else if (strcmp(cmd, "truncate") == 0) {
+            if (argc < 5) { fprintf(stderr, "truncate needs <path> <size>\n"); rc = 2; goto unmount; }
+            uint32_t ino = resolve(dev, argv[3], NULL);
+            if (!ino) { rc = 1; goto unmount; }
+            r = ext4b_truncate(dev, ino, strtoull(argv[4], NULL, 10));
+            if (r != 0) { fprintf(stderr, "truncate: %s\n", ext4b_strerror(r)); rc = 1; }
+
+        } else if (strcmp(cmd, "chmod") == 0) {
+            if (argc < 5) { fprintf(stderr, "chmod needs <path> <mode>\n"); rc = 2; goto unmount; }
+            uint32_t ino = resolve(dev, argv[3], NULL);
+            if (!ino) { rc = 1; goto unmount; }
+            ext4b_attrs a; memset(&a, 0, sizeof(a));
+            a.mode = (uint32_t)strtol(argv[4], NULL, 8);
+            r = ext4b_setattr(dev, ino, EXT4B_SET_MODE, &a);
+            if (r != 0) { fprintf(stderr, "chmod: %s\n", ext4b_strerror(r)); rc = 1; }
+
+        } else if (strcmp(cmd, "setxattr") == 0) {
+            if (argc < 6) { fprintf(stderr, "setxattr needs <path> <name> <value>\n"); rc = 2; goto unmount; }
+            uint32_t ino = resolve(dev, argv[3], NULL);
+            if (!ino) { rc = 1; goto unmount; }
+            r = ext4b_setxattr(dev, ino, argv[4], argv[5], strlen(argv[5]));
+            if (r != 0) { fprintf(stderr, "setxattr: %s\n", ext4b_strerror(r)); rc = 1; }
+
+        } else if (strcmp(cmd, "rmxattr") == 0) {
+            if (argc < 5) { fprintf(stderr, "rmxattr needs <path> <name>\n"); rc = 2; goto unmount; }
+            uint32_t ino = resolve(dev, argv[3], NULL);
+            if (!ino) { rc = 1; goto unmount; }
+            r = ext4b_removexattr(dev, ino, argv[4]);
+            if (r != 0) { fprintf(stderr, "rmxattr: %s\n", ext4b_strerror(r)); rc = 1; }
+
+        } else {
+            fprintf(stderr, "unknown write command: %s\n", cmd);
+            rc = 2;
+        }
 
     } else {
         fprintf(stderr, "unknown command: %s\n", cmd);

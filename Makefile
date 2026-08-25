@@ -52,7 +52,7 @@ SHIM_OBJS   := $(BUILD)/obj/shim/ext4_bridge.o
 
 CORE_LIB := $(BUILD)/lib/libext4core.a
 
-.PHONY: all core clean test tools check-submodule patch unpatch extension app sign install typecheck
+.PHONY: all core clean test test-asan tools check-submodule patch unpatch extension app sign install typecheck
 
 all: app
 
@@ -117,6 +117,17 @@ $(BUILD)/bin/ext4dump: tools/ext4dump.c $(CORE_LIB)
 
 test: tools
 	@bash Tests/run_tests.sh
+	@echo
+	@bash Tests/run_write_tests.sh
+
+# Same suites under AddressSanitizer + UBSan. Slower, but this is how the
+# NULL dereference in lwext4's xattr removal was found.
+test-asan:
+	@$(MAKE) --no-print-directory clean
+	@$(MAKE) --no-print-directory tools CONFIG=debug
+	@bash Tests/run_tests.sh
+	@echo
+	@bash Tests/run_write_tests.sh
 
 clean:
 	rm -rf $(BUILD)
