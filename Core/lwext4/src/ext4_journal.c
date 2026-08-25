@@ -1443,7 +1443,20 @@ int jbd_journal_stop(struct jbd_journal *journal)
 		return r;
 
 	journal->start = 0;
-	journal->trans_id = 0;
+	/*
+	 * Deliberately keep trans_id rather than resetting it to 0.
+	 *
+	 * jbd_journal_start() computes the next session's first transaction id
+	 * as on-disk sequence + 1, specifically so that records still
+	 * physically present in the log from an earlier session cannot be
+	 * mistaken for current ones. Writing 0 here defeats that: every session
+	 * then starts at 1, stale records also carry 1, and a crash that
+	 * advertises a log start before the new transaction commits lets
+	 * recovery replay the previous session's records over live metadata.
+	 *
+	 * Persisting the last id used keeps sequence numbers monotonic across
+	 * mounts, which is what makes the +1 meaningful.
+	 */
 	jbd_journal_write_sb(journal);
 	return jbd_write_sb(journal->jbd_fs);
 }
