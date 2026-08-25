@@ -35,7 +35,23 @@ extension Ext4Volume: FSVolume.ReadWriteOperations {
     func write(contents: Data,
                to item: FSItem,
                at offset: off_t) async throws -> Int {
-        throw Ext4Error.readOnly
+        guard let ext4Item = item as? Ext4Item else { throw Ext4Error.invalid }
+        try requireWritable()
+        guard !contents.isEmpty else { return 0 }
+
+        let written = try await executor.run { [self] in
+            var count = 0
+            let rc = contents.withUnsafeBytes { raw -> Int32 in
+                ext4b_write(device, ext4Item.inode, UInt64(offset),
+                            raw.baseAddress!, raw.count, &count)
+            }
+            try Ext4Error.check(rc, "write(\(ext4Item.inode) @\(offset))")
+            return count
+        }
+
+        // Size and mtime just changed on disk; the cached snapshot is stale.
+        ext4Item.invalidate()
+        return written
     }
 }
 
@@ -59,7 +75,36 @@ extension Ext4Volume: FSVolume.XattrOperations {
                   to value: Data?,
                   on item: FSItem,
                   policy: FSVolume.SetXattrPolicy) async throws {
-        throw Ext4Error.readOnly
+        guard let ext4Item = item as? Ext4Item else { throw Ext4Error.invalid }
+        try requireWritable()
+        guard let attrName = name.string else { throw Ext4Error.invalid }
+
+        // Honour the create/replace policy before touching the volume, so a
+        // policy violation never leaves a partial change behind.
+        let existing = try? await xattr(named: name, of: item)
+        switch policy {
+        case .mustCreate where existing != nil:
+            throw Ext4Error.posix(EEXIST)
+        case .mustReplace where existing == nil:
+            throw Ext4Error.posix(ENODATA)
+        default:
+            break
+        }
+
+        try await executor.run { [self] in
+            let rc: Int32
+            if let value {
+                rc = value.withUnsafeBytes { raw -> Int32 in
+                    ext4b_setxattr(device, ext4Item.inode, attrName,
+                                   raw.baseAddress, raw.count)
+                }
+            } else {
+                // A nil value means remove.
+                rc = ext4b_removexattr(device, ext4Item.inode, attrName)
+            }
+            try Ext4Error.check(rc, "setxattr(\(attrName))")
+        }
+        ext4Item.invalidate()
     }
 
     func xattrs(of item: FSItem) async throws -> [FSFileName] {

@@ -16,7 +16,7 @@ final class Ext4Volume: FSVolume {
 
     let bridge: BlockDeviceBridge
     let executor: Ext4Executor
-    private let identity: IdentityMapper
+    let identity: IdentityMapper
     let probe: ext4b_probe_info
 
     /// True when the volume is mounted read-only, either because the media is

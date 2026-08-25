@@ -4,6 +4,7 @@
 //
 
 import Foundation
+import FSKit
 
 /// Presents Linux ownership in terms macOS can work with.
 ///
@@ -39,6 +40,22 @@ struct IdentityMapper {
 
     func uid(onDisk: UInt32) -> UInt32 { honorOwners ? onDisk : presentedUID }
     func gid(onDisk: UInt32) -> UInt32 { honorOwners ? onDisk : presentedGID }
+
+    /// Decide what actually gets stored on disk for a newly created object.
+    ///
+    /// The uid/gid written are the *presented* ones, so a file this Mac creates
+    /// is owned by this Mac's user when the disk goes back to Linux. That is
+    /// the least surprising outcome: the alternative, inheriting the parent
+    /// directory's Linux owner, would create files the local user then could
+    /// not modify under honorOwners.
+    func onDiskCreationAttributes(requested: FSItem.SetAttributesRequest,
+                                  isDirectory: Bool) -> (mode: UInt32, uid: UInt32, gid: UInt32) {
+        let defaultMode: UInt32 = isDirectory ? 0o755 : 0o644
+        let mode = requested.isValid(.mode) ? (requested.mode & 0o7777) : defaultMode
+        let uid = requested.isValid(.uid) ? requested.uid : presentedUID
+        let gid = requested.isValid(.gid) ? requested.gid : presentedGID
+        return (mode, uid, gid)
+    }
 
     func mode(onDisk: UInt32, isDirectory: Bool) -> UInt32 {
         guard !honorOwners else { return onDisk }

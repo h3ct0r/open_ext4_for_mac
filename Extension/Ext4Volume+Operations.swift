@@ -93,7 +93,38 @@ extension Ext4Volume: FSVolume.Operations {
 
     func setAttributes(_ request: FSItem.SetAttributesRequest,
                        on item: FSItem) async throws -> FSItem.Attributes {
-        throw Ext4Error.readOnly
+        guard let ext4Item = item as? Ext4Item else { throw Ext4Error.invalid }
+        try requireWritable()
+
+        var mask: UInt32 = 0
+        var attrs = ext4b_attrs()
+        let wanted = request.consumedAttributes
+
+        if wanted.contains(.mode) { mask |= EXT4B_SET_MODE.rawValue;  attrs.mode = request.mode }
+        if wanted.contains(.uid)  { mask |= EXT4B_SET_UID.rawValue;   attrs.uid  = request.uid }
+        if wanted.contains(.gid)  { mask |= EXT4B_SET_GID.rawValue;   attrs.gid  = request.gid }
+        if wanted.contains(.size) { mask |= EXT4B_SET_SIZE.rawValue;  attrs.size = request.size }
+        if wanted.contains(.accessTime) {
+            mask |= EXT4B_SET_ATIME.rawValue; attrs.atime = Int64(request.accessTime.tv_sec)
+        }
+        if wanted.contains(.modifyTime) {
+            mask |= EXT4B_SET_MTIME.rawValue; attrs.mtime = Int64(request.modifyTime.tv_sec)
+        }
+
+        if mask != 0 {
+            let finalMask = mask
+            let finalAttrs = attrs
+            try await executor.run { [self] in
+                var a = finalAttrs
+                try Ext4Error.check(
+                    ext4b_setattr(device, ext4Item.inode,
+                                  ext4b_setattr_mask(rawValue: finalMask), &a),
+                    "setattr(\(ext4Item.inode))")
+            }
+            ext4Item.invalidate()
+        }
+
+        return try await self.attributes(FSItem.GetAttributesRequest(), of: item)
     }
 
     // MARK: - Lookup and enumeration
@@ -162,32 +193,116 @@ extension Ext4Volume: FSVolume.Operations {
         return FSFileName(string: target)
     }
 
-    // MARK: - Mutating operations (not yet implemented)
+    // MARK: - Mutating operations
 
     func createItem(named name: FSFileName,
                     type: FSItem.ItemType,
                     inDirectory directory: FSItem,
                     attributes: FSItem.SetAttributesRequest) async throws -> (FSItem, FSFileName) {
-        throw Ext4Error.readOnly
+        guard let dir = directory as? Ext4Item else { throw Ext4Error.invalid }
+        try requireWritable()
+
+        let coreType: ext4b_item_type
+        switch type {
+        case .file:        coreType = EXT4B_TYPE_FILE
+        case .directory:   coreType = EXT4B_TYPE_DIR
+        case .fifo:        coreType = EXT4B_TYPE_FIFO
+        case .socket:      coreType = EXT4B_TYPE_SOCKET
+        default:           throw Ext4Error.notSupported
+        }
+
+        let nameData = try Self.nameBytes(name)
+        let (mode, uid, gid) = identity.onDiskCreationAttributes(
+            requested: attributes, isDirectory: type == .directory)
+
+        let inode = try await executor.run { [self] in
+            var created: UInt32 = 0
+            let rc = nameData.withUnsafeBytes { raw -> Int32 in
+                ext4b_create(device, dir.inode,
+                             raw.baseAddress!.assumingMemoryBound(to: CChar.self),
+                             raw.count, coreType, mode, uid, gid, &created)
+            }
+            try Ext4Error.check(rc, "create(\(name.debugDescription))")
+            return created
+        }
+
+        dir.invalidate()
+        return (item(for: inode), name)
     }
 
     func createSymbolicLink(named name: FSFileName,
                             inDirectory directory: FSItem,
                             attributes: FSItem.SetAttributesRequest,
                             linkContents contents: FSFileName) async throws -> (FSItem, FSFileName) {
-        throw Ext4Error.readOnly
+        guard let dir = directory as? Ext4Item else { throw Ext4Error.invalid }
+        try requireWritable()
+
+        let nameData = try Self.nameBytes(name)
+        guard let targetData = contents.data as Data?, !targetData.isEmpty else {
+            throw Ext4Error.invalid
+        }
+        let (_, uid, gid) = identity.onDiskCreationAttributes(
+            requested: attributes, isDirectory: false)
+
+        let inode = try await executor.run { [self] in
+            var created: UInt32 = 0
+            let rc = nameData.withUnsafeBytes { n -> Int32 in
+                targetData.withUnsafeBytes { t -> Int32 in
+                    ext4b_symlink(device, dir.inode,
+                                  n.baseAddress!.assumingMemoryBound(to: CChar.self), n.count,
+                                  t.baseAddress!.assumingMemoryBound(to: CChar.self), t.count,
+                                  uid, gid, &created)
+                }
+            }
+            try Ext4Error.check(rc, "symlink")
+            return created
+        }
+
+        dir.invalidate()
+        return (item(for: inode), name)
     }
 
     func createLink(to item: FSItem,
                     named name: FSFileName,
                     inDirectory directory: FSItem) async throws -> FSFileName {
-        throw Ext4Error.readOnly
+        guard let target = item as? Ext4Item,
+              let dir = directory as? Ext4Item else { throw Ext4Error.invalid }
+        try requireWritable()
+
+        let nameData = try Self.nameBytes(name)
+        try await executor.run { [self] in
+            let rc = nameData.withUnsafeBytes { raw -> Int32 in
+                ext4b_hardlink(device, dir.inode,
+                               raw.baseAddress!.assumingMemoryBound(to: CChar.self),
+                               raw.count, target.inode)
+            }
+            try Ext4Error.check(rc, "hardlink")
+        }
+
+        target.invalidate()
+        dir.invalidate()
+        return name
     }
 
     func removeItem(_ item: FSItem,
                     named name: FSFileName,
                     fromDirectory directory: FSItem) async throws {
-        throw Ext4Error.readOnly
+        guard let victim = item as? Ext4Item,
+              let dir = directory as? Ext4Item else { throw Ext4Error.invalid }
+        try requireWritable()
+
+        let nameData = try Self.nameBytes(name)
+        try await executor.run { [self] in
+            let rc = nameData.withUnsafeBytes { raw -> Int32 in
+                ext4b_unlink(device, dir.inode,
+                             raw.baseAddress!.assumingMemoryBound(to: CChar.self),
+                             raw.count)
+            }
+            try Ext4Error.check(rc, "unlink")
+        }
+
+        victim.invalidate()
+        dir.invalidate()
     }
 
     func renameItem(_ item: FSItem,
@@ -196,7 +311,48 @@ extension Ext4Volume: FSVolume.Operations {
                     to destinationName: FSFileName,
                     inDirectory destinationDirectory: FSItem,
                     overItem: FSItem?) async throws -> FSFileName {
-        throw Ext4Error.readOnly
+        guard let src = sourceDirectory as? Ext4Item,
+              let dst = destinationDirectory as? Ext4Item else { throw Ext4Error.invalid }
+        try requireWritable()
+
+        let srcData = try Self.nameBytes(sourceName)
+        let dstData = try Self.nameBytes(destinationName)
+
+        try await executor.run { [self] in
+            let rc = srcData.withUnsafeBytes { s -> Int32 in
+                dstData.withUnsafeBytes { d -> Int32 in
+                    ext4b_rename(device,
+                                 src.inode, s.baseAddress!.assumingMemoryBound(to: CChar.self), s.count,
+                                 dst.inode, d.baseAddress!.assumingMemoryBound(to: CChar.self), d.count)
+                }
+            }
+            try Ext4Error.check(rc, "rename")
+        }
+
+        (item as? Ext4Item)?.invalidate()
+        (overItem as? Ext4Item)?.invalidate()
+        src.invalidate()
+        dst.invalidate()
+        return destinationName
+    }
+
+    // MARK: - Helpers
+
+    func requireWritable() throws {
+        guard !isReadOnly, ext4b_is_writable(device) else { throw Ext4Error.readOnly }
+    }
+
+    /// ext4 names are raw byte strings, not Unicode. Take the bytes FSKit gives
+    /// us verbatim rather than round-tripping through String, so names that are
+    /// not valid UTF-8 still work.
+    static func nameBytes(_ name: FSFileName) throws -> Data {
+        guard let data = name.data as Data?, !data.isEmpty else {
+            throw Ext4Error.invalid
+        }
+        guard data.count <= 255 else { throw Ext4Error.posix(ENAMETOOLONG) }
+        // A name containing '/' or NUL cannot exist in a directory entry.
+        guard !data.contains(0x2F), !data.contains(0x00) else { throw Ext4Error.invalid }
+        return data
     }
 }
 

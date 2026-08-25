@@ -22,8 +22,12 @@ extension Ext4Volume: FSVolumeKernelOffloadedIOOperations {
                       packer: FSExtentPacker) async throws {
         guard let ext4Item = file as? Ext4Item else { throw Ext4Error.invalid }
 
-        // Writing would have to allocate blocks; refuse until the write path lands.
-        if flags.contains(.write) { throw Ext4Error.readOnly }
+        // Kernel-offloaded *writes* would hand the kernel blocks to fill in
+        // directly, which means allocating and journalling the extent changes
+        // up front. Reads are mapped here; writes go through
+        // FSVolume.ReadWriteOperations instead, where allocation stays inside a
+        // transaction. Files are marked inhibitKernelOffloadedIO accordingly.
+        if flags.contains(.write) { throw Ext4Error.notSupported }
 
         try await executor.run { [self] in
             let maxExtents = 64

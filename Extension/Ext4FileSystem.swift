@@ -63,13 +63,25 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             throw Ext4Error.notSupported
         }
 
-        // FSUnaryFileSystem defines two options: -f (force) and --rdonly.
-        // Until the write path is complete and has passed its correctness gate,
-        // every mount is read-only regardless of what was requested.
-        let requestedReadOnly = options.taskOptions.contains("--rdonly")
-        let readOnly = true
-        if !requestedReadOnly {
-            Ext4Log.info("mounting read-only: write support is not enabled in this build")
+        //
+        // Mount mode. FSUnaryFileSystem defines -f (force) and --rdonly;
+        // anything else arrives via -o.
+        //
+        // Read-only is the default *even when the caller did not ask for it*.
+        // The write path passes its image-level suite (every operation checked
+        // with e2fsck, cross-checked against debugfs), but it has not yet been
+        // through crash-consistency testing, so enabling it silently on
+        // somebody's only copy of a disk is not a defensible default. Opt in
+        // explicitly with `-o rw`.
+        //
+        let opts = options.taskOptions
+        let requestedReadOnly = opts.contains("--rdonly")
+        let requestedWrite = opts.contains { $0 == "rw" || $0.hasSuffix(",rw") || $0.hasPrefix("rw,") }
+        let readOnly = requestedReadOnly || !requestedWrite
+
+        if readOnly && !requestedReadOnly {
+            Ext4Log.info("mounting read-only; pass -o rw to enable writes "
+                         + "(write support has not completed crash-consistency testing)")
         }
 
         guard let bridge = BlockDeviceBridge(resource: device, forceReadOnly: readOnly),
@@ -88,6 +100,15 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
 
         try executor.runSync {
             try Ext4Error.check(ext4b_mount(dev, readOnly), "mount")
+
+            // A volume with an unreplayed journal must not be written until it
+            // has been recovered; ext4b_mount refuses the read-write mount
+            // outright, so recovery happens here on the read-only mount and the
+            // caller can retry.
+            if info.needs_recovery && !readOnly {
+                Ext4Log.info("replaying journal")
+                try Ext4Error.check(ext4b_journal_recover(dev), "journal recovery")
+            }
         }
 
         let volume = Ext4Volume(bridge: bridge,
@@ -98,7 +119,8 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         self.bridge = bridge
         self.volume = volume
 
-        Ext4Log.info("mounted ext\(info.generation) volume, \(info.block_count) blocks of \(info.block_size)B")
+        Ext4Log.info("mounted ext\(info.generation) volume \(readOnly ? "read-only" : "read-write"), "
+                     + "\(info.block_count) blocks of \(info.block_size)B")
         return volume
     }
 
