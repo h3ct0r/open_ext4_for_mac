@@ -13,6 +13,20 @@ APPEX="$APP/Contents/Extensions/Ext4FS.appex"
 ENTITLEMENTS="$ROOT/Extension/Ext4FS.entitlements"
 PROFILE="${PROVISIONING_PROFILE:-$ROOT/Extension/Ext4FS.provisionprofile}"
 
+# Optional: sign from a specific keychain.
+#
+# A login keychain that has accumulated duplicate key entries or unrelated PKI
+# (national eID certificates and their chains are a common source) can make
+# codesign fail with "unable to build chain to self-signed root" followed by
+# errSecInternalComponent, even when the Developer ID chain itself is complete
+# and verifies. Pointing at a keychain containing only the signing identity
+# avoids that entirely. See docs/SIGNING.md.
+KEYCHAIN_ARG=()
+if [ -n "${SIGN_KEYCHAIN:-}" ]; then
+  KEYCHAIN_ARG=(--keychain "$SIGN_KEYCHAIN")
+  echo "using keychain: $SIGN_KEYCHAIN"
+fi
+
 [ -d "$APP" ]   || { echo "error: $APP not found — run 'make app' first"; exit 1; }
 [ -d "$APPEX" ] || { echo "error: extension missing from $APP"; exit 1; }
 
@@ -43,11 +57,13 @@ fi
 echo "signing extension..."
 codesign --force --timestamp --options runtime \
          --entitlements "$ENTITLEMENTS" \
+         "${KEYCHAIN_ARG[@]}" \
          --sign "$IDENTITY" \
          "$APPEX"
 
 echo "signing app..."
 codesign --force --timestamp --options runtime \
+         "${KEYCHAIN_ARG[@]}" \
          --sign "$IDENTITY" \
          "$APP"
 

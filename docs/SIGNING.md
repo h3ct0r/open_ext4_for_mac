@@ -63,6 +63,68 @@ Extensions → File System Extensions**. Verify macOS sees it:
 pluginkit -m -p com.apple.fskit.fsmodule
 ```
 
+## Troubleshooting: `errSecInternalComponent`
+
+```
+Warning: unable to build chain to self-signed root for signer "Developer ID Application: ..."
+<target>: errSecInternalComponent
+```
+
+The warning is usually a red herring. Check whether the chain is genuinely
+broken before chasing it:
+
+```bash
+security find-identity -v -p codesigning          # is the identity there?
+security find-certificate -a -c "Developer ID Certification Authority" -Z | grep SHA-256
+security find-certificate -c "Developer ID Application: YOUR NAME" -p > /tmp/leaf.pem
+security verify-cert -c /tmp/leaf.pem -p codeSign  # "verification successful"?
+```
+
+Note the `-a` on the second command. Without it, `find-certificate` returns only
+the **first** match, and since the G1 and G2 intermediates share a common name,
+it is easy to conclude the G2 intermediate is missing when it is present.
+
+If `verify-cert` succeeds, the chain is fine and something else is wrong. The
+usual cause is the **login keychain**, not the certificate:
+
+- duplicate private-key entries — one certificate showing up as several
+  identities in `security find-identity -v`
+- unrelated PKI with long chains (national eID / tax certificates and their
+  root stores) that Security has to walk
+
+Either can make chain construction fail inside `codesign` while every
+individual piece checks out. The reliable fix is to sign from a keychain that
+contains only the signing identity:
+
+```bash
+# Export the identity first: Keychain Access -> right-click the Developer ID
+# certificate -> Export -> .p12 (set a password).
+
+security create-keychain -p KEYCHAIN_PW signing.keychain
+security set-keychain-settings -lut 21600 signing.keychain
+security unlock-keychain -p KEYCHAIN_PW signing.keychain
+security import DeveloperID.p12 -k signing.keychain -P P12_PW \
+        -T /usr/bin/codesign -T /usr/bin/security
+security set-key-partition-list -S apple-tool:,apple:,codesign: \
+        -s -k KEYCHAIN_PW signing.keychain
+security list-keychains -d user -s login.keychain-db signing.keychain
+```
+
+Then build with it:
+
+```bash
+make sign SIGN_ID="Developer ID Application: Your Name (TEAMID)" \
+          SIGN_KEYCHAIN=signing.keychain
+```
+
+`scripts/diagnose_signing.sh` runs the whole check and tells you plainly whether
+a usable signature was produced.
+
+### What this is *not*
+
+**System Integrity Protection.** SIP has no bearing on `codesign` reading a
+keychain identity, and disabling it does not help. Leave it enabled.
+
 ## Distribution
 
 For others to install without their own developer account, the build must be

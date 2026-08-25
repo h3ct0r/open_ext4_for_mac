@@ -198,9 +198,12 @@ $(BUILD)/$(APP_NAME).app/Contents/MacOS/$(APP_NAME): App/Ext4MacApp.swift
 #   make sign SIGN_ID="Developer ID Application: Your Name (TEAMID)"
 
 SIGN_ID ?= -
+# Optional: a dedicated keychain holding only the signing identity. Use this if
+# codesign reports errSecInternalComponent from a cluttered login keychain.
+SIGN_KEYCHAIN ?=
 
 sign: app
-	@bash scripts/sign.sh "$(BUILD)/$(APP_NAME).app" "$(SIGN_ID)"
+	@SIGN_KEYCHAIN="$(SIGN_KEYCHAIN)" bash scripts/sign.sh "$(BUILD)/$(APP_NAME).app" "$(SIGN_ID)"
 
 install: sign
 	@rm -rf "/Applications/$(APP_NAME).app"
