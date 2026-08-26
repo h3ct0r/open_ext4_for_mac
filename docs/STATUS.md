@@ -870,13 +870,29 @@ on a disk image and on physical media alike. Ruled out by measurement:
 |---|---|
 | block-size alignment | fails on a perfectly aligned one-block read at offset 0 |
 | physical-sector alignment | `blockSize` and `physicalBlockSize` are both 512 here |
+| buffer alignment | heap-, block- and page-aligned buffers all fail alike |
 | request size or offset | six combinations, all fail |
 | lifecycle | fails during probe, during load, and with the volume active |
 | disk images only | fails identically on a physical USB stick |
+| entitlements | Apple's `exfat` module has strictly *fewer* than this one |
 | a missing manifest key | no FSKit key Apple's own modules declare is absent from ours |
 
-Nothing appears in fskitd's log or the kernel's, and all six probes fail inside
-the same millisecond — the call is refused before it reaches a device.
+Two measurements settle what it is not. A **plain `read` of the same offset
+and length, into the same buffer, microseconds apart, succeeds** — so the
+resource is fine and the request is well formed; the difference is the family.
+And **`metadataFlush` fails too**, though it takes no buffer and no range at
+all — so the family is gated as a whole rather than any call being malformed.
+That also kills the obvious workaround of keeping direct writes and borrowing
+just the flush.
+
+Apple's own `msdos` module references the entire family — `metadataRead`,
+`metadataWrite`, `delayedMetadataWrite`, `metadataFlush`,
+`asynchronousMetadataFlush`. Its `exfat` module references none of it and
+reads directly, exactly as this driver does. So the API demonstrably works in
+production, and nothing observable from outside explains why it is closed
+here. Nothing appears in fskitd's log or the kernel's, and every probe fails
+within the same millisecond, so the call is refused before it reaches a
+device.
 
 ### What this means in practice
 
@@ -886,10 +902,26 @@ recoverable by `e2fsck`, but inconsistent. **Eject before unplugging**, which
 flushes and closes the journal cleanly, and run `e2fsck` if a volume is ever
 pulled live.
 
-Both remaining approaches are unsatisfying. Finding whatever unlocks the
-metadata family would fix it properly and is a research problem with no
-obvious next lead. Refusing to mount removable media read-write would be safe
-and would remove the reason the driver exists.
+One question is still open and worth settling before anything is built on top
+of this. Two mechanisms would produce the damage that was observed, and they
+have different fixes:
+
+* **the device reordered the writes**, because nothing issued a barrier — in
+  which case no amount of care in this driver helps, and the honest response
+  is to shrink the window;
+* **dirty metadata was still held in lwext4's block cache** and never reached
+  the medium, in which case checkpointing more aggressively fixes it outright.
+
+The crash suites argue for the first: they cut the write stream at 303 points
+and freeze the *mounted* driver with `SIGSTOP` at 31 more, and both pass. Both
+methods preserve issue order — `SIGSTOP` freezes the process while its issued
+writes complete — so they test the second mechanism thoroughly and cannot test
+the first at all. That is consistent with a disk image passing and a USB stick
+failing, but it is not proof.
+
+The experiment that would settle it is to run `Tests/run_mount_crash_tests.sh`
+against a physical stick rather than an image. It needs a disk that can be
+erased.
 
 ## Not yet done
 - `newfs_fskit` reaches the module but never calls `startFormat`; see below

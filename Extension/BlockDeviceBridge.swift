@@ -30,29 +30,38 @@ final class BlockDeviceBridge {
     /// Which FSKit I/O family to use.
     ///
     /// `.metadataCache` is the family the design wants, and it is not
-    /// available. Every call fails with `EIO`, instantly and identically, on
-    /// both a disk image and a physical USB stick. Five explanations have been
-    /// ruled out by measurement: block-size alignment, physical-sector
-    /// alignment (both are 512 here), request size, request offset, and
-    /// lifecycle -- it fails the same during `probeResource`, during
-    /// `loadResource`, and with the volume fully active. Nothing appears in
-    /// fskitd's log or the kernel's when it happens, and all six probe cases
-    /// fail within the same millisecond, so the call is being refused before
-    /// it reaches any device.
+    /// available to this module. Every call in it fails with `EIO` --
+    /// instantly, identically, on a disk image and on a physical USB stick.
+    ///
+    /// What has been ruled out, each by measurement:
+    ///
+    /// | Explanation | Ruled out by |
+    /// |---|---|
+    /// | block alignment | fails on an aligned one-block read at offset 0 |
+    /// | sector alignment | `blockSize` and `physicalBlockSize` are both 512 |
+    /// | buffer alignment | heap-, block- and page-aligned buffers all fail |
+    /// | size or offset | six combinations, all fail |
+    /// | lifecycle | fails during probe, during load, and while active |
+    /// | disk images | fails identically on physical media |
+    /// | entitlements | Apple's exfat module has strictly fewer than we do |
+    /// | a manifest key | no FSKit key Apple's modules declare is missing here |
+    ///
+    /// The decisive one: a plain `read` of the same offset and length, into
+    /// the same buffer, microseconds apart, **succeeds**. The difference is
+    /// the family and nothing else. `metadataFlush` fails too, and it takes no
+    /// buffer and no range at all -- so the family is gated as a whole rather
+    /// than any request being malformed.
+    ///
+    /// Apple's own `msdos` module uses the entire family; `exfat` uses none of
+    /// it and reads directly, as we do. So the API works in production, and
+    /// nothing observable from here explains why it is closed to us.
     ///
     /// The consequence is not performance. `metadataFlush` is the **only**
-    /// write barrier in the whole `FSResource` API, and it belongs to this
-    /// family -- so with `.direct` there is no barrier at all, and `flush()`
-    /// below is a no-op. lwext4 issues its journal barriers faithfully and
-    /// nothing enforces them.
-    ///
-    /// That was documented here as an assumption. It is now known false: a
-    /// real USB stick, after an ungraceful teardown, came back with directory
-    /// entries whose parent link counts had never landed -- half a
-    /// transaction, which a journal exists to make impossible. A disk image
-    /// never showed it, because writes reach it through the page cache and
-    /// onto APFS in issue order; a USB stick has its own write cache and
-    /// reorders freely. See docs/STATUS.md.
+    /// write barrier in the whole `FSResource` API, so with `.direct` there is
+    /// no barrier at all and `flush()` below is a no-op: lwext4 issues its
+    /// journal barriers faithfully and nothing carries them out. A real USB
+    /// stick, pulled from under a live mount, came back with half a
+    /// transaction. See docs/STATUS.md.
     ///
     enum Mode {
         case direct
