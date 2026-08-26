@@ -20,6 +20,14 @@ symlinks, hard links, rename, `rm`, `rmdir`, extended attributes, and a clean
 unmount that closes the journal. Volumes written entirely on macOS are read
 back byte-for-byte by the real Linux kernel, with nothing in its log.
 
+It can also create and rename volumes. Formatting goes through the
+module-agnostic driver macOS ships:
+
+```bash
+newfs_fskit -t ext4 -L MYDISK /dev/disk5      # ext4, or -g 2 / -g 3
+sudo make install-diskutil                    # and appear in Disk Utility
+```
+
 Validation runs unattended in about two minutes:
 
 ```bash
@@ -32,9 +40,10 @@ make validate
 | write suite | 82 assertions, `e2fsck` after **every** mutating operation |
 | crash consistency | 256 cut points; the Linux kernel replays each journal |
 | differential vs Linux | 28 assertions, both directions |
+| format | 29 assertions; 117 geometries, all `e2fsck`-clean |
 | mounted driver | 15 assertions against a live FSKit mount |
 
-Testing found six genuine bugs in lwext4 — including one that replayed stale
+Testing found eight genuine bugs in lwext4 — including one that replayed stale
 journal records over live metadata, and one that hung the driver forever
 instead of failing — plus several of our own. See
 [docs/STATUS.md](docs/STATUS.md) and

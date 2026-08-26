@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    ext4.fs — registers ext2/3/4 as formattable filesystems with Disk Utility.
+
+    FSKit is enough to mount and to be formatted from the command line, but
+    `diskutil listFilesystems` and Disk Utility's Erase menu are driven by .fs
+    bundles in /Library/Filesystems. This bundle exists only to put ext2/3/4 in
+    that list; the work is still done by the FSKit extension, reached through
+    the wrapper scripts in Resources/.
+
+    Deliberately absent:
+
+      FSProbeExecutable / FSMediaTypes — DiskArbitration already probes through
+      FSKit and finds the extension that way. Declaring a probe here as well
+      would give the same media two probers racing to claim it.
+
+      FSMountExecutable — mounting goes through FSKit (`mount -F -t ext4`).
+
+    Install with `sudo make install-diskutil`.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>English</string>
+	<key>CFBundleIdentifier</key>
+	<string>dev.h3ct0r.ext4mac.fsbundle</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>ext4</string>
+	<key>CFBundlePackageType</key>
+	<string>fs  </string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleVersion</key>
+	<string>0.1.0</string>
+
+	<key>FSPersonalities</key>
+	<dict>
+		<key>EXT2</key>
+		<dict>
+			<key>FSName</key>
+			<string>ext2</string>
+			<key>FSSubType</key>
+			<integer>0</integer>
+			<key>FSFormatExecutable</key>
+			<string>newfs_ext4</string>
+			<key>FSFormatArguments</key>
+			<string>-2</string>
+			<key>FSFormatContentMask</key>
+			<string>Linux</string>
+			<!-- ext2 has no journal, so it fits in far less space. -->
+			<key>FSFormatMinimumSize</key>
+			<integer>1048576</integer>
+			<key>FSFormatMaximumSize</key>
+			<integer>17592186044416</integer>
+			<key>FSVerificationExecutable</key>
+			<string>fsck_ext4</string>
+			<key>FSVerificationArguments</key>
+			<string>-n</string>
+			<key>FSRepairExecutable</key>
+			<string>fsck_ext4</string>
+			<key>FSRepairArguments</key>
+			<string>-y</string>
+		</dict>
+		<key>EXT3</key>
+		<dict>
+			<key>FSName</key>
+			<string>ext3</string>
+			<key>FSSubType</key>
+			<integer>1</integer>
+			<key>FSFormatExecutable</key>
+			<string>newfs_ext4</string>
+			<key>FSFormatArguments</key>
+			<string>-3</string>
+			<key>FSFormatContentMask</key>
+			<string>Linux</string>
+			<!-- The journal is never smaller than 1024 blocks, which is 4 MiB
+			     at the default 4 KiB block size; 6 MiB is the smallest volume
+			     that formats cleanly, and 8 leaves room. -->
+			<key>FSFormatMinimumSize</key>
+			<integer>8388608</integer>
+			<key>FSFormatMaximumSize</key>
+			<integer>17592186044416</integer>
+			<key>FSVerificationExecutable</key>
+			<string>fsck_ext4</string>
+			<key>FSVerificationArguments</key>
+			<string>-n</string>
+			<key>FSRepairExecutable</key>
+			<string>fsck_ext4</string>
+			<key>FSRepairArguments</key>
+			<string>-y</string>
+		</dict>
+		<key>EXT4</key>
+		<dict>
+			<key>FSName</key>
+			<string>ext4</string>
+			<key>FSSubType</key>
+			<integer>2</integer>
+			<key>FSFormatExecutable</key>
+			<string>newfs_ext4</string>
+			<key>FSFormatArguments</key>
+			<string>-4</string>
+			<key>FSFormatContentMask</key>
+			<string>Linux</string>
+			<key>FSFormatMinimumSize</key>
+			<integer>8388608</integer>
+			<!-- lwext4's mkfs does not set the 64bit feature, so a volume is
+			     capped at 2^32 blocks: 16 TiB at 4 KiB blocks. -->
+			<key>FSFormatMaximumSize</key>
+			<integer>17592186044416</integer>
+			<key>FSVerificationExecutable</key>
+			<string>fsck_ext4</string>
+			<key>FSVerificationArguments</key>
+			<string>-n</string>
+			<key>FSRepairExecutable</key>
+			<string>fsck_ext4</string>
+			<key>FSRepairArguments</key>
+			<string>-y</string>
+		</dict>
+	</dict>
+</dict>
+</plist>

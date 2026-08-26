@@ -1,0 +1,25 @@
+--- a/src/ext4_mkfs.c
++++ b/src/ext4_mkfs.c
+@@ -116,8 +116,21 @@
+ 	uint32_t blocks = (uint32_t)EXT4_DIV_ROUND_UP(info->len, info->block_size);
+ 	uint32_t block_groups = EXT4_DIV_ROUND_UP(blocks, info->blocks_per_group);
+ 	uint32_t inodes = EXT4_DIV_ROUND_UP(info->inodes, block_groups);
+-	inodes = EXT4_ALIGN(inodes, (info->block_size / info->inode_size));
++	uint32_t align = info->block_size / info->inode_size;
+ 
++	/*
++	 * ext4 requires inodes_per_group to be a multiple of 8 so that every
++	 * group's inode bitmap begins on a byte boundary. Aligning only to the
++	 * inode-table stride is not enough: with 1 KiB blocks and 256-byte
++	 * inodes that stride is 4, and the resulting filesystem makes e2fsck
++	 * report "Padding at end of inode bitmap is not set" the first time it
++	 * is checked. mke2fs masks the low three bits off for the same reason.
++	 */
++	if (align < 8)
++		align = 8;
++
++	inodes = EXT4_ALIGN(inodes, align);
++
+ 	/* After properly rounding up the number of inodes/group,
+ 	 * make sure to update the total inodes field in the info struct.
+ 	 */

@@ -20,6 +20,7 @@
 #include <ext4_types.h>
 #include <ext4_misc.h>
 #include <ext4_errno.h>
+#include <ext4_mkfs.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -369,6 +370,74 @@ int ext4b_probe(ext4b_device *dev, ext4b_probe_info *out)
     return EOK;
 }
 
+/* =============================================================== format == */
+
+int ext4b_format(ext4b_device *dev, const ext4b_format_options *opts)
+{
+    if (!dev || !opts)
+        return EINVAL;
+    if (dev->mounted)
+        return EBUSY;
+    if (dev->read_only)
+        return EROFS;
+
+    int fs_type;
+    switch (opts->generation) {
+    case 2:  fs_type = F_SET_EXT2; break;
+    case 3:  fs_type = F_SET_EXT3; break;
+    case 4:  fs_type = F_SET_EXT4; break;
+    default: return EINVAL;
+    }
+
+    /* ext2 has no journal by definition; asking for one would produce a
+     * filesystem whose feature bits contradict its own generation. */
+    if (opts->generation == 2 && opts->journal)
+        return EINVAL;
+
+    switch (opts->block_size) {
+    case 0: case 1024: case 2048: case 4096: break;
+    default: return EINVAL;
+    }
+
+    /* lwext4 addresses the volume in filesystem blocks, so it cannot format a
+     * device whose blocks are larger than the filesystem block size. */
+    uint32_t block_size = opts->block_size ? opts->block_size : 4096;
+    if (dev->iface.ph_bsize > block_size)
+        return EINVAL;
+
+    struct ext4_mkfs_info info;
+    memset(&info, 0, sizeof(info));
+    info.block_size     = block_size;
+    info.inode_size     = opts->inode_size;
+    info.inodes         = opts->inode_count;
+    info.journal        = opts->journal;
+    info.journal_blocks = opts->journal_blocks;
+    info.label          = opts->label ? opts->label : "";
+    memcpy(info.uuid, opts->uuid, sizeof(info.uuid));
+
+    /*
+     * ext4_mkfs() drives the block device itself -- it calls ext4_block_init(),
+     * binds its own bcache, and tears both down again -- so it must be handed a
+     * device that is not already open. That is exactly the state a freshly
+     * created ext4b_device is in.
+     */
+    struct ext4_fs fs;
+    memset(&fs, 0, sizeof(fs));
+
+    int r = ext4_mkfs(&fs, &dev->bdev, &info, fs_type);
+    if (r != EOK)
+        return r;
+
+    /* mkfs wrote through the cache it just destroyed; make sure the bytes have
+     * actually reached the medium before we report success. */
+    if (dev->flush_fn) {
+        int fr = dev->flush_fn(dev->ctx);
+        if (fr != 0)
+            return fr;
+    }
+    return EOK;
+}
+
 /* ================================================================ mount == */
 
 int ext4b_mount(ext4b_device *dev, bool read_only)
@@ -522,6 +591,39 @@ int ext4b_sync(ext4b_device *dev)
     int r = ext4_cache_flush(BRIDGE_MOUNT_POINT);
     if (r != EOK)
         return r;
+    if (dev->flush_fn)
+        return dev->flush_fn(dev->ctx);
+    return EOK;
+}
+
+int ext4b_set_label(ext4b_device *dev, const char *label)
+{
+    if (!dev || !dev->mounted || !label)
+        return EINVAL;
+    if (dev->read_only)
+        return EROFS;
+
+    struct ext4_sblock *sb = NULL;
+    int r = ext4_get_sblock(BRIDGE_MOUNT_POINT, &sb);
+    if (r != EOK)
+        return r;
+
+    size_t len = strlen(label);
+    if (len > sizeof(sb->volume_name))
+        return ENAMETOOLONG;
+
+    /* Fixed-width and zero-padded: a 16-byte name has no terminator, so the
+     * field is cleared first rather than strncpy'd into. */
+    memset(sb->volume_name, 0, sizeof(sb->volume_name));
+    memcpy(sb->volume_name, label, len);
+
+    /* Write it through now instead of waiting for unmount to flush the
+     * superblock: a rename the user can see in Finder but that vanishes on
+     * power loss is worse than one that fails outright. */
+    r = ext4_sb_write(&dev->bdev, sb);
+    if (r != EOK)
+        return r;
+
     if (dev->flush_fn)
         return dev->flush_fn(dev->ctx);
     return EOK;

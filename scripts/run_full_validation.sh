@@ -3,12 +3,13 @@
 #
 #   1. read suite          — image-level, no dependencies
 #   2. write suite         — e2fsck after every mutating operation
-#   3. crash consistency   — cut the write stream everywhere, replay, verify
-#   4. differential        — cross-check against the real Linux ext4 driver
-#   5. mounted driver      — the same crash testing against a real mount
+#   3. format              — volumes we create, judged by e2fsck and by Linux
+#   4. crash consistency   — cut the write stream everywhere, replay, verify
+#   5. differential        — cross-check against the real Linux ext4 driver
+#   6. mounted driver      — the same crash testing against a real mount
 #
-# Stages 3-5 need a running Docker daemon (a real Linux kernel on Apple
-# Silicon); stage 5 additionally needs the signed extension installed and
+# Stages 4-6 need a running Docker daemon (a real Linux kernel on Apple
+# Silicon); stage 6 additionally needs the signed extension installed and
 # enabled. They are skipped with a warning rather than failing the run if that
 # is unavailable, so this is still useful on a machine without it.
 #
@@ -45,7 +46,14 @@ stage() {  # stage <name> <command...>
   fi
   local elapsed=$(( SECONDS - start ))
   STAGES+=("$name"); DURATIONS+=("${elapsed}s")
-  if [ "$rc" -eq 0 ]; then RESULTS+=("PASS"); else RESULTS+=("FAIL"); FAILED=1; fi
+  # 77 means the suite decided it could not run -- a missing prerequisite, not
+  # a pass. Recording it as PASS would mean a stage that silently stopped
+  # testing anything still showed green.
+  case "$rc" in
+    0)  RESULTS+=("PASS") ;;
+    77) RESULTS+=("SKIP") ;;
+    *)  RESULTS+=("FAIL"); FAILED=1 ;;
+  esac
 }
 
 skip() {  # skip <name> <why>
@@ -86,22 +94,26 @@ fi
 stage "1. read suite"  bash Tests/run_tests.sh
 stage "2. write suite" bash Tests/run_write_tests.sh
 
-if docker info >/dev/null 2>&1; then
-  stage "3. crash consistency" bash Tests/run_crash_tests.sh
-  stage "4. differential vs Linux" bash Tests/run_diff_tests.sh
+# Only the format suite's Linux round-trip needs Docker, and it skips that
+# section by itself; the geometry sweep needs nothing but e2fsck.
+stage "3. format" bash Tests/run_format_tests.sh
 
-  # Stages 1-4 all drive the core directly through a plain file. Only this one
+if docker info >/dev/null 2>&1; then
+  stage "4. crash consistency" bash Tests/run_crash_tests.sh
+  stage "5. differential vs Linux" bash Tests/run_diff_tests.sh
+
+  # Stages 1-5 all drive the core directly through a plain file. Only this one
   # goes through FSKit, so it is the only evidence about the path a real mount
-  # takes. It needs the signed extension installed and enabled.
+  # takes. It needs the signed extension installed *and enabled*.
   if pluginkit -m -p com.apple.fskit.fsmodule 2>/dev/null | grep -q "dev.h3ct0r.ext4mac.Ext4FS"; then
-    stage "5. mounted driver" bash Tests/run_mount_crash_tests.sh
+    stage "6. mounted driver" bash Tests/run_mount_crash_tests.sh
   else
-    skip "5. mounted driver" "the FSKit extension is not installed and enabled"
+    skip "6. mounted driver" "the FSKit extension is not installed"
   fi
 else
-  skip "3. crash consistency"     "docker daemon not reachable"
-  skip "4. differential vs Linux" "docker daemon not reachable"
-  skip "5. mounted driver"        "docker daemon not reachable"
+  skip "4. crash consistency"     "docker daemon not reachable"
+  skip "5. differential vs Linux" "docker daemon not reachable"
+  skip "6. mounted driver"        "docker daemon not reachable"
 fi
 
 TOTAL=$(( SECONDS - START ))
@@ -114,6 +126,16 @@ done
 echo | tee -a "$LOG"
 echo "total: ${TOTAL}s" | tee -a "$LOG"
 echo "log:   $LOG" | tee -a "$LOG"
-[ "$FAILED" -eq 0 ] && echo "ALL GREEN" | tee -a "$LOG" || echo "FAILURES PRESENT" | tee -a "$LOG"
+SKIPPED=0
+for r in "${RESULTS[@]}"; do [ "$r" = "SKIP" ] && SKIPPED=$((SKIPPED+1)); done
+
+if [ "$FAILED" -ne 0 ]; then
+  echo "FAILURES PRESENT" | tee -a "$LOG"
+elif [ "$SKIPPED" -ne 0 ]; then
+  # Say so plainly: green with something untested is not the same as green.
+  echo "ALL GREEN — but $SKIPPED stage(s) did not run" | tee -a "$LOG"
+else
+  echo "ALL GREEN" | tee -a "$LOG"
+fi
 
 exit "$FAILED"

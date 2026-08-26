@@ -1,0 +1,39 @@
+#!/bin/bash
+#
+# fsck_ext4 — bridge from Disk Utility's fsck convention to FSKit.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# This is NOT a structural checker. The extension behind it parses the
+# superblock, applies the feature gate, verifies the checksum seed and replays
+# a dirty journal -- it decides whether the volume can be mounted safely. It
+# does not walk the inode table and it cannot repair anything, because lwext4
+# has no fsck.
+#
+# That distinction matters here more than anywhere else: Disk Utility's First
+# Aid passes -y, meaning "repair without asking". Answering "repaired" to that
+# when nothing was repaired would be a lie the user acts on.
+set -u
+
+self=$(basename "$0")
+args=()
+repair_requested=0
+
+while [ $# -gt 1 ]; do
+    case "$1" in
+        -n) args+=(-n) ;;
+        -y) repair_requested=1 ;;
+        -p|-f|-q|-d) ;;   # preen/force/quiet/debug: nothing for us to vary
+        *) echo "$self: unsupported option $1" >&2; exit 1 ;;
+    esac
+    shift
+done
+
+[ $# -eq 1 ] || { echo "usage: $self [-n|-y] device" >&2; exit 1; }
+device="$1"
+
+if [ "$repair_requested" -eq 1 ]; then
+    echo "$self: this driver can verify a volume but cannot repair one." >&2
+    echo "$self: run e2fsck from e2fsprogs to repair an ext2/3/4 volume." >&2
+fi
+
+exec /sbin/fsck_fskit -t ext4 "${args[@]}" "$device"

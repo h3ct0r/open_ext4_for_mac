@@ -52,7 +52,7 @@ SHIM_OBJS   := $(BUILD)/obj/shim/ext4_bridge.o
 
 CORE_LIB := $(BUILD)/lib/libext4core.a
 
-.PHONY: all core clean test test-asan test-crash test-diff test-mount-crash validate tools entitlements check-submodule patch unpatch extension app sign install typecheck
+.PHONY: all core clean test test-asan test-crash test-diff test-format test-mount-crash validate tools entitlements check-submodule patch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil
 
 all: app
 
@@ -125,6 +125,9 @@ test-crash: tools
 
 test-diff: tools
 	@bash Tests/run_diff_tests.sh
+
+test-format: tools
+	@bash Tests/run_format_tests.sh
 
 # Crash consistency against the mounted driver rather than the offline core.
 # Needs the extension signed, installed and enabled; skips with a message if
@@ -234,6 +237,29 @@ entitlements:
 	     -e 's/@BUNDLE_ID@/$(BUNDLE_ID).$(EXT_NAME)/g' \
 	     Extension/Ext4FS.entitlements.in > Extension/Ext4FS.entitlements
 	@echo "entitlements: team $(TEAM_ID), app id $(TEAM_ID).$(BUNDLE_ID).$(EXT_NAME)"
+
+# --- Disk Utility integration ------------------------------------------------
+# FSKit is enough to mount, and enough for newfs_fskit/fsck_fskit on the
+# command line. `diskutil listFilesystems` and Disk Utility's Erase menu are a
+# separate mechanism: they read .fs bundles from /Library/Filesystems. This
+# installs a plist-only bundle whose formatter is a wrapper around newfs_fskit,
+# so there is still exactly one implementation.
+FS_BUNDLE_SRC  := Packaging/ext4.fs
+FS_BUNDLE_DEST := /Library/Filesystems/ext4.fs
+
+install-diskutil:
+	@test "$$(id -u)" = "0" || { echo "needs root: sudo make install-diskutil"; exit 1; }
+	@rm -rf "$(FS_BUNDLE_DEST)"
+	@cp -R "$(FS_BUNDLE_SRC)" "$(FS_BUNDLE_DEST)"
+	@chown -R root:wheel "$(FS_BUNDLE_DEST)"
+	@chmod -R go-w "$(FS_BUNDLE_DEST)"
+	@echo "installed $(FS_BUNDLE_DEST)"
+	@echo "verify with: diskutil listFilesystems | grep -i ext"
+
+uninstall-diskutil:
+	@test "$$(id -u)" = "0" || { echo "needs root: sudo make uninstall-diskutil"; exit 1; }
+	@rm -rf "$(FS_BUNDLE_DEST)"
+	@echo "removed $(FS_BUNDLE_DEST)"
 
 install: sign
 	@rm -rf "/Applications/$(APP_NAME).app"

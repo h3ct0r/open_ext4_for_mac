@@ -245,7 +245,8 @@ static bool is_write_cmd(const char *c)
 {
     static const char *w[] = { "mkdir", "create", "write", "append", "rm",
                                "mv", "ln", "symlink", "truncate", "chmod",
-                               "chown", "setxattr", "rmxattr", "script", NULL };
+                               "chown", "setxattr", "rmxattr", "script",
+                               "format", "label", NULL };
     for (int i = 0; w[i]; i++)
         if (strcmp(c, w[i]) == 0) return true;
     return false;
@@ -258,6 +259,8 @@ int main(int argc, char **argv)
             "usage: %s <image> <command> [args]\n"
             "\ncommands:\n"
             "  probe              inspect the superblock without mounting\n"
+            "  format [gen] [bs] [label]\n"
+            "                     write a fresh filesystem (gen 2/3/4, default 4)\n"
             "  ls [path]          recursive listing (default /)\n"
             "  stat <path>        show inode attributes\n"
             "  cat <path>         write file contents to stdout\n"
@@ -275,7 +278,8 @@ int main(int argc, char **argv)
             "  truncate <path> <size>  set file size\n"
             "  chmod <path> <mode>     set permission bits\n"
             "  setxattr <path> <n> <v> set an extended attribute\n"
-            "  rmxattr <path> <name>   remove an extended attribute\n",
+            "  rmxattr <path> <name>   remove an extended attribute\n"
+            "  label <name>            set the volume label\n",
             argv[0]);
         return 2;
     }
@@ -310,6 +314,43 @@ int main(int argc, char **argv)
     }
 
     int rc = 0;
+
+    if (strcmp(cmd, "format") == 0) {
+        ext4b_format_options opts;
+        memset(&opts, 0, sizeof(opts));
+        opts.generation = (argc > 3) ? atoi(argv[3]) : 4;
+        opts.block_size = (argc > 4) ? (uint32_t)strtoul(argv[4], NULL, 10) : 0;
+        opts.label      = (argc > 5) ? argv[5] : NULL;
+        opts.journal    = (opts.generation != 2);
+
+        /* A real driver takes the UUID from the platform's RNG. Here it comes
+         * from the environment when set, so tests can format reproducibly. */
+        const char *uuid_env = getenv("EXT4DUMP_UUID");
+        if (uuid_env && strlen(uuid_env) >= 32) {
+            for (int i = 0; i < 16; i++) {
+                char byte[3] = { uuid_env[i*2], uuid_env[i*2+1], 0 };
+                opts.uuid[i] = (uint8_t)strtoul(byte, NULL, 16);
+            }
+        } else {
+            FILE *rng = fopen("/dev/urandom", "rb");
+            if (!rng || fread(opts.uuid, 1, sizeof(opts.uuid), rng) != sizeof(opts.uuid)) {
+                fprintf(stderr, "could not read random bytes for the volume UUID\n");
+                if (rng) fclose(rng);
+                rc = 1; goto out;
+            }
+            fclose(rng);
+            /* RFC 4122 version 4 */
+            opts.uuid[6] = (opts.uuid[6] & 0x0F) | 0x40;
+            opts.uuid[8] = (opts.uuid[8] & 0x3F) | 0x80;
+        }
+
+        int r = ext4b_format(dev, &opts);
+        if (r != 0) {
+            fprintf(stderr, "format failed: %s\n", ext4b_strerror(r));
+            rc = 1;
+        }
+        goto out;
+    }
 
     if (strcmp(cmd, "probe") == 0) {
         ext4b_probe_info info;
@@ -493,6 +534,10 @@ int main(int argc, char **argv)
             r = ext4b_setxattr(dev, ino, argv[4], argv[5], strlen(argv[5]));
             if (r != 0) { fprintf(stderr, "setxattr: %s\n", ext4b_strerror(r)); rc = 1; }
 
+        } else if (strcmp(cmd, "label") == 0) {
+            if (argc < 4) { fprintf(stderr, "label needs a name\n"); rc = 2; goto unmount; }
+            r = ext4b_set_label(dev, argv[3]);
+            if (r != 0) { fprintf(stderr, "label: %s\n", ext4b_strerror(r)); rc = 1; }
         } else if (strcmp(cmd, "rmxattr") == 0) {
             if (argc < 5) { fprintf(stderr, "rmxattr needs <path> <name>\n"); rc = 2; goto unmount; }
             uint32_t ino = resolve(dev, argv[3], NULL);

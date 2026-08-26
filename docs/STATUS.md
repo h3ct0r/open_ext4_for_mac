@@ -7,7 +7,7 @@
 | 2 — kernel-offloaded I/O | **disabled** — see below |
 | 3 — write path | **complete and working on real mounts** |
 | 4 — correctness harness | **complete: image, crash-consistency, differential-vs-Linux, and mounted-driver** |
-| 5 — polish & distribution | not started |
+| 5 — polish & distribution | **format implemented**; check is a mountability check only; no DMG yet |
 
 ## What works today
 
@@ -142,9 +142,10 @@ how two genuine lwext4 defects were found; see `patches/lwext4/README.md`.
 ## Validation
 
 ```bash
-make validate           # all five stages, unattended
+make validate           # all six stages, unattended
 make validate-asan      # the same under AddressSanitizer + UBSan
-make test-mount-crash   # stage 5 on its own
+make test-format        # stage 3 on its own
+make test-mount-crash   # stage 6 on its own
 ```
 
 | Stage | What it proves |
@@ -153,12 +154,14 @@ make test-mount-crash   # stage 5 on its own
 | write suite | 82 assertions, `e2fsck` after **every** mutating operation |
 | crash consistency | 256 cut points across 12 operations; the write stream is severed at every point, the **real Linux kernel** replays the journal, and `e2fsck` must be clean |
 | differential vs Linux | 28 assertions; volumes round-trip between our driver and the real Linux ext4 driver in both directions, with the kernel log required to be silent |
+| format | 29 assertions; 117 size/block-size/generation combinations must be `e2fsck`-clean, and the volume must round-trip through the Linux kernel |
 | mounted driver | 15 assertions against a **real mount** — the only stage that goes through FSKit |
 
-Stages 3–5 use Docker, which on Apple Silicon is a real Linux VM — so the
+Stages 4–6 use Docker, which on Apple Silicon is a real Linux VM — so the
 oracle is the actual ext4 implementation, not another copy of our assumptions.
-They skip with a warning if Docker is not running; stage 5 also skips if the
-signed extension is not installed and enabled.
+They skip with a warning if Docker is not running; stage 6 also skips if the
+signed extension is not installed and enabled. Stage 3 runs either way — only
+its round-trip section needs Docker.
 
 The power-failure model matters: after the cut point, writes are **silently
 discarded while still reporting success**. A real power loss does not hand the
@@ -224,8 +227,92 @@ results. Two hung instead of failing, and one crashed a process the system
 silently restarts. A suite that only checks whether the filesystem is correct
 afterwards would have called all of them green.
 
+## Formatting
+
+macOS ships two module-agnostic drivers, `/sbin/newfs_fskit` and
+`/sbin/fsck_fskit`, which dispatch to an FSKit module by name. Conforming to
+`FSManageableResourceMaintenanceOperations` is all it takes to be reachable
+from them:
+
+```bash
+newfs_fskit -t ext4 -L MYDISK /dev/disk5
+newfs_fskit -t ext4 -g 3 -b 1024 /dev/disk5     # ext3, 1 KiB blocks
+fsck_fskit  -t ext4 /dev/disk5
+```
+
+`-t` selects the *module*, by its `FSShortName` — not a personality — so which
+of ext2/ext3/ext4 to create is `-g`. The options are declared in `Info.plist`
+under `FSFormatOptionSyntax` (`g:b:L:I:N:J:n`) and `FSCheckOptionSyntax` (`n`);
+FSKit parses them with getopt before the module sees them.
+
+Formatting clears any previous filesystem's signatures first, via FSKit's
+`wipeResource` (a wrapper around libutil's `wipefs`), then builds the volume.
+Each volume gets a fresh random UUID — lwext4's `mkfs` copies whatever UUID it
+is handed straight into the superblock and never generates one, so every
+volume would otherwise be all-zero and indistinguishable to DiskArbitration.
+
+### What the volumes look like
+
+lwext4's `mkfs` is conservative. Compared with `mke2fs` it omits `ext_attr`,
+`resize_inode`, `metadata_csum`, `64bit`, `flex_bg`, `dir_nlink`, `extra_isize`
+and `huge_file`, producing:
+
+```
+has_journal dir_index filetype extent sparse_super large_file
+```
+
+That is a valid ext4 the Linux kernel mounts without complaint, but it has **no
+metadata checksums**, so it is less able to detect corruption than a volume
+`mke2fs` would create. Anyone with `mke2fs` available is better off using it;
+this exists so that a Mac with no e2fsprogs installed can still make a volume.
+
+The lack of `64bit` also caps a volume at 2³² blocks — 16 TiB at the default
+4 KiB block size, which is `FSFormatMaximumSize` in the personality.
+
+### `startCheck` is a mountability check, not `fsck`
+
+It parses the superblock, applies the feature gate, verifies the checksum seed
+still matches the UUID, and replays a dirty journal. It does **not** walk the
+inode table, cross-check bitmaps against extent trees, or repair anything —
+lwext4 has no fsck. A volume that passes can still be corrupt in ways only
+`e2fsck` will find, and the operation says so in its own output.
+
+### Renaming
+
+`FSVolume.RenameOperations` is implemented, so Finder's Rename and
+`diskutil rename` work. The label is a fixed 16-byte superblock field: a name
+longer than that is refused rather than truncated, and the write goes through
+immediately instead of waiting for unmount, because a rename the user can see
+but that vanishes on power loss is worse than one that fails.
+
+### Disk Utility
+
+`diskutil listFilesystems` and Disk Utility's Erase menu are driven by `.fs`
+bundles in `/Library/Filesystems`, not by FSKit — which is how Paragon's extFS
+appears in that list. `Packaging/ext4.fs` is such a bundle:
+
+```bash
+sudo make install-diskutil      # sudo make uninstall-diskutil to remove
+diskutil listFilesystems | grep -i ext
+```
+
+It carries no filesystem logic. `FSFormatExecutable` points at a shell wrapper
+that calls `newfs_fskit -t ext4 -g N`, so there is still exactly one
+implementation, in the extension. It deliberately declares no
+`FSProbeExecutable` or `FSMediaTypes` — DiskArbitration already probes through
+FSKit, and a second prober would race it for the same media — and no
+`FSMountExecutable`, because mounting goes through FSKit.
+
+**Untested.** Installing it needs root, so this has not been verified end to
+end; the minimal key set may be wrong. The `FSRepair` entry is also a
+half-truth worth knowing about: First Aid passes `-y` meaning "repair without
+asking", and the wrapper prints that it can verify but not repair rather than
+reporting a repair that did not happen.
+
 ## Not yet done
+- Verifying the Disk Utility bundle actually registers (needs root)
 - Auto-mount in Finder without an explicit `mount -F -t ext4`
+- A real structural check; `startCheck` only decides mountability
 - Kernel-offloaded I/O for writes (reads already use it)
 - `startCheck` / `startFormat` for Disk Utility integration
 - Notarised DMG

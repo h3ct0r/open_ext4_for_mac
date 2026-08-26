@@ -1,0 +1,75 @@
+--- a/src/ext4_mkfs.c
++++ b/src/ext4_mkfs.c
+@@ -42,6 +42,7 @@
+ 
+ #include <ext4_super.h>
+ #include <ext4_block_group.h>
++#include <ext4_bitmap.h>
+ #include <ext4_dir.h>
+ #include <ext4_dir_idx.h>
+ #include <ext4_fs.h>
+@@ -335,6 +336,38 @@
+ 	}
+ 
+ 	return r;
++}
++
++/*
++ * Mark bits [from, to) as in use.
++ *
++ * ext4 requires the tail of every bitmap block beyond the group's real size to
++ * be set, so that a bitmap block always describes exactly block_size * 8
++ * objects. mkfs used to write these blocks as all zeroes, which e2fsck reports
++ * as "Padding at end of inode bitmap is not set" on a filesystem it has just
++ * been asked to check for the first time.
++ */
++static void mkfs_set_bitmap_tail(uint8_t *bitmap, uint32_t from, uint32_t to)
++{
++	uint32_t i = from;
++
++	if (from >= to)
++		return;
++
++	/* Partial leading byte, one bit at a time. */
++	for (; i < to && (i & 7); i++)
++		ext4_bmap_bit_set(bitmap, i);
++
++	/* Whole bytes. */
++	if (i < to) {
++		uint32_t whole = (to - i) >> 3;
++		memset(bitmap + (i >> 3), 0xff, whole);
++		i += whole << 3;
++	}
++
++	/* Partial trailing byte. */
++	for (; i < to; i++)
++		ext4_bmap_bit_set(bitmap, i);
+ }
+ 
+ static int write_bgroups(struct ext4_blockdev *bd, struct fs_aux_info *aux_info,
+@@ -414,18 +447,25 @@
+ 
+ 		sb_free_blk += bg_free_blk;
+ 
++		/* Block bitmap: everything past this group's last real block
++		 * is padding and must read as in-use. */
+ 		r = ext4_block_get_noread(bd, &b, bg_start_block + blk_off + 1);
+ 		if (r != EOK)
+ 			return r;
+ 		memset(b.data, 0, block_size);
++		mkfs_set_bitmap_tail(b.data, bg_blocks, block_size * 8);
+ 		ext4_bcache_set_dirty(b.buf);
+ 		r = ext4_block_set(bd, &b);
+ 		if (r != EOK)
+ 			return r;
++
++		/* Inode bitmap: likewise past inodes_per_group. */
+ 		r = ext4_block_get_noread(bd, &b, bg_start_block + blk_off + 2);
+ 		if (r != EOK)
+ 			return r;
+ 		memset(b.data, 0, block_size);
++		mkfs_set_bitmap_tail(b.data, info->inodes_per_group,
++				     block_size * 8);
+ 		ext4_bcache_set_dirty(b.buf);
+ 		r = ext4_block_set(bd, &b);
+ 		if (r != EOK)

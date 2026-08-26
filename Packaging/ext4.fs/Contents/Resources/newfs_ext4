@@ -1,0 +1,58 @@
+#!/bin/bash
+#
+# newfs_ext4 — bridge from Disk Utility's newfs convention to FSKit.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Disk Utility and diskutil(8) find formatters through .fs bundles in
+# /Library/Filesystems, not through FSKit. They invoke the personality's
+# FSFormatExecutable as
+#
+#     <formatter> <FSFormatArguments...> -v <label> <device>
+#
+# so this translates that into a call to the module-agnostic formatter macOS
+# ships, which dispatches to our FSKit extension:
+#
+#     newfs_fskit -t ext4 -g <2|3|4> [-L <label>] <device>
+#
+# It carries no filesystem logic of its own on purpose: everything that decides
+# what lands on disk lives in the extension, where it is tested.
+set -u
+
+self=$(basename "$0")
+gen=4
+label=""
+
+usage() {
+    echo "usage: $self [-2|-3|-4] [-v label] device" >&2
+    exit 1
+}
+
+# Every argument but the last is an option; the device comes last.
+while [ $# -gt 1 ]; do
+    case "$1" in
+        -2) gen=2 ;;
+        -3) gen=3 ;;
+        -4) gen=4 ;;
+        -v)
+            shift
+            [ $# -gt 1 ] || usage
+            label="$1"
+            ;;
+        *)
+            # Refuse rather than guess. Silently dropping an option the caller
+            # believed was applied is how a volume ends up not being what the
+            # user asked for.
+            echo "$self: unsupported option $1" >&2
+            usage
+            ;;
+    esac
+    shift
+done
+
+[ $# -eq 1 ] || usage
+device="$1"
+
+args=(-t ext4 -g "$gen")
+[ -n "$label" ] && args+=(-L "$label")
+
+exec /sbin/newfs_fskit "${args[@]}" "$device"

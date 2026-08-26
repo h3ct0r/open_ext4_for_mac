@@ -85,7 +85,9 @@ if ! pluginkit -m -p com.apple.fskit.fsmodule 2>/dev/null | grep -q "$BUNDLE_ID"
   echo "install it with 'make install SIGN_ID=...' and enable it in"
   echo "System Settings > General > Login Items & Extensions > File System Extensions."
   echo "SKIPPED"
-  exit 0
+  # 77 is the conventional "skipped, not passed" exit status. Reporting a skip
+  # as success is how a suite quietly stops testing anything.
+  exit 77
 fi
 docker info >/dev/null 2>&1 || { echo "docker is not running; cannot replay journals"; exit 1; }
 command -v mke2fs >/dev/null || { echo "mke2fs not found; brew install e2fsprogs"; exit 1; }
@@ -127,7 +129,22 @@ mount_volume() {
         | head -1 | awk '{print $1}')
   [ -n "$DEV" ] || { note "could not attach the image"; exit 1; }
   mkdir -p "$MNT"
-  mount -F -t ext4 "${DEV#/dev/}" "$MNT" || { note "mount failed"; exit 1; }
+  local out
+  if ! out=$(mount -F -t ext4 "${DEV#/dev/}" "$MNT" 2>&1); then
+    # Installing the app does not enable the extension: macOS requires the user
+    # to approve it, and reinstalling or changing Info.plist revokes that
+    # approval. The module is registered but inert until they do.
+    if printf '%s' "$out" | grep -q "is disabled"; then
+      note "the extension is installed but not enabled."
+      note "Turn it on in System Settings > General > Login Items & Extensions"
+      note "  > File System Extensions, then run this again."
+      note "SKIPPED"
+      hdiutil detach "$DEV" >/dev/null 2>&1; DEV=""
+      exit 77
+    fi
+    note "mount failed: $out"
+    exit 1
+  fi
   assert_mounted "after mounting"
 }
 

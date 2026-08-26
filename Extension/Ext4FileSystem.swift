@@ -14,9 +14,17 @@ import Ext4Core
 /// whether we recognise some media, then `loadResource` to actually open it.
 final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
 
-    private let executor = Ext4Executor()
+    let executor = Ext4Executor()
     private var bridge: BlockDeviceBridge?
     private var volume: Ext4Volume?
+
+    /// The last resource FSKit presented, whether to probe or to load.
+    ///
+    /// The maintenance operations -- startFormat and startCheck -- are handed
+    /// a task and options but no resource, and FSUnaryFileSystem has no
+    /// resource property, so this is the only way to know what to operate on.
+    /// fskitd probes a device before asking for maintenance on it.
+    private(set) var lastSeenResource: FSBlockDeviceResource?
 
     // MARK: - Probe
 
@@ -24,6 +32,7 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         guard let device = resource as? FSBlockDeviceResource else {
             return .notRecognized
         }
+        lastSeenResource = device
 
         guard let bridge = BlockDeviceBridge(resource: device, forceReadOnly: true, mode: .direct),
               let dev = bridge.device else {
@@ -62,6 +71,7 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         guard let device = resource as? FSBlockDeviceResource else {
             throw Ext4Error.notSupported
         }
+        lastSeenResource = device
 
         //
         // Mount mode.
@@ -178,7 +188,7 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         return FSContainerIdentifier(uuid: uuid)
     }
 
-    private static func reason(_ info: ext4b_probe_info) -> String {
+    static func reason(_ info: ext4b_probe_info) -> String {
         var text = info.unsupported
         return withUnsafeBytes(of: &text) { raw -> String in
             String(cString: raw.bindMemory(to: CChar.self).baseAddress!)

@@ -48,11 +48,45 @@
 		<true/>
 
 		<!--
+		    Option syntax for the maintenance operations, in getopt form.
+		    FSKit parses the command line against these before calling
+		    startFormat/startCheck, so anything not listed here is rejected
+		    for us. Reached through the generic drivers macOS ships:
+
+		        newfs_fskit -t ext4 [-g 2|3|4] [-b bytes] [-L label]
+		                            [-I bytes] [-N count] [-J blocks] [-n]
+		                            /dev/diskNsM
+		        fsck_fskit  -t ext4 [-n] /dev/diskNsM
+
+		    -g picks the filesystem generation because `-t` already means
+		    "which FSKit module" to newfs_fskit, and one module serves
+		    ext2, ext3 and ext4.
+		-->
+		<key>FSFormatOptionSyntax</key>
+		<dict>
+			<key>shortOptions</key>
+			<string>g:b:L:I:N:J:n</string>
+		</dict>
+		<key>FSCheckOptionSyntax</key>
+		<dict>
+			<key>shortOptions</key>
+			<string>n</string>
+		</dict>
+
+		<!--
 		    One personality per filesystem generation. FSSubType is what
 		    `mount -t` and Disk Utility use to tell them apart; the values
 		    match the convention Apple's own modules follow.
 		    ext filenames are byte strings compared exactly, hence
 		    FSfileObjectsAreCaseSensitive.
+
+		    The FSFormat* keys describe what this personality can be
+		    created on. The minimum for ext3/ext4 is set by the journal:
+		    lwext4 never makes one smaller than 1024 blocks, which is
+		    4 MiB at the default 4 KiB block size, and 6 MiB is the
+		    smallest volume that actually formats cleanly. ext2 has no
+		    journal and works from 1 MiB. The maximum is 2^32 blocks of
+		    4 KiB -- lwext4's mkfs does not set the 64bit feature.
 		-->
 		<key>FSPersonalities</key>
 		<dict>
@@ -64,6 +98,14 @@
 				<integer>0</integer>
 				<key>FSfileObjectsAreCaseSensitive</key>
 				<true/>
+				<key>FSFormatContentMask</key>
+				<string>0FC63DAF-8483-4772-8E79-3D69D8477DE4</string>
+				<key>FSFormatMinimumSize</key>
+				<integer>1048576</integer>
+				<key>FSFormatMaximumSize</key>
+				<integer>17592186044416</integer>
+				<key>FSFormatArguments</key>
+				<string>-g 2</string>
 			</dict>
 			<key>ext3</key>
 			<dict>
@@ -73,6 +115,14 @@
 				<integer>1</integer>
 				<key>FSfileObjectsAreCaseSensitive</key>
 				<true/>
+				<key>FSFormatContentMask</key>
+				<string>0FC63DAF-8483-4772-8E79-3D69D8477DE4</string>
+				<key>FSFormatMinimumSize</key>
+				<integer>8388608</integer>
+				<key>FSFormatMaximumSize</key>
+				<integer>17592186044416</integer>
+				<key>FSFormatArguments</key>
+				<string>-g 3</string>
 			</dict>
 			<key>ext4</key>
 			<dict>
@@ -82,6 +132,14 @@
 				<integer>2</integer>
 				<key>FSfileObjectsAreCaseSensitive</key>
 				<true/>
+				<key>FSFormatContentMask</key>
+				<string>0FC63DAF-8483-4772-8E79-3D69D8477DE4</string>
+				<key>FSFormatMinimumSize</key>
+				<integer>8388608</integer>
+				<key>FSFormatMaximumSize</key>
+				<integer>17592186044416</integer>
+				<key>FSFormatArguments</key>
+				<string>-g 4</string>
 			</dict>
 		</dict>
 

@@ -114,6 +114,38 @@ typedef struct {
  */
 int ext4b_probe(ext4b_device *dev, ext4b_probe_info *out);
 
+/* ----------------------------------------------------------------- format -- */
+
+/*
+ * Options for ext4b_format. Zero means "choose a sensible default" for every
+ * numeric field, matching what mke2fs would pick.
+ */
+typedef struct {
+    int      generation;      /* 2, 3 or 4 */
+    uint32_t block_size;      /* 1024, 2048 or 4096; 0 = 4096 */
+    uint32_t inode_size;      /* 0 = 256 */
+    uint32_t inode_count;     /* 0 = computed from volume size */
+    uint32_t journal_blocks;  /* 0 = computed; ignored when journal is false */
+    bool     journal;         /* ext3/ext4 default true, ext2 must be false */
+    const char *label;        /* volume name, may be NULL */
+    /*
+     * Volume UUID. Required: lwext4's mkfs copies this into the superblock
+     * verbatim and never generates one, so leaving it zeroed would give every
+     * formatted volume the same all-zero UUID -- which is what FSKit hands
+     * back as the container identifier.
+     */
+    uint8_t  uuid[16];
+} ext4b_format_options;
+
+/*
+ * Write a fresh filesystem over the device, destroying whatever was there.
+ *
+ * The device must not be mounted. On success the volume is left consistent and
+ * unmounted; the caller is responsible for having established that overwriting
+ * this device is what the user asked for.
+ */
+int ext4b_format(ext4b_device *dev, const ext4b_format_options *opts);
+
 /* ------------------------------------------------------------------ mount -- */
 
 int  ext4b_mount(ext4b_device *dev, bool read_only);
@@ -129,6 +161,13 @@ int  ext4b_journal_stop(ext4b_device *dev);
 
 /* Flush the block cache and issue the device-level barrier. */
 int  ext4b_sync(ext4b_device *dev);
+
+/*
+ * Set the volume label. `label` is a NUL-terminated UTF-8 string of at most 16
+ * bytes; ext4's field is fixed-width and zero-padded, with no terminator when
+ * the name fills it. Requires a read-write mount.
+ */
+int  ext4b_set_label(ext4b_device *dev, const char *label);
 
 typedef struct {
     uint64_t total_blocks;

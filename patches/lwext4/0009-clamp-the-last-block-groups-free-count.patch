@@ -1,0 +1,38 @@
+--- a/src/ext4_mkfs.c
++++ b/src/ext4_mkfs.c
+@@ -359,15 +359,30 @@
+ 		uint32_t blk_off = 0;
+ 
+ 		bg_desc = (void *)(aux_info->bg_desc_blk + k * dsc_size);
+-		bg_free_blk = info->blocks_per_group -
+-				aux_info->inode_table_blocks;
+ 
++		/*
++		 * How many blocks this group actually contains. Every group but
++		 * the last is full; the last holds only what remains.
++		 *
++		 * This used to be blocks_per_group unconditionally, with a
++		 * first_data_block subtracted from the final group -- which is
++		 * correct only when the volume happens to be an exact multiple
++		 * of blocks_per_group. Any other size over-counted the free
++		 * blocks in the last group by the size of the hole, and the
++		 * superblock total with it, so e2fsck reported "Free blocks
++		 * count wrong" on a freshly created filesystem.
++		 */
++		uint64_t bg_first_blk = (uint64_t)aux_info->first_data_block +
++			(uint64_t)i * info->blocks_per_group;
++		uint32_t bg_blocks = info->blocks_per_group;
++		if (aux_info->len_blocks - bg_first_blk < bg_blocks)
++			bg_blocks = (uint32_t)(aux_info->len_blocks - bg_first_blk);
++
++		bg_free_blk = bg_blocks - aux_info->inode_table_blocks;
++
+ 		bg_free_blk -= 2;
+ 		blk_off += aux_info->bg_desc_blocks;
+ 
+-		if (i == (aux_info->groups - 1))
+-			bg_free_blk -= aux_info->first_data_block;
+-
+ 		if (has_superblock(info, i)) {
+ 			bg_start_block++;
+ 			blk_off += info->bg_desc_reserve_blocks;
