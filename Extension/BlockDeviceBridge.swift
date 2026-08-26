@@ -29,20 +29,31 @@ final class BlockDeviceBridge {
 
     /// Which FSKit I/O family to use.
     ///
-    /// `.metadataCache` is the family the design wants: kernel-cached, with
-    /// `metadataFlush` as an explicit write barrier for journal ordering. It
-    /// does not work here. `metadataRead` fails with EIO both during
-    /// `probeResource` *and* after the resource is loaded, so every mount that
-    /// tries it dies with "Loading resource: Input/output error". Whatever
-    /// additional setup FSKit wants for that family, we have not found it.
+    /// `.metadataCache` is the family the design wants, and it is not
+    /// available. Every call fails with `EIO`, instantly and identically, on
+    /// both a disk image and a physical USB stick. Five explanations have been
+    /// ruled out by measurement: block-size alignment, physical-sector
+    /// alignment (both are 512 here), request size, request offset, and
+    /// lifecycle -- it fails the same during `probeResource`, during
+    /// `loadResource`, and with the volume fully active. Nothing appears in
+    /// fskitd's log or the kernel's when it happens, and all six probe cases
+    /// fail within the same millisecond, so the call is being refused before
+    /// it reaches any device.
     ///
-    /// `.direct` is therefore what actually runs. The consequence is that
-    /// there is no explicit barrier: durability and ordering rest on
-    /// `FSBlockDeviceResource.write` reaching the medium in issue order.
-    /// That is very likely true -- it is a synchronous call against the device
-    /// -- but it is an assumption, not something FSKit documents, and the
-    /// crash-consistency suite has not been run against this path. Revisit
-    /// before claiming crash safety for the mounted driver.
+    /// The consequence is not performance. `metadataFlush` is the **only**
+    /// write barrier in the whole `FSResource` API, and it belongs to this
+    /// family -- so with `.direct` there is no barrier at all, and `flush()`
+    /// below is a no-op. lwext4 issues its journal barriers faithfully and
+    /// nothing enforces them.
+    ///
+    /// That was documented here as an assumption. It is now known false: a
+    /// real USB stick, after an ungraceful teardown, came back with directory
+    /// entries whose parent link counts had never landed -- half a
+    /// transaction, which a journal exists to make impossible. A disk image
+    /// never showed it, because writes reach it through the page cache and
+    /// onto APFS in issue order; a USB stick has its own write cache and
+    /// reorders freely. See docs/STATUS.md.
+    ///
     enum Mode {
         case direct
         case metadataCache
@@ -79,6 +90,15 @@ final class BlockDeviceBridge {
         self.blockSize = bs
         self.blockCount = resource.blockCount
         self.isWritable = resource.isWritable && !forceReadOnly
+
+        // Two different block sizes, and the metadata I/O family cares which.
+        // Its documentation says requests "must conform to any transfer
+        // requirements of the underlying resource. Disk drives typically
+        // require sector (physicalBlockSize) addressed operations" -- and this
+        // bridge has always aligned to blockSize. That is a candidate
+        // explanation for metadataRead failing with EIO here, which is why
+        // .direct is what runs and why there is no write barrier.
+        Ext4Log.io.info("device \(resource.bsdName, privacy: .public): blockSize=\(resource.blockSize) physicalBlockSize=\(resource.physicalBlockSize) blocks=\(resource.blockCount)")
 
         let ctx = Unmanaged.passUnretained(self).toOpaque()
         guard let dev = ext4b_device_create(ctx, bs, resource.blockCount,
@@ -200,6 +220,16 @@ final class BlockDeviceBridge {
         let result = Array(key[0..<length])
         key.resetBytes(in: 0..<key.count)
         return result
+    }
+
+    /// Raw bytes from the start of the media, below any decryption.
+    ///
+    /// Only for copying out a LUKS header. It deliberately does not go through
+    /// the device stack: at the moment it is called there is no cipher in
+    /// place, and there is no filesystem to read through either.
+    func readForHeaderExport(into buffer: UnsafeMutableRawPointer,
+                             offset: UInt64, count: Int) -> Int32 {
+        read(into: buffer, offset: offset, count: count)
     }
 
     func probeLUKS() -> (status: luks_status, info: luks_info)? {

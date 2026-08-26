@@ -77,12 +77,21 @@ instead of failing — plus several of our own. See
 [docs/STATUS.md](docs/STATUS.md) and
 [patches/lwext4/README.md](patches/lwext4/README.md).
 
-> **Still young.** It is tested hard, but it has not been run by anyone but its
-> author. One limitation is worth knowing before you point it at data you care
-> about: FSKit exposes no write barrier that works here, so write ordering
-> rests on an observation about this macOS version rather than a guarantee.
-> `mount -o ro` is honoured properly if you want to look without touching —
-> the volume is not written to at all. Both are documented in
+> **Still young, and one limitation is serious.** FSKit exposes no write
+> barrier that works here — `metadataFlush` is the only one it has, and that
+> whole I/O family fails with `EIO` for reasons not yet understood. lwext4
+> issues its journal barriers faithfully and nothing enforces them.
+>
+> A real USB stick showed what that costs: pulled out from under a live mount,
+> it came back with directory entries whose parent link counts had never
+> landed — half a transaction, which a journal exists to make impossible. No
+> file content was lost and `e2fsck` repaired it, but the volume was
+> inconsistent. Disk images never show this; they reach APFS through the page
+> cache in issue order, while a USB stick reorders freely.
+>
+> **Eject before unplugging** and you are fine — that flushes and closes the
+> journal. Pull a volume live and run `e2fsck` on it. `mount -o ro` is honoured
+> properly if you only want to look. Details in
 > [docs/STATUS.md](docs/STATUS.md). Keep a backup.
 
 ## Requirements

@@ -110,6 +110,7 @@ final class Ext4MenuBar: NSObject, NSApplicationDelegate {
     private struct Snapshot: Sendable {
         let bsdName: String
         let volumeName: String?
+        let volumeUUID: String?
         let isMounted: Bool
     }
 
@@ -118,7 +119,16 @@ final class Ext4MenuBar: NSObject, NSApplicationDelegate {
         let bsd = description[kDADiskDescriptionMediaBSDNameKey as String] as? String ?? ""
         let name = description[kDADiskDescriptionVolumeNameKey as String] as? String
         let path = description[kDADiskDescriptionVolumePathKey as String] as? URL
-        return Snapshot(bsdName: bsd, volumeName: name, isMounted: path != nil)
+
+        // The container identifier our own probe reported, handed back by
+        // DiskArbitration. This is how the agent learns which container it is
+        // looking at without opening the device -- which on physical media it
+        // cannot do at all, the node being root:operator.
+        var uuid: String?
+        if let raw = description[kDADiskDescriptionVolumeUUIDKey as String] {
+            uuid = (CFUUIDCreateString(kCFAllocatorDefault, (raw as! CFUUID)) as String).lowercased()
+        }
+        return Snapshot(bsdName: bsd, volumeName: name, volumeUUID: uuid, isMounted: path != nil)
     }
 
     private func diskAppeared(_ snapshot: Snapshot) {
@@ -127,11 +137,13 @@ final class Ext4MenuBar: NSObject, NSApplicationDelegate {
 
         var volume = EncryptedVolume(bsdName: snapshot.bsdName,
                                      displayName: snapshot.volumeName ?? "Encrypted Volume",
-                                     uuid: nil,
+                                     uuid: snapshot.volumeUUID,
                                      isMounted: snapshot.isMounted)
-        // Reading the header is the only way to learn which container this is,
-        // and therefore whether a key for it is already stored.
-        if case .success(let container) = Ext4Unlock.inspect(devicePath: "/dev/\(snapshot.bsdName)") {
+        // DiskArbitration's UUID is the one the probe reported, so it is
+        // already the right answer. Reading the header is only a fallback for
+        // media where it is missing.
+        if volume.uuid == nil,
+           case .success(let container) = Ext4Unlock.inspect(devicePath: "/dev/\(snapshot.bsdName)") {
             volume.uuid = container.uuid
         }
         volumes[snapshot.bsdName] = volume

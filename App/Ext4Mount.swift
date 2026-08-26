@@ -60,6 +60,26 @@ enum Ext4Mount {
         return answer.outcome ?? .refused("timed out waiting for DiskArbitration")
     }
 
+    /// The UUID DiskArbitration has for a volume, which for one of ours is
+    /// whatever the probe reported as its container identifier.
+    ///
+    /// Worth having because it needs no access to the device at all: a
+    /// physical disk's node is `root:operator` and this process is not, so
+    /// asking DiskArbitration is the only way for the app to learn which
+    /// container it is looking at.
+    static func volumeUUID(bsdName: String) -> String? {
+        guard let session = DASessionCreate(kCFAllocatorDefault),
+              let disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, bsdName),
+              let description = DADiskCopyDescription(disk) as? [String: Any] else {
+            return nil
+        }
+        guard let raw = description[kDADiskDescriptionVolumeUUIDKey as String] else {
+            return nil
+        }
+        let uuid = CFUUIDCreateString(kCFAllocatorDefault, (raw as! CFUUID)) as String
+        return uuid.lowercased()
+    }
+
     /// `Ext4Mac mount /dev/diskN` — for a volume whose key is already stored.
     static func command(_ argument: String) -> Int32 {
         let bsd = argument.hasPrefix("/dev/") ? String(argument.dropFirst(5)) : argument

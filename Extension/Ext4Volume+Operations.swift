@@ -80,6 +80,14 @@ extension Ext4Volume: FSVolume.Operations {
         result.totalBlocks = stats.total_blocks
         result.availableBlocks = stats.avail_blocks
         result.freeBlocks = stats.free_blocks
+        // macOS does not derive this from the other two -- it is its own
+        // property, and leaving it unset made `df` and Finder report a volume
+        // as 0 bytes used however full it was. Free and total were both right
+        // the whole time, which is why it survived every offline test: nothing
+        // below FSKit has a "used" field to be wrong about.
+        result.usedBlocks = stats.total_blocks >= stats.free_blocks
+                          ? stats.total_blocks - stats.free_blocks
+                          : 0
         result.totalFiles = UInt64(stats.total_inodes)
         result.freeFiles = UInt64(stats.free_inodes)
         return result

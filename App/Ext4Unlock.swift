@@ -105,11 +105,36 @@ enum Ext4Unlock {
         case containerFile(URL)
     }
 
+    // MARK: - Where the header comes from
+
+    /// The bytes to read a LUKS header out of.
+    ///
+    /// Preferably the device itself. But a physical disk's node is
+    /// `root:operator` and the person at the keyboard is not in that group, so
+    /// on real media this process -- the only one that can ask for a
+    /// passphrase -- cannot open it at all. The extension can, and leaves a
+    /// copy of the header in its container for exactly this. See
+    /// `LUKSKeyStore.write(header:)`.
+    static func headerSource(devicePath: String) -> String? {
+        if access(devicePath, R_OK) == 0 { return devicePath }
+
+        let bsd = devicePath.hasPrefix("/dev/") ? String(devicePath.dropFirst(5)) : devicePath
+        guard let uuid = Ext4Mount.volumeUUID(bsdName: bsd) else { return nil }
+        let exported = LUKSKeyStore.headerURL(uuid: uuid,
+                                              in: LUKSKeyStore.directoryFromOutside())
+        return FileManager.default.isReadableFile(atPath: exported.path) ? exported.path : nil
+    }
+
     // MARK: - The two steps, usable from anywhere
 
     /// Read a container's header. No passphrase, no side effects.
     static func inspect(devicePath: String) -> Result<Container, UnlockFailure> {
-        guard let device = RawDevice(path: devicePath) else {
+        guard let source = headerSource(devicePath: devicePath) else {
+            return .failure(UnlockFailure(
+                "cannot read \(devicePath), and no header has been left for it.\n"
+                + "plug the volume in once so the extension can export one"))
+        }
+        guard let device = RawDevice(path: source) else {
             var message = "cannot open \(devicePath): \(String(cString: strerror(errno)))"
             if errno == EACCES || errno == EPERM {
                 message += "\nthe device node is not readable by this user"
@@ -137,8 +162,9 @@ enum Ext4Unlock {
     /// this app's bundle ID, and a binary signed without one simply fails the
     /// call rather than being killed for it.
     static func store(passphrase: [UInt8], devicePath: String) -> Result<(Container, Stored), UnlockFailure> {
-        guard let device = RawDevice(path: devicePath) else {
-            return .failure(UnlockFailure("cannot open \(devicePath)"))
+        guard let source = headerSource(devicePath: devicePath),
+              let device = RawDevice(path: source) else {
+            return .failure(UnlockFailure("cannot read a LUKS header for \(devicePath)"))
         }
         var info = luks_info()
         guard luks_probe(device.context, rawDeviceRead, &info) == LUKS_OK else {
@@ -166,6 +192,10 @@ enum Ext4Unlock {
         let container = Container(uuid: uuid, version: Int(info.version),
                                   cipher: "\(text(info.cipher))-\(text(info.mode))",
                                   sectorSize: Int(info.sector_size))
+        // The exported header exists only to get us here.
+        try? FileManager.default.removeItem(
+            at: LUKSKeyStore.headerURL(uuid: uuid, in: LUKSKeyStore.directoryFromOutside()))
+
         do {
             try LUKSKeychain.store(masterKey: master, uuid: uuid,
                                    label: "ext4 volume \(uuid)")

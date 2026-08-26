@@ -823,8 +823,78 @@ directory into an HTree, whose checksums are a separate path — onto that
 fixture and hands the result to `e2fsck`. Reverting the patch turns that check
 red, which is the only reason to believe it.
 
+## Write ordering is not enforced, and that is not theoretical
+
+**The mounted driver is not crash-safe on removable media.** This was written
+down as an assumption from the start; a real USB stick falsified it.
+
+lwext4 issues journal barriers faithfully. Nothing enforces them.
+`BlockDeviceBridge.flush()` returns success without doing anything, because
+there is nothing for it to call: `metadataFlush` is the only write barrier in
+the entire `FSResource` API, and it belongs to the metadata I/O family, which
+does not work here.
+
+### What the stick showed
+
+A 16 GB ext4 USB stick, written to through a real mount, with the extension
+killed twice while it was mounted. `e2fsck` afterwards:
+
+```
+Entry '.fseventsd' in / (2) has deleted/unused inode 15
+Inode 2 ref count is 3, should be 5
+Block bitmap differences:  -(9257--9259)
+Inode bitmap differences:  -(15--16)
+Directories count wrong for group #0 (7, counted=6)
+```
+
+Read together that is one thing: directory entries reached the medium while
+the metadata that must accompany them did not. Root's link count is two too
+low — two directories whose entries landed and whose parent-link-count update
+did not. No file content was lost; every file checksummed identical before and
+after.
+
+Killing the process only loses writes still in flight. It cannot produce half
+a committed transaction on a filesystem whose barriers work. The writes
+reached the device out of the order they were issued in.
+
+A disk image never shows this: writes reach it through the page cache and land
+on APFS in issue order. A USB stick has its own write cache and reorders
+freely. That is the difference between 303 green cut points and one pendrive.
+
+### Why there is no barrier to use
+
+The metadata family fails with `EIO` on every call — instantly, identically,
+on a disk image and on physical media alike. Ruled out by measurement:
+
+| Explanation | Ruled out by |
+|---|---|
+| block-size alignment | fails on a perfectly aligned one-block read at offset 0 |
+| physical-sector alignment | `blockSize` and `physicalBlockSize` are both 512 here |
+| request size or offset | six combinations, all fail |
+| lifecycle | fails during probe, during load, and with the volume active |
+| disk images only | fails identically on a physical USB stick |
+| a missing manifest key | no FSKit key Apple's own modules declare is absent from ours |
+
+Nothing appears in fskitd's log or the kernel's, and all six probes fail inside
+the same millisecond — the call is refused before it reaches a device.
+
+### What this means in practice
+
+Until a barrier exists, an ext4 volume written by this driver and then
+disconnected without being ejected can come back structurally inconsistent —
+recoverable by `e2fsck`, but inconsistent. **Eject before unplugging**, which
+flushes and closes the journal cleanly, and run `e2fsck` if a volume is ever
+pulled live.
+
+Both remaining approaches are unsatisfying. Finding whatever unlocks the
+metadata family would fix it properly and is a research problem with no
+obvious next lead. Refusing to mount removable media read-write would be safe
+and would remove the reason the driver exists.
+
 ## Not yet done
 - `newfs_fskit` reaches the module but never calls `startFormat`; see below
+- A write barrier on the mounted path; see above — the metadata I/O family
+  that owns `metadataFlush` fails with EIO for reasons not yet understood
 - A real structural check; `startCheck` only decides mountability
 - A notification when a locked volume appears and the agent is not running;
   today it simply does not show up

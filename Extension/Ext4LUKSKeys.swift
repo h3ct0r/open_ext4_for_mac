@@ -156,7 +156,12 @@ extension Ext4LUKSKeys {
         var key: [UInt8]
         switch masterKey(for: luks, unlock: { bridge.unlockLUKS(info: luks, passphrase: $0) }) {
         case .found(let k):   key = k
-        case .unavailable:    throw Ext4Error.posix(ENEEDAUTH)
+        case .unavailable:
+            // Leave the header where the app can find it. It is the only
+            // process that can ask for a passphrase, and on physical media it
+            // cannot read the device to get the header itself.
+            exportHeader(bridge, luks)
+            throw Ext4Error.posix(ENEEDAUTH)
         case .rejected:       throw Ext4Error.posix(EAUTH)
         }
         defer { key.resetBytes(in: 0..<key.count) }
@@ -172,5 +177,41 @@ extension Ext4LUKSKeys {
         }
         Ext4Log.info("unlocked LUKS\(luks.version) container, \(luks.sector_size)B sectors")
         return true
+    }
+}
+
+extension Ext4LUKSKeys {
+
+    /// Copy a locked container's header into this extension's own container,
+    /// so the app can derive from it.
+    ///
+    /// Best effort in both directions: failing to export is not a reason to
+    /// fail a mount that was going to fail anyway, and an export that is never
+    /// used is deleted the next time the volume is unlocked or forgotten.
+    static func exportHeader(_ bridge: BlockDeviceBridge, _ info: luks_info) {
+        guard let uuid = uuidString(info),
+              let directory = LUKSKeyStore.directoryFromInsideTheSandbox() else { return }
+
+        let length = Int(info.payload_offset)
+        guard length > 0, length <= LUKSKeyStore.maxHeaderBytes else {
+            Ext4Log.info("not exporting a header claiming \(length) bytes")
+            return
+        }
+
+        var bytes = [UInt8](repeating: 0, count: length)
+        let rc = bytes.withUnsafeMutableBytes { raw -> Int32 in
+            bridge.readForHeaderExport(into: raw.baseAddress!, offset: 0, count: length)
+        }
+        guard rc == 0 else {
+            Ext4Log.info("could not read the LUKS header to export it")
+            return
+        }
+
+        do {
+            try LUKSKeyStore.write(header: Data(bytes), uuid: uuid, in: directory)
+            Ext4Log.info("exported the LUKS header for \(uuid) (\(length) bytes)")
+        } catch {
+            Ext4Log.info("could not export the LUKS header: \(error)")
+        }
     }
 }

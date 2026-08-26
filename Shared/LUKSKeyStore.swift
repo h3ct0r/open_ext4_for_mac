@@ -85,9 +85,47 @@ public enum LUKSKeyStore {
         }
     }
 
+    /// The largest header we will copy out. A LUKS1 payload starts 2 MiB in
+    /// and a LUKS2 one 16 MiB in; anything claiming more than this is not a
+    /// header we should be writing into somebody's home directory.
+    public static let maxHeaderBytes = 32 * 1024 * 1024
+
+    /// Where a container's header is left for the app to derive from.
+    public static func headerURL(uuid: String, in directory: URL) -> URL {
+        directory.appendingPathComponent("\(uuid).header")
+    }
+
+    /// Copy a container's header out for a process that cannot read the device.
+    ///
+    /// This exists because of a permission boundary, not a design preference.
+    /// A physical disk's device node is `root:operator` and the person at the
+    /// keyboard is not in that group, so the *app* -- the only process that
+    /// can ask for a passphrase -- cannot read the header it needs to derive
+    /// from. The extension can: FSKit hands it the device. So the extension
+    /// copies the header somewhere the app can reach.
+    ///
+    /// A LUKS header is not secret. It is the same bytes anyone holding the
+    /// disk already has, and its key material is protected by the passphrase
+    /// KDF exactly as it is on the medium. It is still deleted as soon as the
+    /// volume is unlocked, because a copy that outlives the disk is a copy
+    /// nobody is thinking about any more.
+    public static func write(header: Data, uuid: String, in directory: URL) throws {
+        guard !header.isEmpty, header.count <= maxHeaderBytes else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        try FileManager.default.createDirectory(at: directory,
+                                                withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        let url = headerURL(uuid: uuid, in: directory)
+        try? FileManager.default.removeItem(at: url)
+        guard FileManager.default.createFile(at: url, contents: header) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+    }
+
     /// Remove anything left for a volume. Nothing there is not an error.
     public static func forget(uuid: String, in directory: URL) {
-        for suffix in ["key", "pass"] {
+        for suffix in ["key", "pass", "header"] {
             try? FileManager.default.removeItem(
                 at: directory.appendingPathComponent("\(uuid).\(suffix)"))
         }
