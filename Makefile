@@ -314,6 +314,7 @@ entitlements:
 	     -e 's/@BUNDLE_ID@/$(BUNDLE_ID).$(EXT_NAME)/g' \
 	     Extension/Ext4FS.entitlements.in > Extension/Ext4FS.entitlements
 	@sed -e 's/@TEAM_ID@/$(TEAM_ID)/g' \
+	     -e 's/@BUNDLE_ID@/$(BUNDLE_ID)/g' \
 	     App/Ext4Mac.entitlements.in > App/Ext4Mac.entitlements
 	@echo "entitlements: team $(TEAM_ID), app id $(TEAM_ID).$(BUNDLE_ID).$(EXT_NAME)"
 

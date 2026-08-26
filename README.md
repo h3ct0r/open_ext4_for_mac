@@ -46,7 +46,7 @@ make validate
 | crash consistency | 303 cut points; the Linux kernel replays each journal |
 | differential vs Linux | 36 assertions, both directions |
 | mounted driver | 23 assertions against a live FSKit mount |
-| encrypted, mounted | 30 assertions; a LUKS volume through FSKit, judged by Linux |
+| encrypted, mounted | 32 assertions; a LUKS volume through FSKit, judged by Linux |
 
 A file deleted while something still has it open goes on ext4's own **orphan
 list**, so a crash in that window is recoverable by the next mount rather than

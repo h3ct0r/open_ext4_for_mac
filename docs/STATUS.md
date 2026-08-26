@@ -635,7 +635,7 @@ not the container size: a filesystem told it has more blocks than exist
 eventually writes past the end of the medium.
 
 Verified end to end, in both directions, by real cryptsetup and the real Linux
-kernel: `Tests/run_mount_luks_tests.sh`, 24 assertions, wired into
+kernel: `Tests/run_mount_luks_tests.sh`, 32 assertions, wired into
 `make validate` as its own stage.
 
 | | LUKS1 | LUKS2 |
@@ -687,7 +687,11 @@ killed by AMFI the moment it launches — `Killed: 9`, no crash report, nothing
 in the log. `scripts/sign.sh` therefore adds the entitlement only when
 `App/Ext4Mac.provisionprofile` is present, and says which way it signed. See
 `docs/SIGNING.md`. Without it everything still works; the key just sits in the
-container in the clear.
+container in the clear, and the suite reports which of the two is in use.
+
+Both halves are in place here, so `Ext4Mac unlock` puts the key in the
+keychain and leaves nothing on disk — which the suite checks, because a
+plaintext copy left behind would quietly outlive `forget`.
 
 The container directory also accepts a `<UUID>.pass` file holding a passphrase,
 which needs no app and no entitlement at all. That is what an unattended

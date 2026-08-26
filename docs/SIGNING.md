@@ -50,10 +50,22 @@ drivers take — the shipping ExtendFS extension, for example, is signed
    into the sandboxed extension that mounts the volume. That needs a profile
    for the **app's** own App ID:
 
-   - enable **Keychain Sharing** on `dev.h3ct0r.ext4mac`, with the group
-     `dev.h3ct0r.ext4mac.shared`
-   - create a **Developer ID** profile for it and save it as
-     `App/Ext4Mac.provisionprofile` (also gitignored)
+   Create a **Developer ID** profile for `dev.h3ct0r.ext4mac` and save it as
+   `App/Ext4Mac.provisionprofile` (also gitignored). Nothing else is usually
+   needed: a Developer ID profile arrives carrying `keychain-access-groups`
+   for `TEAMID.*` already, which covers any team-prefixed group. Check before
+   assuming:
+
+   ```bash
+   security cms -D -i App/Ext4Mac.provisionprofile | plutil -p - \
+     | grep -A3 keychain-access-groups
+   ```
+
+   If that comes back empty, enable **Keychain Sharing** on the App ID with the
+   group `dev.h3ct0r.ext4mac.shared`, then **regenerate and re-download** the
+   profile — editing an App ID invalidates the profiles already issued for it,
+   and a stale copy on disk fails in a way that looks like the capability did
+   not take.
 
    `scripts/sign.sh` picks it up automatically and says which way it signed.
    Without it the app still unlocks volumes; it leaves the master key in the

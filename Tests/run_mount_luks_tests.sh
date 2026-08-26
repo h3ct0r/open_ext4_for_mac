@@ -288,6 +288,23 @@ else
     bad "the app could not unlock the container"
   fi
 
+  # Where the key ended up depends on how the app was signed, and both are
+  # supported -- but the keychain and a plaintext file on disk must never be
+  # in use at the same time. A copy left behind in the container would quietly
+  # outlive `forget` on a build that thinks it is using the keychain.
+  WHERE=$("$APP" list 2>/dev/null | grep "$UUID2")
+  case "$WHERE" in
+    *keychain*)
+      ok "the key is in the keychain"
+      [ -f "$KEYDIR/$UUID2.key" ] \
+        && bad "a plaintext copy of the key was left in the container" \
+        || ok "no plaintext copy was left in the container" ;;
+    *container*)
+      ok "the key is in the extension's container (app is not signed for the keychain)" ;;
+    *)
+      bad "the app stored the key nowhere it can find again" "$WHERE" ;;
+  esac
+
   # The mount must now be immediate: the key is already derived, so nothing
   # here should be running argon2id again.
   START=$SECONDS
