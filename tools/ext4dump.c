@@ -8,6 +8,7 @@
  */
 
 #include "ext4_bridge.h"
+#include "luks.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -241,6 +242,60 @@ static uint32_t resolve_parent(ext4b_device *dev, const char *path,
 }
 
 /* Commands that mutate the image; these force an O_RDWR open and an rw mount. */
+/*
+ * Unlock a container and build the decrypting device.
+ *
+ * The passphrase comes from a file, never from a command line: argv is visible
+ * to every process on the machine through ps(1).
+ */
+static luks_device *open_luks(file_ctx *fc, const char *keyfile, bool writable,
+                              uint64_t *dev_bytes)
+{
+    FILE *f = fopen(keyfile, "rb");
+    if (!f) { perror("luks key file"); return NULL; }
+
+    uint8_t pass[1024];
+    size_t pass_len = fread(pass, 1, sizeof(pass), f);
+    fclose(f);
+    /* A trailing newline is what every `echo -n`-less invocation leaves, and
+     * cryptsetup's --key-file does not strip it either; match that. */
+
+    luks_info info;
+    luks_status s = luks_probe(fc, file_read, &info);
+    if (s != LUKS_OK) {
+        fprintf(stderr, "luks: %s%s%s\n", luks_strstatus(s),
+                info.unsupported[0] ? ": " : "", info.unsupported);
+        memset(pass, 0, sizeof(pass));
+        return NULL;
+    }
+
+    uint8_t mk[LUKS_MAX_MASTER_KEY];
+    size_t mk_len = 0;
+    s = luks_unlock(fc, file_read, &info, pass, pass_len, mk, &mk_len);
+    memset(pass, 0, sizeof(pass));
+    if (s != LUKS_OK) {
+        fprintf(stderr, "luks: %s\n", luks_strstatus(s));
+        memset(mk, 0, sizeof(mk));
+        return NULL;
+    }
+
+    luks_device *d = luks_device_open(fc, file_read,
+                                      writable ? file_write : NULL,
+                                      file_flush, &info, mk, mk_len);
+    memset(mk, 0, sizeof(mk));
+    if (!d) {
+        fprintf(stderr, "luks: could not open the decrypting device\n");
+        return NULL;
+    }
+
+    fprintf(stderr, "[luks%d] %s, %u-byte sectors, payload at %llu\n",
+            info.version, info.uuid, info.sector_size,
+            (unsigned long long)info.payload_offset);
+
+    *dev_bytes = luks_payload_size(d, *dev_bytes);
+    return d;
+}
+
 static bool is_write_cmd(const char *c)
 {
     static const char *w[] = { "mkdir", "create", "write", "append", "rm",
@@ -268,6 +323,8 @@ int main(int argc, char **argv)
             "  extents <path>     show the logical->physical extent map\n"
             "  xattr <path>       list extended attributes\n"
             "  orphans            show the head of the orphan list\n"
+            "  decrypt <out>      write the decrypted payload to a file\n"
+            "                     (needs EXT4DUMP_LUKS_KEYFILE)\n"
             "\nwrite commands (open the image read-write):\n"
             "  mkdir <path>            create a directory\n"
             "  create <path> [mode]    create an empty file\n"
@@ -313,15 +370,45 @@ int main(int argc, char **argv)
     const char *fail_env = getenv("EXT4DUMP_FAIL_AFTER");
     if (fail_env)
         fc.fail_after = strtol(fail_env, NULL, 10);
-    const uint32_t bs = 512;
-    ext4b_device *dev = ext4b_device_create(&fc, bs, (uint64_t)st.st_size / bs,
-                                            !writable, file_read, file_write, file_flush);
-    if (!dev) {
-        fprintf(stderr, "failed to create device\n");
-        return 1;
+
+    /*
+     * Optional LUKS layer.
+     *
+     * Set EXT4DUMP_LUKS_KEYFILE to the file holding the passphrase and the
+     * image is treated as a container: the payload is decrypted on the way
+     * through and every command works exactly as it does on a plain image.
+     * That is the point -- it means the whole existing suite can be pointed at
+     * encrypted volumes without any of the suites knowing.
+     */
+    uint64_t dev_bytes = (uint64_t)st.st_size;
+    /* Both declared before the first `goto out`, so the cleanup path never
+     * sees an indeterminate pointer or an uninitialised status. */
+    ext4b_device *dev = NULL;
+    int rc = 0;
+    void *io_ctx = &fc;
+    ext4b_read_fn  io_read  = file_read;
+    ext4b_write_fn io_write = file_write;
+    ext4b_flush_fn io_flush = file_flush;
+    luks_device *luks = NULL;
+
+    const char *keyfile = getenv("EXT4DUMP_LUKS_KEYFILE");
+    if (keyfile) {
+        luks = open_luks(&fc, keyfile, writable, &dev_bytes);
+        if (!luks) { rc = 1; goto out; }
+        io_ctx   = luks;
+        io_read  = luks_device_read;
+        io_write = luks_device_write;
+        io_flush = luks_device_flush;
     }
 
-    int rc = 0;
+    const uint32_t bs = 512;
+    dev = ext4b_device_create(io_ctx, bs, dev_bytes / bs,
+                              !writable, io_read, io_write, io_flush);
+    if (!dev) {
+        fprintf(stderr, "failed to create device\n");
+        rc = 1;
+        goto out;
+    }
 
     if (strcmp(cmd, "format") == 0) {
         ext4b_format_options opts;
@@ -466,6 +553,32 @@ int main(int argc, char **argv)
         r = ext4b_listxattr(dev, ino, on_xattr, NULL);
         if (r != 0)
             fprintf(stderr, "listxattr: %s\n", ext4b_strerror(r));
+
+    } else if (strcmp(cmd, "decrypt") == 0) {
+        /* Write the decrypted payload out, so that tools which know nothing
+         * about LUKS -- e2fsck and debugfs above all -- can be pointed at it.
+         * Without this the oracle the whole test suite rests on cannot see
+         * inside a container. */
+        if (!luks) { fprintf(stderr, "decrypt needs EXT4DUMP_LUKS_KEYFILE\n"); rc = 2; goto unmount; }
+        if (argc < 4) { fprintf(stderr, "decrypt needs an output path\n"); rc = 2; goto unmount; }
+        FILE *out = fopen(argv[3], "wb");
+        if (!out) { perror("decrypt output"); rc = 1; goto unmount; }
+        uint8_t chunk[64 * 1024];
+        uint64_t done = 0;
+        while (done < dev_bytes) {
+            size_t want = dev_bytes - done < sizeof(chunk)
+                        ? (size_t)(dev_bytes - done) : sizeof(chunk);
+            if (luks_device_read(luks, chunk, done, want) != 0) {
+                fprintf(stderr, "decrypt: read failed at %llu\n",
+                        (unsigned long long)done);
+                rc = 1; break;
+            }
+            if (fwrite(chunk, 1, want, out) != want) { perror("write"); rc = 1; break; }
+            done += want;
+        }
+        fclose(out);
+        if (rc == 0)
+            fprintf(stderr, "decrypted %llu bytes\n", (unsigned long long)done);
 
     } else if (strcmp(cmd, "orphans") == 0) {
         uint32_t head = 0;
@@ -626,6 +739,7 @@ unmount:
     ext4b_unmount(dev);
 out:
     ext4b_device_destroy(dev);
+    luks_device_close(luks);
     close(fd);
     if (getenv("EXT4DUMP_REPORT_WRITES"))
         fprintf(stderr, "writes=%ld\n", fc.writes);
