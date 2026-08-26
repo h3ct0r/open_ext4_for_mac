@@ -90,11 +90,13 @@ see `docs/SIGNING.md`). Building and testing the core needs none of that.
   mounted path* below. It holds in every case measured, but it is an
   observation about this macOS version, not a guarantee.
 
-- **Mount options do not reach the module.** FSKit's `mount(options:)` states
-  "there are no defined options currently", and `taskOptions` arrives empty for
-  `-o rw`, `-o ro` and `-r` alike. The volume therefore mounts read-write when
-  the probe says that is safe and read-only otherwise; a user-supplied
-  preference is not expressible.
+- **Mount options arrive late, at `activate`.** They do arrive — an earlier
+  note here said they did not, which was measured at the wrong callback and is
+  corrected under *Mount options* below. What is true is that they arrive
+  *after* `loadResource`, which is where the volume is opened and a dirty
+  journal replayed, so an option cannot change how the volume was opened. The
+  one that matters, `-o ro`, does not need to: FSKit reports the resource as
+  non-writable and `loadResource` already acts on that.
 
 ### Getting from "signed" to "mounts"
 
@@ -121,13 +123,64 @@ directions, sparse regions, chmod/chown/times, and xattr set/remove.
 Each operation is a single JBD2 transaction that either commits or aborts
 leaving the volume untouched.
 
-**Writes are not opt-in, because they cannot be.** The intent was to mount
-read-only unless the user passed `-o rw`. FSKit gives the module no way to see
-that: `taskOptions` arrives empty for `-o rw`, `-o ro` and `-r` alike, and the
-header states there are no defined mount options. A volume therefore mounts
-read-write whenever the probe rates it safe, and read-only otherwise —
-unsupported features, a dirty journal, or a `metadata_csum_seed` that no longer
-matches the UUID all force read-only.
+**A healthy volume mounts read-write by default, and `-o ro` opts out.**
+Read-only is honoured properly — the mount is marked read-only at the VFS
+layer, writes are refused, and the volume is not touched at all: no journal
+replay, no superblock update. Measured by hashing the image either side of a
+mount:
+
+```
+before any mount:      clean
+while mounted -o ro:   clean          image byte-identical: YES
+while mounted (rw):    not clean      image byte-identical: NO
+```
+
+One consequence is worth knowing. A volume with an unreplayed journal still
+mounts read-only, and stays untouched — which means the journal is *not*
+replayed and you are looking at the volume as of the last checkpoint, not the
+last committed transaction. Linux replays even on a read-only mount unless you
+pass `norecovery`; it can, because it is allowed to write. Mount read-write, or
+run `e2fsck`, to see the recovered state.
+
+The reverse — mounting read-write something the driver has rated read-only — is
+not offered, and deliberately so. Unsupported features, a dirty journal that
+would not replay, or a `metadata_csum_seed` that no longer matches the UUID all
+force read-only, and those are exactly the cases where writing is how a volume
+gets destroyed.
+
+### Mount options
+
+An earlier version of this document said mount options never reach the module.
+That was wrong, and wrong in an instructive way: it was measured at
+`mount(options:)`, whose own header says *"there are no defined options
+currently"* — which is true of that callback and of no other. `loadResource`
+is empty too, despite its header documenting `-f` and `--rdonly`.
+
+They arrive at **`activate(options:)`**, and only because `Info.plist` declares
+`FSActivateOptionSyntax` — the same key Apple's `msdos` module uses for its
+`-u/-g/-m/-o`. Measured against a live mount:
+
+| `mount -F -t ext4 …` | what `activate` receives |
+|---|---|
+| *(no options)* | `[]` |
+| `-o ro` | `["-o", "ro"]` |
+| `-r` | `["-o", "ro"]` — `mount(8)` normalises it |
+| `-o rw` | `["-o", "rw"]` |
+| `-o ro,noatime` | `["-o", "ro", "-o", "noatime"]` |
+
+So a comma list is split into repeated `-o value` pairs, and everything the
+user typed comes through.
+
+What this does **not** buy is a way to change how the volume was opened.
+`activate` runs after `loadResource`, and `loadResource` is where the journal
+gets replayed and `VALID_FS` cleared — by the time an option is legible, any
+writing has happened. Read-only works regardless, because it travels by a
+different road: FSKit marks the resource non-writable and `loadResource` reads
+*that*.
+
+The options are therefore not acted on today. The one thing they could add is
+defence in depth — refusing to activate if `ro` was asked for and the volume
+somehow came up writable — which is worth doing but is not a behaviour change.
 
 ### Files Linux marked as protected
 

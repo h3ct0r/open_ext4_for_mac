@@ -57,10 +57,12 @@ instead of failing — plus several of our own. See
 [patches/lwext4/README.md](patches/lwext4/README.md).
 
 > **Still young.** It is tested hard, but it has not been run by anyone but its
-> author, and two limitations are worth knowing before you point it at data you
-> care about: FSKit exposes no write barrier that works here, and it gives the
-> module no way to see `-o ro`, so a healthy volume always mounts read-write.
-> Both are documented in [docs/STATUS.md](docs/STATUS.md). Keep a backup.
+> author. One limitation is worth knowing before you point it at data you care
+> about: FSKit exposes no write barrier that works here, so write ordering
+> rests on an observation about this macOS version rather than a guarantee.
+> `mount -o ro` is honoured properly if you want to look without touching —
+> the volume is not written to at all. Both are documented in
+> [docs/STATUS.md](docs/STATUS.md). Keep a backup.
 
 ## Requirements
 
