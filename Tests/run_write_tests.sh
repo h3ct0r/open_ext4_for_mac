@@ -378,6 +378,32 @@ digest_before=$(shasum -a 256 "$IMG" | cut -d' ' -f1)
 # every checksum written to it wrong, and this is the check that says so:
 # without the patch e2fsck reports invalid group descriptor and inode
 # checksums here, nine complaints on the first write.
+# Asking a file for an attribute it does not have is the single most common
+# xattr call macOS makes -- Finder probes com.apple.FinderInfo on everything it
+# touches -- and it has to answer ENOATTR (93). Two bugs made it answer
+# otherwise, and between them they stopped Finder copying a file at all:
+# lwext4 reported EIO for an inode that had simply never carried an in-body
+# attribute, and ENODATA (96) once it had, which is Linux's name for the
+# condition and not a number macOS getxattr(2) can return.
+echo
+echo "extended attributes that are not there"
+xattr_missing() {  # xattr_missing <path> <label>
+  local out
+  out=$("$DUMP" "$IMG" getxattr "$1" user.definitely.missing 2>&1)
+  case "$out" in
+    *"Attribute not found"*) ok "$2" ;;
+    *) bad "$2" "got: $out" ;;
+  esac
+}
+op "create a file that has never had an xattr" create /noattr.txt
+xattr_missing /noattr.txt "a file with no xattr header answers ENOATTR, not EIO"
+op "give it one" setxattr /noattr.txt user.present yes
+xattr_missing /noattr.txt "a file that has one answers ENOATTR for a different name"
+# Setting the first attribute on such a file used to dereference NULL, once
+# the EIO above stopped arriving to trigger header initialisation.
+got=$("$DUMP" "$IMG" xattr /noattr.txt 2>/dev/null | grep -c "user.present")
+expect_eq "the first xattr on a bare inode is stored, not a crash" "1" "$got"
+
 seed_img="$TMP/seed.img"
 cp "$FIX/ext4_uuid_changed.img" "$seed_img"
 "$DUMP" "$seed_img" mkdir /reseeded >/dev/null 2>&1 || bad "could not write to a UUID-changed volume"

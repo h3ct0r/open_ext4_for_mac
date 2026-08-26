@@ -17,6 +17,7 @@ object file). Idempotent — a clean checkout builds with a plain `make`.
 | `0010-set-the-bitmap-tail-padding-mkfs-writes` | **Conformance, not a bug fix.** `mkfs` wrote block and inode bitmaps as all zeroes; `mke2fs` sets the bits past the end of the group. Verified *not* load-bearing once 0011 is applied — kept so the on-disk result matches the reference implementation rather than relying on nobody reading those bits. |
 | `0011-inodes-per-group-must-be-a-multiple-of-8` | **Bug fix.** `inodes_per_group` was aligned only to the inode-table stride (`block_size / inode_size`), which is 4 for 1 KiB blocks with 256-byte inodes. ext4 requires a multiple of 8 so each group's inode bitmap starts on a byte boundary; without it `e2fsck` reports `Padding at end of inode bitmap is not set`. `mke2fs` masks off the low three bits for the same reason. |
 | `0012-honour-the-stored-metadata-checksum-seed` | **Bug fix, corruption.** Every metadata checksum was seeded with `crc32c(~0, uuid)`. ext4 stores the seed explicitly in `s_checksum_seed` when `metadata_csum_seed` is set — which `mke2fs` enables by default — precisely so that `tune2fs -U` can change a volume's UUID without rewriting every checksum on it. The two agree until somebody does that, and then *every* checksum lwext4 writes is wrong: `e2fsck` reports nine invalid group descriptor and inode checksums after a single `mkdir`. The bridge used to force such volumes read-only to avoid it; they are now writable. |
+| `0013-an-inode-with-no-xattr-header-is-not-an-io-error` | **Bug fix.** `ext4_xattr_ibody_find_entry()` reported `EIO` for an inode whose in-inode attribute area carried no header — the ordinary state of almost every file — because `ext4_xattr_is_ibody_valid()` folds "absent" together with "malformed". Absence is now "not found"; corruption still returns `EIO`. The set path had been *relying* on that error to know when to lay a header down, so it now asks directly; without that it dereferences NULL on the first attribute written to a bare inode. |
 
 Everything except 0001, 0003 and 0010 is a genuine upstream defect and worth
 sending upstream. 0002 and 0004 were found by running the write suite under
@@ -26,6 +27,9 @@ under a live mount; 0007 and 0008 together by the mounted-driver suite, which
 caught a volume that had stopped answering and sampled the extension to find
 out where it was; 0009 and 0011 by formatting across a range of volume sizes
 and block sizes and handing every result to `e2fsck`.
+
+0013 is what stopped Finder copying a file off an ext4 volume at all: macOS probes `com.apple.FinderInfo` on everything it touches, and an `EIO` there is
+fatal to the copy. `cp` never showed it, because `cp` does not ask.
 
 0012 is invisible unless a fixture has had its UUID changed after creation, which
 is why one is built deliberately (`tune2fs -U` in `Tests/make_fixtures.sh`).

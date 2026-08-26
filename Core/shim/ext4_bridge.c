@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+#include <sys/xattr.h>   /* ENOATTR */
 #include "ext4_bridge.h"
 
 #include <ext4.h>
@@ -1142,6 +1143,23 @@ int ext4b_listxattr(ext4b_device *dev, uint32_t inode,
     return r;
 }
 
+/*
+ * "This attribute is not set" has two names, and the platforms disagree.
+ *
+ * lwext4 speaks Linux and returns ENODATA, which is what Linux's getxattr(2)
+ * documents. macOS documents ENOATTR for the same condition, and its value is
+ * different -- 93 against 96. Handing ENODATA to a macOS caller is not a
+ * near-miss: getxattr(2) never returns it, so callers that switch on the
+ * errno fall through to their error path. Finder does exactly that, and
+ * refuses to copy a file whose com.apple.FinderInfo it cannot resolve.
+ *
+ * Translated here rather than in lwext4, because lwext4 is right about Linux.
+ */
+static int xattr_errno(int rc)
+{
+    return rc == ENODATA ? ENOATTR : rc;
+}
+
 int ext4b_getxattr(ext4b_device *dev, uint32_t inode,
                    const char *name,
                    void *buf, size_t buf_size, size_t *out_len)
@@ -1165,7 +1183,7 @@ int ext4b_getxattr(ext4b_device *dev, uint32_t inode,
     r = ext4_xattr_get(&ref, name_index, short_name, name_len,
                        buf, buf_size, out_len);
     ext4_fs_put_inode_ref(&ref);
-    return r;
+    return xattr_errno(r);
 }
 
 /* ============================================================== writing == */
@@ -2597,5 +2615,5 @@ int ext4b_removexattr(ext4b_device *dev, uint32_t inode, const char *name)
         touch(fs, &ref, TOUCH_CTIME);
 
     ext4_fs_put_inode_ref(&ref);
-    return txn_finish(dev, fs, r);
+    return xattr_errno(txn_finish(dev, fs, r));
 }

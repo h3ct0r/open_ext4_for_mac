@@ -342,6 +342,7 @@ int main(int argc, char **argv)
             "  symlink <target> <name> create a symbolic link\n"
             "  truncate <path> <size>  set file size\n"
             "  chmod <path> <mode>     set permission bits\n"
+            "  getxattr <path> <name>  read one, or report why there is none\n"
             "  setxattr <path> <n> <v> set an extended attribute\n"
             "  rmxattr <path> <name>   remove an extended attribute\n"
             "  label <name>            set the volume label\n",
@@ -553,6 +554,24 @@ int main(int argc, char **argv)
         r = ext4b_listxattr(dev, ino, on_xattr, NULL);
         if (r != 0)
             fprintf(stderr, "listxattr: %s\n", ext4b_strerror(r));
+
+    } else if (strcmp(cmd, "getxattr") == 0) {
+        /* Reads one attribute by name, and -- the reason this exists -- prints
+         * the errno when there is none. macOS requires ENOATTR there, and
+         * getting that wrong is enough to stop Finder copying a file. */
+        if (argc < 5) { fprintf(stderr, "getxattr needs a path and a name\n"); rc = 2; goto unmount; }
+        uint32_t ino = resolve(dev, argv[3], NULL);
+        if (!ino) { rc = 1; goto unmount; }
+        uint8_t value[4096];
+        size_t  value_len = 0;
+        r = ext4b_getxattr(dev, ino, argv[4], value, sizeof value, &value_len);
+        if (r != 0) {
+            fprintf(stderr, "getxattr: %s\n", strerror(r));
+            rc = 1;
+        } else {
+            fwrite(value, 1, value_len, stdout);
+            fputc('\n', stdout);
+        }
 
     } else if (strcmp(cmd, "decrypt") == 0) {
         /* Write the decrypted payload out, so that tools which know nothing

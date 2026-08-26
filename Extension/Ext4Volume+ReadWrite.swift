@@ -86,7 +86,10 @@ extension Ext4Volume: FSVolume.XattrOperations {
         case .mustCreate where existing != nil:
             throw Ext4Error.posix(EEXIST)
         case .mustReplace where existing == nil:
-            throw Ext4Error.posix(ENODATA)
+            // ENOATTR, not ENODATA: macOS names this condition differently
+            // from Linux and gives it a different number. See xattr_errno()
+            // in the bridge.
+            throw Ext4Error.posix(ENOATTR)
         default:
             break
         }
