@@ -616,124 +616,136 @@ byte of, so it is tested on unterminated strings, mismatched brackets, control
 bytes, nesting past its ceiling, and integers too large for 64 bits. It has no
 recursion and the token budget is fixed by the caller.
 
-### Mounting an encrypted volume
+### Encrypted volumes mount
 
-A locked container is now **recognised on a real mount**. `diskutil` shows it,
-and the module claims it rather than declining:
-
-```
-/dev/disk6 (disk image):
-   #:                  TYPE NAME                    SIZE       IDENTIFIER
-   0:                       LUKS1 Encrypted Volume +67.1 MB    disk6
-```
-
-Claiming it is the part that matters: FSKit only routes a device to a module
-that said it recognised the media, so declining would mean never being asked
-about the volume again — and there would be no later point at which a
-passphrase could be offered.
-
-What is still missing is the passphrase itself. Mounting one today fails with
-`EAUTH`, cleanly:
+An ext4 filesystem inside a LUKS container mounts, reads and writes through the
+real driver, both formats:
 
 ```
-mount: Operation ended with error: The operation couldn’t be completed.
-       Authentication error
+/dev/disk6 on /tmp/ext4-mount-luks (ext4, local, nodev, nosuid, journaled,
+                                    noowners, noatime, fskit, mounted by h3ct0r)
 ```
 
-#### What the mounted path taught us
+The decrypting layer is rebuilt inside the extension. `loadResource` opens the
+container, finds a master key, then **throws the plain device away and builds
+the stack again with the cipher in the middle** — because the device `init`
+made addresses the container, header and key slots included, and everything
+above has to address the payload instead. Its block count is the payload size,
+not the container size: a filesystem told it has more blocks than exist
+eventually writes past the end of the medium.
 
-Three things were measured rather than reasoned about, and two of them
-contradict the obvious reading of the headers.
+Verified end to end, in both directions, by real cryptsetup and the real Linux
+kernel: `Tests/run_mount_luks_tests.sh`, 24 assertions, wired into
+`make validate` as its own stage.
 
-**`FSContainerStateBlocked` is inert for a third-party module.** It is
-documented as a state whose error "has a resolution that would allow the
-container to become ready, such as correcting an incorrect password", and
-`ENEEDAUTH` is the example given. Setting it in `loadResource` changes nothing:
-fskitd records the load as having succeeded, *nothing prompts anywhere on the
-system* — no SecurityAgent, no notification, nothing in the whole system log —
-and FSKit proceeds directly to activate the volume. There is no callback for a
-passphrase arriving because there is no prompt to produce one.
+| | LUKS1 | LUKS2 |
+|---|---|---|
+| encryption sector | 512 B | 4096 B |
+| KDF | PBKDF2 | argon2id, 1 GiB, t=12, 4 lanes |
+| mount time | immediate | ~5 s per derivation |
 
-**A volume that cannot answer takes the extension down with it.** Because
-activation happens regardless of the container state, a placeholder volume that
-does not implement `FSVolume.Operations` dies on an unrecognised selector:
+The 4096-byte case reads a 400 KB file and compares it byte-for-byte, which is
+the only thing that catches the IV-units trap on the mounted path — with a
+4096-byte sector dm-crypt still counts the XTS tweak in 512-byte units, and
+getting it wrong still decrypts sector 0, so the volume mounts and its label
+reads correctly while everything else is garbage.
 
-```
--[FSModuleConnector activateVolume:resource:options:replyHandler:]
-  -[NSObject doesNotRecognizeSelector:]  →  SIGABRT
-```
+#### Where the key comes from
 
-So a locked volume is a real `FSVolume` that refuses every operation with
-`EAUTH`. It also has to **release the block device before failing**: FSKit
-calls neither `deactivate` nor `unloadResource` after `activate` throws, so a
-device still held there stays held, and the next probe of the same media fails
-with *Resource busy* until it is physically detached.
-
-**Mount options do reach `activate`, and the sandbox blocks the path they
-name.** Given `mount -F -t ext4 -o keyfile=/path/to/pass …`, the module
-receives exactly:
+The extension cannot ask. It draws no UI, FSKit has no callback that delivers a
+passphrase, and the sandbox refuses to open a path named on the mount command
+line — all three measured. So the key has to be waiting before the mount
+begins, and putting it there is the container app's job:
 
 ```
-activate options: ["-o", "keyfile=/private/tmp/.../pass.txt"]
+Ext4Mac unlock /dev/disk6      # prompts, derives, stores the master key
+mount -F -t ext4 disk6 /mnt    # immediate: nothing is derived here
+Ext4Mac forget <uuid|disk>     # locked again
+Ext4Mac list                   # which volumes are unlocked, never the keys
 ```
 
-and then cannot open it — *"you don't have permission to view it"*. That is the
-sandbox doing its job, and it is why the key cannot simply be read from a path
-the user types.
+The passphrase is typed into the app and never leaves it. What crosses over is
+only the master key, which opens exactly one volume.
 
-#### The channel that remains
+**Why the app and not the extension.** `loadResource` runs **twice per mount,
+in two separate extension processes**, so deriving there costs argon2id twice —
+about five seconds and a gigabyte each time. Deriving in the app costs it once,
+and the mount that follows is instantaneous. (Argon2id at cryptsetup's defaults
+*does* survive inside the sandboxed extension — measured, no jetsam kill — so
+this is about arithmetic, not about whether it fits.)
 
-FSKit's answer to precisely this is `FSTaskOptions.url(forOption:)`, which
-hands a sandboxed module a **security-scoped URL** for an option the manifest
-declares as a path. No public documentation says how to declare one, and none
-of the modules Apple ships (`msdos`, `exfat`, `ftp`) uses the feature. The
-schema is legible in FSKit itself, around the parser that reads it:
+**Two places a key can live**, tried in that order:
 
-```
--[FSTaskOptionsBundle parseAndValidateActivateOptions:activationSyntax:]
-  shortOptions   dashOOptions   pathOptions   Path   Directory
-  FSOptionArgumentTypeNoArg / HasArg / Boolean
-```
+| | where | encrypted at rest | who can clear it |
+|---|---|---|---|
+| keychain | shared access group | yes | the app |
+| container file | `…/Application Support/luks/<UUID>.key` | **no** | the app, or anyone with the user's account |
 
-`dashOOptions` is what makes `-o name=value` parse into a named option instead
-of an opaque string; `pathOptions` marks that option as a path, which is what
-produces the security-scoped URL.
+The keychain needs a provisioning profile for the *app's* bundle ID, since a
+Developer ID binary that claims a keychain access group it cannot prove is
+killed by AMFI the moment it launches — `Killed: 9`, no crash report, nothing
+in the log. `scripts/sign.sh` therefore adds the entitlement only when
+`App/Ext4Mac.provisionprofile` is present, and says which way it signed. See
+`docs/SIGNING.md`. Without it everything still works; the key just sits in the
+container in the clear.
 
-The exact shapes of those two dictionaries are still unknown. The first
-combination tried — both keyed by option name, with the values
-`FSOptionArgumentTypeHasArg` and `Path` — was **rejected by FSKit**, which
-drops a module whose manifest it dislikes without saying why. This is the same
-failure mode already recorded for `FSSupportsKernelOffloadedIO`, and it is
-expensive: recovering registration costs the module's approval in System
-Settings, which nothing but a human toggling the switch can restore. Further
-attempts should be made one at a time, with someone at the keyboard.
+The container directory also accepts a `<UUID>.pass` file holding a passphrase,
+which needs no app and no entitlement at all. That is what an unattended
+machine can use, and what the test suite uses.
 
-#### Why not derive the key in the container app
+**The extension never creates keychain items — it only reads them.** When it
+does derive a key from a passphrase file it caches it in the container, not the
+keychain, even though it is entitled to write there. Ownership has to sit in
+one place and it belongs with the app, because that is what a person reaches
+for when they want a volume to stop being unlocked. A key cached somewhere the
+app cannot delete is a key nothing can forget.
 
-The alternative is for the app to prompt, run the KDF, and hand the extension
-only the master key — which is better on two counts. The passphrase never
-enters the sandboxed process, and Argon2id's gigabyte is allocated by an
-ordinary application rather than an app extension. It would also work for
-Finder auto-mount, where there is no command line to carry an option at all.
+#### Two refusals, deliberately different
 
-It needs a shared keychain access group, which means an entitlement change and
-very likely a new provisioning profile — and entitlement changes are exactly
-what has deregistered this module before.
+| situation | error | what `mount` prints |
+|---|---|---|
+| no key stored for this volume | `ENEEDAUTH` | Need authenticator |
+| a key was found and does not open it | `EAUTH` | Authentication error |
 
-#### One trap that is already closed
+Collapsing them would leave someone retyping a passphrase that was never going
+to be consulted.
+
+Both are raised from **`loadResource`**, and that placement is not a style
+choice. FSKit activates the volume whatever the container status says, and it
+calls neither `deactivate` nor `unloadResource` after `activate` throws — so
+the resource stays registered to that extension instance, and every later probe
+of the same media fails with *Resource busy*, through a detach and re-attach
+both. A load that throws unwinds cleanly; a volume that refuses to activate
+does not. The suite has a check for exactly that regression.
+
+`FSContainerStateBlocked` was tried first and is **inert for a third-party
+module**: it is documented as a state a password would resolve, with
+`ENEEDAUTH` as the example, but setting it changes nothing — the load is
+recorded as successful, nothing prompts anywhere in the system log, and FSKit
+activates the volume anyway.
+
+#### The trap that stays shut
 
 Kernel-offloaded I/O must never be used for an encrypted volume: that path
-hands the kernel physical extents to read directly, and it would return
-ciphertext — presenting as filesystem corruption rather than as a decryption
-bug. Every file currently reports `inhibitKernelOffloadedIO`, because the
-conformance is out of the build entirely, so the trap is shut today. It has to
-stay shut deliberately when that work resumes.
+hands the kernel physical extents to read for itself, below the cipher, so it
+would return ciphertext — and that presents as filesystem corruption rather
+than as a decryption bug. Every file reports `inhibitKernelOffloadedIO`, and
+for an encrypted volume that is now a *condition* rather than a comment, so
+finishing the blockmap work cannot quietly undo it.
+
+#### Still to do
+
+Unlocking is a command, not a window: the app is a CLI. Nothing prompts when an
+encrypted volume is plugged in, so a locked volume simply fails to mount until
+somebody runs `Ext4Mac unlock`.
+
+Key material is zeroed on every path, but not `mlock`ed against swap.
 
 ## Not yet done
 - `newfs_fskit` reaches the module but never calls `startFormat`; see below
 - A real structural check; `startCheck` only decides mountability
 - Two simultaneous open-unlinks are crash-protected for one of them, not both
-- Mounting an encrypted volume — recognised and refused cleanly; the passphrase channel is not built
+- The container app cannot yet unlock an encrypted volume; a passphrase file can
 - LUKS detached headers, and ciphers other than `aes-xts-plain64`
 - `FSVolumeAccessCheckOperations`
 - `FSVolumePreallocateOperations` — deliberately, for now; see below

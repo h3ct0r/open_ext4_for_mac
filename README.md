@@ -46,17 +46,27 @@ make validate
 | crash consistency | 303 cut points; the Linux kernel replays each journal |
 | differential vs Linux | 36 assertions, both directions |
 | mounted driver | 23 assertions against a live FSKit mount |
+| encrypted, mounted | 30 assertions; a LUKS volume through FSKit, judged by Linux |
 
 A file deleted while something still has it open goes on ext4's own **orphan
 list**, so a crash in that window is recoverable by the next mount rather than
 a leak — and `chattr +i` / `chattr +a` are honoured, reported to macOS as
 `uchg` / `uappnd`.
 
-**ext4 inside LUKS** reads and writes too, LUKS1 and LUKS2 alike — the one
-thing macOS otherwise cannot open at all, since `cryptsetup` needs
-device-mapper and cannot be ported. Offline today; mounting one needs a
-passphrase channel into the sandboxed extension, which is
-[documented as the remaining gap](docs/STATUS.md).
+**ext4 inside LUKS mounts**, LUKS1 and LUKS2 alike — the one thing macOS
+otherwise cannot open at all, since `cryptsetup` needs device-mapper and
+cannot be ported:
+
+```bash
+Ext4Mac unlock /dev/disk6            # prompts; derives the master key
+mount -F -t ext4 disk6 /tmp/mnt      # immediate
+Ext4Mac forget /dev/disk6            # locked again
+```
+
+The passphrase is typed into the app and never reaches the sandboxed
+extension, which only ever sees a master key. Everything macOS writes to an
+encrypted volume is handed back to real `cryptsetup` and the Linux kernel to
+read; see [docs/STATUS.md](docs/STATUS.md).
 
 Testing found eight genuine bugs in lwext4 — including one that replayed stale
 journal records over live metadata, and one that hung the driver forever

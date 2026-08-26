@@ -28,6 +28,14 @@ final class Ext4Volume: FSVolume {
     /// downgraded it.
     let isReadOnly: Bool
 
+    /// Whether this driver offers the kernel a direct path to the medium.
+    ///
+    /// False while `FSVolumeKernelOffloadedIOOperations` is out of the build
+    /// (see `Ext4Volume+KernelIO.swift.disabled`). Flipping it back on is not
+    /// enough to expose an encrypted volume to that path -- see
+    /// `inhibitKernelOffloadedIO` below.
+    static let vendsKernelOffloadedIO = false
+
     /// The live core handle.
     ///
     /// FSKit can still deliver operations after `unmount()` has closed the
@@ -280,9 +288,20 @@ final class Ext4Volume: FSVolume {
         // ext2/ext3 indirect-block and inline-data inodes have no extent tree
         // at all, so they always take the byte-copy path.
         if requested.contains(.inhibitKernelOffloadedIO) {
-            // The volume does not vend kernel-offloaded I/O at all right now,
-            // so every file takes the byte-copy path.
-            target.inhibitKernelOffloadedIO = true
+            // Two independent reasons, either of which is enough on its own.
+            //
+            // The volume does not vend kernel-offloaded I/O at all today, so
+            // every file takes the byte-copy path regardless.
+            //
+            // On an encrypted volume it has to stay that way whatever happens
+            // to the conformance: that path hands the kernel physical extents
+            // to read for itself, below the cipher, so it would hand back
+            // ciphertext -- and that presents as filesystem corruption rather
+            // than as a decryption bug. Written as a condition rather than a
+            // comment so that finishing the blockmap work cannot quietly
+            // undo it.
+            target.inhibitKernelOffloadedIO = bridge.isEncrypted
+                                           || !Self.vendsKernelOffloadedIO
         }
     }
 

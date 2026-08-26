@@ -13,6 +13,19 @@ APPEX="$APP/Contents/Extensions/Ext4FS.appex"
 ENTITLEMENTS="$ROOT/Extension/Ext4FS.entitlements"
 PROFILE="${PROVISIONING_PROFILE:-$ROOT/Extension/Ext4FS.provisionprofile}"
 
+# The app shares a keychain access group with the extension, so the two can
+# hand a master key across without the passphrase ever entering the sandboxed
+# process. That entitlement needs a profile issued for the *app's* bundle ID --
+# the one we have is for the extension's, and a Developer ID binary that claims
+# a keychain group it cannot prove is killed by AMFI the instant it launches,
+# with no crash report and nothing in the log.
+#
+# So the app is signed with the entitlement only when its own profile is
+# present. Without one it still works; it just leaves the key in the
+# extension's container instead of the keychain. See docs/SIGNING.md.
+APP_ENTITLEMENTS="$ROOT/App/Ext4Mac.entitlements"
+APP_PROFILE="${APP_PROVISIONING_PROFILE:-$ROOT/App/Ext4Mac.provisionprofile}"
+
 # Optional: sign from a specific keychain.
 #
 # A login keychain that has accumulated duplicate key entries or unrelated PKI
@@ -62,7 +75,17 @@ codesign --force --timestamp --options runtime \
          "$APPEX"
 
 echo "signing app..."
+APP_ENTITLEMENT_ARG=()
+if [ -f "$APP_PROFILE" ] && [ -f "$APP_ENTITLEMENTS" ]; then
+  cp "$APP_PROFILE" "$APP/Contents/embedded.provisionprofile"
+  APP_ENTITLEMENT_ARG=(--entitlements "$APP_ENTITLEMENTS")
+  echo "  with the shared keychain group (app profile found)"
+else
+  rm -f "$APP/Contents/embedded.provisionprofile"
+  echo "  without the shared keychain group (no App/Ext4Mac.provisionprofile)"
+fi
 codesign --force --timestamp --options runtime \
+         "${APP_ENTITLEMENT_ARG[@]}" \
          "${KEYCHAIN_ARG[@]}" \
          --sign "$IDENTITY" \
          "$APP"

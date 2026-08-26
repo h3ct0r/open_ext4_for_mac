@@ -18,11 +18,6 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
     private var bridge: BlockDeviceBridge?
     private var volume: Ext4Volume?
 
-    /// Set when the resource turned out to be a LUKS container we recognised
-    /// but could not open. Kept so a later unlock has the header to work from,
-    /// and so the close path knows there is no mounted filesystem to unwind.
-    private var lockedContainer: luks_info?
-
     /// The last resource FSKit presented, whether to probe or to load.
     ///
     /// The maintenance operations -- startFormat and startCheck -- are handed
@@ -124,21 +119,54 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         let readOnly = !mediaWritable
 
         guard let bridge = BlockDeviceBridge(resource: device, forceReadOnly: readOnly),
-              let dev = bridge.device else {
+              var dev = bridge.device else {
             throw Ext4Error.ioError
         }
 
         // An encrypted container is recognised here rather than by the
-        // filesystem probe, which would only see ciphertext. Without a key
-        // there is nothing to mount, so the container is reported blocked and
-        // the volume handed back is a placeholder.
+        // filesystem probe, which would only see ciphertext.
         if let (status, luks) = bridge.probeLUKS() {
             guard status == LUKS_OK else {
                 bridge.close()
                 Ext4Log.error("refusing LUKS volume: \(Ext4LUKS.reason(luks))")
                 throw Ext4Error.notSupported
             }
-            return blockedVolume(bridge: bridge, luks: luks)
+
+            // Recognised, but nothing here can open it. Failing *here*
+            // rather than later is not a style choice: FSKit activates the
+            // volume whatever the container status says, and it calls neither
+            // deactivate nor unloadResource after `activate` throws -- so the
+            // resource stays registered to this extension instance and every
+            // later probe of the same media fails with "Resource busy", right
+            // through a detach and re-attach. A load that throws unwinds
+            // cleanly; a volume that refuses to activate does not.
+            var key: [UInt8]
+            switch Ext4LUKSKeys.masterKey(for: luks,
+                                          unlock: { bridge.unlockLUKS(info: luks,
+                                                                      passphrase: $0) }) {
+            case .found(let k):
+                key = k
+            case .unavailable:
+                bridge.close()
+                throw Ext4Error.posix(ENEEDAUTH)
+            case .rejected:
+                bridge.close()
+                throw Ext4Error.posix(EAUTH)
+            }
+            defer { key.resetBytes(in: 0..<key.count) }
+
+            // The device built by `init` addresses the container -- header,
+            // key slots and all. Everything from here on has to address the
+            // payload instead, so the stack is rebuilt with the cipher in the
+            // middle. Nothing above this line ever sees a decrypted byte, and
+            // nothing below it sees an encrypted one.
+            bridge.close()
+            guard bridge.openThroughLUKS(info: luks, masterKey: key),
+                  let decrypted = bridge.device else {
+                throw Ext4Error.ioError
+            }
+            dev = decrypted
+            Ext4Log.info("unlocked LUKS\(luks.version) container, \(luks.sector_size)B sectors")
         }
 
         var info = ext4b_probe_info()
@@ -175,7 +203,8 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         // available"; activate() moves it on to Active.
         containerStatus = FSContainerStatus.ready
 
-        Ext4Log.info("mounted ext\(info.generation) volume \(effectiveReadOnly ? "read-only" : "read-write"), "
+        Ext4Log.info("mounted ext\(info.generation) volume \(effectiveReadOnly ? "read-only" : "read-write")"
+                     + "\(bridge.isEncrypted ? " (encrypted)" : ""), "
                      + "\(info.block_count) blocks of \(info.block_size)B")
         return volume
     }
@@ -193,38 +222,7 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
     /// Async on purpose. A synchronous version deadlocks: the callers are async
     /// and resume on the executor's own queue after awaiting it, so a
     /// `queue.sync` from there blocks the queue against itself.
-    /// Report the container as needing a passphrase, and hand FSKit the
-    /// placeholder volume its state machine insists on.
-    ///
-    /// The blocked state is **inert for a third-party module**, which was
-    /// measured rather than assumed. FSKit pairs `FSContainerStateBlocked`
-    /// with `ENEEDAUTH` and describes it as a state a password would resolve,
-    /// but setting it here changes nothing: `loadResource` is recorded as
-    /// having succeeded, nothing prompts anywhere on the system, and FSKit
-    /// goes straight on to activate the volume. It is set anyway because it is
-    /// the truthful description of the container, and because the alternative
-    /// -- claiming `ready` for a volume with no readable filesystem -- would
-    /// be a lie to any future version of FSKit that does read it.
-    private func blockedVolume(bridge: BlockDeviceBridge, luks: luks_info) -> FSVolume {
-        self.bridge = bridge
-        self.lockedContainer = luks
-        containerStatus = FSContainerStatus.blocked(status: Ext4LUKS.needsAuthError())
-        Ext4Log.info("LUKS\(luks.version) container is locked; reporting ENEEDAUTH")
-        let locked = Ext4LockedVolume(info: luks)
-        locked.fileSystem = self
-        return locked
-    }
-
     func closeVolume() async {
-        // A locked container has an open device but no mounted filesystem;
-        // unmounting one would fail, and there is nothing to write back.
-        if lockedContainer != nil {
-            bridge?.close()
-            bridge = nil
-            lockedContainer = nil
-            Ext4Log.info("locked container closed")
-            return
-        }
         guard let bridge, let dev = bridge.device else { return }
         // Carried across the concurrency boundary as an integer: OpaquePointer
         // is not Sendable, and the executor guarantees serial access anyway.

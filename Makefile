@@ -69,7 +69,7 @@ ARGON2_CFLAGS := $(CFLAGS) -Wno-everything -I$(ARGON2_DIR)
 
 CORE_LIB := $(BUILD)/lib/libext4core.a
 
-.PHONY: all core clean test test-asan test-crash test-diff test-format test-crypto test-orphan test-luks test-mount-crash check-extension validate tools entitlements check-submodule patch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil
+.PHONY: all core clean test test-asan test-crash test-diff test-format test-crypto test-orphan test-luks test-mount-crash test-mount-luks check-extension validate tools entitlements check-submodule patch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil
 
 all: app
 
@@ -175,6 +175,12 @@ test-orphan: tools
 test-luks: tools
 	@bash Tests/run_luks_tests.sh
 
+# Encrypted volumes against the mounted driver: the decrypting layer rebuilt
+# inside the sandboxed extension, on top of FSBlockDeviceResource. Everything
+# macOS writes is handed back to cryptsetup and the Linux kernel to read.
+test-mount-luks:
+	@bash Tests/run_mount_luks_tests.sh
+
 # Crash consistency against the mounted driver rather than the offline core.
 # Needs the extension signed, installed and enabled; skips with a message if
 # it is not. This is the only suite that exercises FSBlockDeviceResource.
@@ -221,7 +227,12 @@ APPEX      := $(BUILD)/$(APP_NAME).app/Contents/Extensions/$(EXT_NAME).appex
 # before returning, with no way to undo it if the kernel then fails the I/O.
 # Until that is implemented, all I/O goes through FSVolume.ReadWriteOperations,
 # where allocation stays inside a transaction we control.
-SWIFT_SRCS := $(wildcard Extension/*.swift)
+# Shared/ is compiled into both the extension and the container app. It holds
+# the one thing they have in common: the keychain items an encrypted volume's
+# master key travels in. An app extension has no IPC back to its host, so that
+# is the whole channel between them.
+SHARED_SRCS := $(wildcard Shared/*.swift)
+SWIFT_SRCS  := $(wildcard Extension/*.swift) $(SHARED_SRCS)
 
 SWIFTFLAGS := -target arm64-apple-macos$(DEPLOY_TARGET) \
               -I Core/shim \
@@ -261,9 +272,15 @@ $(BUILD)/$(APP_NAME).app/Contents/Info.plist: App/Info.plist
 	@mkdir -p $(dir $@)
 	@cp $< $@
 
-$(BUILD)/$(APP_NAME).app/Contents/MacOS/$(APP_NAME): App/Ext4MacApp.swift
+# The app links the core so it can read a LUKS header and run the key
+# derivation itself: a gigabyte of argon2id belongs in an ordinary application,
+# not in a sandboxed app extension that pays for it once per load.
+APP_SRCS := $(wildcard App/*.swift) $(SHARED_SRCS)
+
+$(BUILD)/$(APP_NAME).app/Contents/MacOS/$(APP_NAME): $(APP_SRCS) $(CORE_LIB)
 	@mkdir -p $(dir $@)
-	swiftc App/Ext4MacApp.swift -target arm64-apple-macos$(DEPLOY_TARGET) -O -parse-as-library -o $@
+	swiftc $(APP_SRCS) -target arm64-apple-macos$(DEPLOY_TARGET) -O -parse-as-library \
+	    -I $(SHIM_DIR) $(CORE_LIB) -o $@
 
 # --- signing -----------------------------------------------------------------
 # Requires a Developer ID Application certificate and a provisioning profile
@@ -296,6 +313,8 @@ entitlements:
 	@sed -e 's/@TEAM_ID@/$(TEAM_ID)/g' \
 	     -e 's/@BUNDLE_ID@/$(BUNDLE_ID).$(EXT_NAME)/g' \
 	     Extension/Ext4FS.entitlements.in > Extension/Ext4FS.entitlements
+	@sed -e 's/@TEAM_ID@/$(TEAM_ID)/g' \
+	     App/Ext4Mac.entitlements.in > App/Ext4Mac.entitlements
 	@echo "entitlements: team $(TEAM_ID), app id $(TEAM_ID).$(BUNDLE_ID).$(EXT_NAME)"
 
 # --- Disk Utility integration ------------------------------------------------

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The same group the extension declares, and the only thing the two
+	     processes share. The app derives an encrypted volume's master key and
+	     leaves it here; the extension reads it at mount time. There is no
+	     other channel, because an app extension has no IPC back to its host.
+
+	     Deliberately the whole entitlement list. The app is not sandboxed and
+	     needs nothing else; in particular it does not claim
+	     com.apple.application-identifier, because the provisioning profile
+	     that would have to authorise it is issued for the *extension's*
+	     bundle ID, not this one. A team-prefixed keychain group is validated
+	     against the team in the signature instead. -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>@TEAM_ID@.dev.h3ct0r.ext4mac.shared</string>
+	</array>
+</dict>
+</plist>

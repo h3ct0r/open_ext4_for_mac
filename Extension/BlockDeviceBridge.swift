@@ -52,6 +52,17 @@ final class BlockDeviceBridge {
     let resource: FSBlockDeviceResource
     private(set) var device: OpaquePointer?
 
+    /// The decrypting layer, present only for a volume inside a LUKS
+    /// container. It sits between `device` and this bridge's own callbacks, so
+    /// lwext4 above it sees a plain block device that happens to start at the
+    /// container's payload.
+    private(set) var luksDevice: OpaquePointer?
+
+    /// True when every byte on the way to the medium passes through the
+    /// cipher. Anything that would let the kernel touch the device directly
+    /// must consult this first.
+    var isEncrypted: Bool { luksDevice != nil }
+
     let blockSize: UInt32
     let blockCount: UInt64
     let isWritable: Bool
@@ -79,16 +90,73 @@ final class BlockDeviceBridge {
     }
 
     deinit {
-        if let device {
-            ext4b_device_destroy(device)
-        }
+        close()
     }
 
+    /// Tear down in the order the layers were built: the filesystem's device
+    /// first, since destroying it can still flush through the cipher, then the
+    /// decrypting layer, which zeroes its key material as it goes.
     func close() {
         if let device {
             ext4b_device_destroy(device)
             self.device = nil
         }
+        if let luksDevice {
+            luks_device_close(luksDevice)
+            self.luksDevice = nil
+        }
+    }
+
+    /// Rebuild the device stack with a decrypting layer in the middle.
+    ///
+    /// Call after `close()`: the plain device created by `init` addresses the
+    /// container, header and all, and is not the one the filesystem should
+    /// see. This one addresses the payload, and its block count is the payload
+    /// size rather than the container size -- a filesystem told it has more
+    /// blocks than exist would eventually write past the end of the medium.
+    ///
+    /// The caller owns `masterKey` and should zero it afterwards; this copies
+    /// what it needs into the decrypting layer, which zeroes its copy on
+    /// `close()`.
+    func openThroughLUKS(info: luks_info, masterKey: [UInt8]) -> Bool {
+        guard device == nil, luksDevice == nil else {
+            Ext4Log.error("openThroughLUKS on an already-open device")
+            return false
+        }
+
+        var info = info
+        let ctx = Unmanaged.passUnretained(self).toOpaque()
+        let opened = masterKey.withUnsafeBufferPointer { key in
+            luks_device_open(ctx, bridgeRead,
+                             isWritable ? bridgeWrite : nil,
+                             bridgeFlush,
+                             &info, key.baseAddress, key.count)
+        }
+        guard let opened else {
+            Ext4Log.error("could not open the decrypting device")
+            return false
+        }
+        luksDevice = opened
+
+        let payloadBytes = luks_payload_size(opened, blockCount * UInt64(blockSize))
+        guard payloadBytes >= UInt64(blockSize) else {
+            Ext4Log.error("LUKS payload is smaller than one device block")
+            close()
+            return false
+        }
+
+        guard let dev = ext4b_device_create(UnsafeMutableRawPointer(opened),
+                                            blockSize,
+                                            payloadBytes / UInt64(blockSize),
+                                            !isWritable,
+                                            luks_device_read,
+                                            luks_device_write,
+                                            luks_device_flush) else {
+            close()
+            return false
+        }
+        device = dev
+        return true
     }
 
     // MARK: - LUKS
@@ -102,6 +170,38 @@ final class BlockDeviceBridge {
     /// Returns nil when the device carries no LUKS magic at all -- the common
     /// case, and not an error. A container we recognise but cannot open comes
     /// back with its status set, so the caller can say why.
+    /// Turn a passphrase into the container's master key.
+    ///
+    /// The expensive half of LUKS: LUKS2 defaults ask for a gigabyte of memory
+    /// and several seconds of it. Kept separate from opening the device so it
+    /// can be done somewhere better suited than a sandboxed extension.
+    ///
+    /// The caller owns the returned bytes and must zero them.
+    func unlockLUKS(info: luks_info, passphrase: [UInt8]) -> [UInt8]? {
+        var info = info
+        let ctx = Unmanaged.passUnretained(self).toOpaque()
+        var key = [UInt8](repeating: 0, count: Int(LUKS_MAX_MASTER_KEY))
+        var length = 0
+
+        let status = passphrase.withUnsafeBufferPointer { pass in
+            key.withUnsafeMutableBufferPointer { out in
+                luks_unlock(ctx, bridgeRead, &info,
+                            pass.baseAddress, pass.count,
+                            out.baseAddress, &length)
+            }
+        }
+        guard status == LUKS_OK, length > 0, length <= key.count else {
+            // Never says which slot, how far it got, or anything derived from
+            // the passphrase -- only that it did not open.
+            Ext4Log.error("LUKS unlock failed: \(String(cString: luks_strstatus(status)))")
+            key.resetBytes(in: 0..<key.count)
+            return nil
+        }
+        let result = Array(key[0..<length])
+        key.resetBytes(in: 0..<key.count)
+        return result
+    }
+
     func probeLUKS() -> (status: luks_status, info: luks_info)? {
         var info = luks_info()
         let ctx = Unmanaged.passUnretained(self).toOpaque()

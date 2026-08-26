@@ -44,6 +44,27 @@ drivers take — the shipping ExtendFS extension, for example, is signed
    to `Contents/embedded.provisionprofile` inside the `.appex`, which is what
    authorises the entitlement at load time.
 
+4. **A second profile, for encrypted volumes** *(optional)*. The container app
+   and the extension share a keychain access group, which is how a LUKS master
+   key gets from the app -- the only process that can prompt for a passphrase --
+   into the sandboxed extension that mounts the volume. That needs a profile
+   for the **app's** own App ID:
+
+   - enable **Keychain Sharing** on `dev.h3ct0r.ext4mac`, with the group
+     `dev.h3ct0r.ext4mac.shared`
+   - create a **Developer ID** profile for it and save it as
+     `App/Ext4Mac.provisionprofile` (also gitignored)
+
+   `scripts/sign.sh` picks it up automatically and says which way it signed.
+   Without it the app still unlocks volumes; it leaves the master key in the
+   extension's container directory instead of the keychain, which works but is
+   not encrypted at rest.
+
+   **Do not add the entitlement without the profile.** A Developer ID binary
+   that claims a keychain access group it cannot prove is killed by AMFI the
+   instant it launches -- `Killed: 9`, no crash report, nothing in the log.
+   That is why the signing script gates one on the other.
+
 ## Building a signed bundle
 
 ```bash

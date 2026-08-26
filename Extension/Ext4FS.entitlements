@@ -20,5 +20,21 @@
 	     device it asks us to mount; nothing else is needed. -->
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
+
+	<!-- Shared with the container app, so it can hand over the master key for
+	     an encrypted volume without the passphrase ever entering this
+	     sandboxed process. Already authorised by the provisioning profile,
+	     which carries keychain-access-groups for BDLYXW7QMN.*, so this needs no
+	     new profile.
+
+	     The first entry is the default access group for items this binary
+	     creates, which is why nothing in the source names a group: the
+	     entitlement is the single place it is written down. Access groups only
+	     apply to the data protection keychain, so every query passes
+	     kSecUseDataProtectionKeychain. -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>BDLYXW7QMN.dev.h3ct0r.ext4mac.shared</string>
+	</array>
 </dict>
 </plist>

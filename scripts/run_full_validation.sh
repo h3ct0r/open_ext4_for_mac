@@ -9,9 +9,10 @@
 #   6. crash consistency   — cut the write stream everywhere, replay, verify
 #   7. differential        — cross-check against the real Linux ext4 driver
 #   8. mounted driver      — the same crash testing against a real mount
+#   9. encrypted, mounted  — a LUKS volume through FSKit, verified by Linux
 #
-# Stages 5-8 need a running Docker daemon (a real Linux kernel on Apple
-# Silicon); stage 8 additionally needs the signed extension installed and
+# Stages 5-9 need a running Docker daemon (a real Linux kernel on Apple
+# Silicon); the last two additionally need the signed extension installed and
 # enabled. They are skipped with a warning rather than failing the run if that
 # is unavailable, so this is still useful on a machine without it. Stages 3 and
 # 4 each have one section that wants Docker and skip just that section.
@@ -118,14 +119,17 @@ if docker info >/dev/null 2>&1; then
   # takes. It needs the signed extension installed *and enabled*.
   if pluginkit -m -p com.apple.fskit.fsmodule 2>/dev/null | grep -q "dev.h3ct0r.ext4mac.Ext4FS"; then
     stage "9. mounted driver" bash Tests/run_mount_crash_tests.sh
+    stage "10. encrypted volumes, mounted" bash Tests/run_mount_luks_tests.sh
   else
     skip "9. mounted driver" "the FSKit extension is not installed"
+    skip "10. encrypted volumes, mounted" "the FSKit extension is not installed"
   fi
 else
   skip "6. LUKS containers"       "docker daemon not reachable"
   skip "7. crash consistency"     "docker daemon not reachable"
   skip "8. differential vs Linux" "docker daemon not reachable"
   skip "9. mounted driver"        "docker daemon not reachable"
+  skip "10. encrypted volumes, mounted" "docker daemon not reachable"
 fi
 
 TOTAL=$(( SECONDS - START ))
