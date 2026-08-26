@@ -43,7 +43,29 @@
 		<key>FSRequiresSecurityScopedPathURLResources</key>
 		<false/>
 
-		<!-- Hand the kernel extent maps instead of copying file data over XPC. -->
+		<!--
+		    Must be present and true, however wrong that looks.
+
+		    We do NOT implement kernel-offloaded I/O: conforming to
+		    FSVolumeKernelOffloadedIOOperations makes FSKit route writes
+		    through blockmapFile even for files reporting
+		    inhibitKernelOffloadedIO, and a write blockmap has to allocate
+		    blocks and journal the extent-tree change before returning,
+		    with nothing to undo it if the kernel then fails the I/O. The
+		    conformance is kept out of the build as
+		    Ext4Volume+KernelIO.swift.disabled.
+
+		    So this key overstates what the module does. It stays anyway,
+		    because both alternatives were measured and both break it:
+		    declaring <false/> or omitting the key entirely makes FSKit
+		    drop the module from FSClient.installedExtensions -- it
+		    vanishes from System Settings and every mount fails with
+		    "Unable to invoke task". Setting it back to true restores
+		    registration immediately.
+
+		    Revisit if the KernelIO conformance is ever finished; until
+		    then, changing this costs a reinstall and a re-approval.
+		-->
 		<key>FSSupportsKernelOffloadedIO</key>
 		<true/>
 

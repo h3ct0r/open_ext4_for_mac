@@ -52,7 +52,7 @@ SHIM_OBJS   := $(BUILD)/obj/shim/ext4_bridge.o
 
 CORE_LIB := $(BUILD)/lib/libext4core.a
 
-.PHONY: all core clean test test-asan test-crash test-diff test-format test-mount-crash validate tools entitlements check-submodule patch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil
+.PHONY: all core clean test test-asan test-crash test-diff test-format test-mount-crash check-extension validate tools entitlements check-submodule patch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil
 
 all: app
 
@@ -134,6 +134,13 @@ test-format: tools
 # it is not. This is the only suite that exercises FSBlockDeviceResource.
 test-mount-crash:
 	@bash Tests/run_mount_crash_tests.sh
+
+# Is the extension installed, approved and answering? The failure messages for
+# a disabled module are inconsistent enough to be worth a dedicated check.
+# `|| true` so a disabled extension reads as a diagnosis rather than a build
+# failure; call scripts/check_extension.sh directly if you want the exit code.
+check-extension:
+	@bash scripts/check_extension.sh || true
 
 # Everything, unattended, one stage after another. Stages 3 and 4 need Docker.
 validate:
@@ -244,20 +251,27 @@ entitlements:
 # separate mechanism: they read .fs bundles from /Library/Filesystems. This
 # installs a plist-only bundle whose formatter is a wrapper around newfs_fskit,
 # so there is still exactly one implementation.
-FS_BUNDLE_SRC  := Packaging/ext4.fs
-FS_BUNDLE_DEST := /Library/Filesystems/ext4.fs
+FS_BUNDLE_SRC := Packaging/ext4.fs
+# `override` so the destination cannot be replaced from the command line.
+# These two targets run as root and both begin with `rm -rf $(FS_BUNDLE_DEST)`;
+# a make variable that a caller can set is not something to point that at.
+override FS_BUNDLE_DEST := /Library/Filesystems/ext4.fs
 
 install-diskutil:
 	@test "$$(id -u)" = "0" || { echo "needs root: sudo make install-diskutil"; exit 1; }
+	@test "$(FS_BUNDLE_DEST)" = "/Library/Filesystems/ext4.fs" || { echo "refusing: unexpected destination"; exit 1; }
+	@test -f "$(FS_BUNDLE_SRC)/Contents/Info.plist" || { echo "missing $(FS_BUNDLE_SRC)"; exit 1; }
 	@rm -rf "$(FS_BUNDLE_DEST)"
 	@cp -R "$(FS_BUNDLE_SRC)" "$(FS_BUNDLE_DEST)"
 	@chown -R root:wheel "$(FS_BUNDLE_DEST)"
 	@chmod -R go-w "$(FS_BUNDLE_DEST)"
 	@echo "installed $(FS_BUNDLE_DEST)"
 	@echo "verify with: diskutil listFilesystems | grep -i ext"
+	@echo "remove with: sudo make uninstall-diskutil"
 
 uninstall-diskutil:
 	@test "$$(id -u)" = "0" || { echo "needs root: sudo make uninstall-diskutil"; exit 1; }
+	@test "$(FS_BUNDLE_DEST)" = "/Library/Filesystems/ext4.fs" || { echo "refusing: unexpected destination"; exit 1; }
 	@rm -rf "$(FS_BUNDLE_DEST)"
 	@echo "removed $(FS_BUNDLE_DEST)"
 

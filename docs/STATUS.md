@@ -155,7 +155,7 @@ make test-mount-crash   # stage 6 on its own
 | crash consistency | 256 cut points across 12 operations; the write stream is severed at every point, the **real Linux kernel** replays the journal, and `e2fsck` must be clean |
 | differential vs Linux | 28 assertions; volumes round-trip between our driver and the real Linux ext4 driver in both directions, with the kernel log required to be silent |
 | format | 29 assertions; 117 size/block-size/generation combinations must be `e2fsck`-clean, and the volume must round-trip through the Linux kernel |
-| mounted driver | 15 assertions against a **real mount** — the only stage that goes through FSKit |
+| mounted driver | 17 assertions against a **real mount** — the only stage that goes through FSKit |
 
 Stages 4–6 use Docker, which on Apple Silicon is a real Linux VM — so the
 oracle is the actual ext4 implementation, not another copy of our assumptions.
@@ -277,6 +277,57 @@ inode table, cross-check bitmaps against extent trees, or repair anything —
 lwext4 has no fsck. A volume that passes can still be corrupt in ways only
 `e2fsck` will find, and the operation says so in its own output.
 
+## Auto-mount
+
+ext4 volumes now mount by themselves, the way any native disk does:
+
+```
+/dev/disk6 on /Volumes/AUTOMOUNT (ext4, local, nodev, nosuid, journaled,
+                                  noowners, noatime, fskit, mounted by h3ct0r)
+```
+
+No `mount -F -t ext4` needed. Attach a disk and it appears in Finder under its
+own label; writes, symlinks and extended attributes all work through it, and
+the Linux kernel reads the result back byte-for-byte with a silent log.
+
+This was blocked on Paragon's ExtFS, which was winning the probe. With it out
+of the way our module claims the media.
+
+**`diskutil eject` fails on whole-disk images** — but so does Apple's own
+exFAT module on the same kind of device, while a *partitioned* exFAT ejects
+fine. It is a property of whole-disk raw images, not this driver. `umount(8)`
+works either way.
+
+## Open-unlink
+
+A file can be deleted while something still has it open. ext4 frees the inode
+as soon as its last link goes, which is too early: the kernel keeps using the
+descriptor afterwards, and writes through it then allocate blocks onto an inode
+nothing references. The data reads back correctly for the life of the
+descriptor, so nothing looks wrong — but the blocks are never recovered, and
+`e2fsck` reports `Block bitmap differences` once the volume is unmounted.
+
+The fix has two halves. `FSVolume.OpenCloseOperations` tracks which inodes are
+open; `removeItem` defers freeing **only** for those, and
+`FSVolume.ItemDeactivation` (with `.forRemovedItems`) plus `reclaimItem` and
+unmount all drain the deferred set.
+
+Deferring every delete instead was tried and is worse. The inode then sits with
+no links and no owner until FSKit reclaims it, and a power cut inside that
+window leaves exactly the leak described above — the crash-consistency suite
+caught it as `Block bitmap differences` in 4 of 24 snapshots. ext4 solves this
+with an on-disk orphan list; lwext4 has none, and the modern `orphan_file`
+feature changes where that list lives, so adding one is a larger job than it
+first appears.
+
+What remains, honestly: a crash while a deleted-but-still-open file exists
+leaks that inode until the next `e2fsck`. That window is the one ext4's orphan
+list covers and we do not.
+
+`FSKit`'s own `enableOpenUnlinkEmulation` is set, but it changed nothing
+observable here — no hidden temporary file appears and the leak was unaffected,
+with the deployment target at either 15.4 or 26.0.
+
 ### Renaming
 
 `FSVolume.RenameOperations` is implemented, so Finder's Rename and
@@ -289,7 +340,23 @@ but that vanishes on power loss is worse than one that fails.
 
 `diskutil listFilesystems` and Disk Utility's Erase menu are driven by `.fs`
 bundles in `/Library/Filesystems`, not by FSKit — which is how Paragon's extFS
-appears in that list. `Packaging/ext4.fs` is such a bundle:
+appears in that list. `Packaging/ext4.fs` is such a bundle, and **it works**:
+
+```
+EXT2                            ext2
+EXT3                            ext3
+EXT4                            ext4
+```
+
+A plist plus two shell wrappers was enough — no probe helper, no
+`FSMediaTypes`, no signing. `diskutil info` on a mounted ext4 volume now
+reports its name and mount point instead of `File System: None`.
+
+One cosmetic flaw: it reports `File System Personality: EXT2` for an ext4
+volume. All three personalities share the `Linux` content mask and the bundle
+has no prober of its own, so DiskArbitration picks the first match.
+
+
 
 ```bash
 sudo make install-diskutil      # sudo make uninstall-diskutil to remove
@@ -303,16 +370,41 @@ implementation, in the extension. It deliberately declares no
 FSKit, and a second prober would race it for the same media — and no
 `FSMountExecutable`, because mounting goes through FSKit.
 
-**Untested.** Installing it needs root, so this has not been verified end to
-end; the minimal key set may be wrong. The `FSRepair` entry is also a
-half-truth worth knowing about: First Aid passes `-y` meaning "repair without
-asking", and the wrapper prints that it can verify but not repair rather than
-reporting a repair that did not happen.
+The `FSRepair` entry is a half-truth worth knowing about: First Aid passes
+`-y`, meaning "repair without asking", and the wrapper prints that it can
+verify but not repair rather than reporting a repair that never happened.
+
+Formatting *through* Disk Utility is untested, because it ends up in
+`newfs_fskit`, which does not work yet — see below.
+
+### `newfs_fskit` does not work yet
+
+`newfs_fskit -t ext4 <device>` fails with `ENOTSUP` and never calls our
+`startFormat`. What has been ruled out, each with a control:
+
+| Suspected | Evidence against |
+|---|---|
+| the device or permissions | Apple's `msdos` and `exfat` format the same device fine, without `sudo` |
+| the probe gating format | fails on an already-ext4 volume too |
+| extension-declared conformance | `FSVolume.RenameOperations` is declared the same way and works |
+| missing selectors | `startFormatWithTask:options:error:` and the protocol are both in the shipped binary |
+| unregistered conformance | the earlier `does not support operation newfs` message is gone |
+| `EXExtensionPrincipalClass` | adding it *deregisters* the module entirely |
+
+Instrumentation (`FSTask.logMessage` as the first statement of `startFormat`)
+never prints, while Apple's exfat module's own messages do — so the call never
+arrives. The remaining theory is that the Swift overlay's
+`UnaryFileSystemExtension.configuration` does not wire maintenance operations;
+its `swiftinterface` never mentions them. Unconfirmed.
+
+The same core path is fully covered offline: `ext4dump format` builds volumes
+across 117 geometries, all `e2fsck`-clean.
 
 ## Not yet done
-- Verifying the Disk Utility bundle actually registers (needs root)
-- Auto-mount in Finder without an explicit `mount -F -t ext4`
+- An on-disk orphan list, so a crash cannot leak a deleted-but-open inode
+- `newfs_fskit` reaches the module but never calls `startFormat`; see below
 - A real structural check; `startCheck` only decides mountability
+- `FSVolumePreallocateOperations` and `FSVolumeAccessCheckOperations`
 - Kernel-offloaded I/O for writes (reads already use it)
 - `startCheck` / `startFormat` for Disk Utility integration
 - Notarised DMG

@@ -29,6 +29,11 @@ extension Ext4FileSystem: FSManageableResourceMaintenanceOperations {
     // MARK: - Format
 
     func startFormat(task: FSTask, options: FSTaskOptions) throws -> Progress {
+        // First statement on purpose. os_log from this extension does not reach
+        // `log show`, but FSTask.logMessage is printed by newfs_fskit itself,
+        // so this is the only reliable way to tell "we were never called" from
+        // "we were called and failed".
+        task.logMessage("startFormat entered, options: \(options.taskOptions)")
         let resource = try maintenanceResource()
         let request = try FormatRequest(arguments: options.taskOptions)
 
@@ -108,6 +113,7 @@ extension Ext4FileSystem: FSManageableResourceMaintenanceOperations {
     // MARK: - Check
 
     func startCheck(task: FSTask, options: FSTaskOptions) throws -> Progress {
+        task.logMessage("startCheck entered, options: \(options.taskOptions)")
         let resource = try maintenanceResource()
         let request = CheckRequest(arguments: options.taskOptions)
         let progress = Progress(totalUnitCount: 1)
@@ -206,6 +212,8 @@ extension Ext4FileSystem: FSManageableResourceMaintenanceOperations {
     private func maintenanceResource() throws -> FSBlockDeviceResource {
         guard let resource = lastSeenResource else {
             Ext4Log.error("maintenance requested but no resource has been presented")
+            // ENODEV rather than ENOTSUP so this is distinguishable from
+            // "this module does not do formatting" in the caller's output.
             throw Ext4Error.posix(ENODEV)
         }
         return resource

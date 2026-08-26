@@ -260,6 +260,57 @@ if [ "$WEDGED" -eq 1 ]; then
 fi
 wait 2>/dev/null
 
+# =================================================== stage 0b: open-unlink ==
+#
+# A file can be unlinked while it is still open. ext4 frees an inode the moment
+# its last link goes away, which is too early: the kernel keeps sending reads
+# and writes for that descriptor afterwards. Freeing it there means the writes
+# allocate blocks onto an inode nothing references -- the data reads back
+# correctly, so nothing looks wrong from userspace, but the blocks are never
+# recovered.
+#
+# The damage is only visible after unmounting, so the e2fsck at the end of
+# stage 2 is what actually catches it; this stage just does the deed.
+
+note ""
+note "stage 0b: files unlinked while open"
+note ""
+
+if python3 - "$MNT" <<'OPENUNLINK'
+import os, sys, hashlib
+M = sys.argv[1]
+d = os.path.join(M, "openunlink")
+os.makedirs(d, exist_ok=True)
+ok = True
+
+# Write *after* the unlink -- the case that leaks blocks.
+p = os.path.join(d, "written-after.bin")
+f = open(p, "w+b"); os.unlink(p)
+f.write(b"B" * 65536); f.flush(); f.seek(0)
+if f.read() != b"B" * 65536:
+    print("    content written after unlink came back wrong"); ok = False
+f.close()
+
+# A file far too big to be served from a cache.
+p2 = os.path.join(d, "read-after.bin")
+payload = os.urandom(8 << 20)
+with open(p2, "wb") as g: g.write(payload)
+f2 = open(p2, "rb"); os.unlink(p2)
+h = hashlib.sha256()
+while c := f2.read(1 << 16): h.update(c)
+f2.close()
+if h.hexdigest() != hashlib.sha256(payload).hexdigest():
+    print("    8 MiB read through an unlinked descriptor did not match"); ok = False
+
+sys.exit(0 if ok else 1)
+OPENUNLINK
+then
+  ok "files unlinked while open still read and write correctly"
+else
+  bad "files unlinked while open still read and write correctly"
+fi
+rm -rf "$MNT/openunlink" 2>/dev/null
+
 # ==================================================== stage 1: durability ==
 #
 # The offline sweep proves a torn write stream recovers to *some* consistent
@@ -378,6 +429,16 @@ else
   bad "clean unmount after $SWEEP_SNAPSHOTS freeze/resume cycles"
 fi
 hdiutil detach "$DEV" >/dev/null 2>&1; DEV=""
+
+# An inode that was unlinked while open and never released shows up here and
+# nowhere else: the volume is structurally fine, but blocks are marked in use
+# with nothing referencing them.
+if e2fsck -fn "$WORK/live.img" >/dev/null 2>&1; then
+  ok "no leaked blocks or inodes after unmount"
+else
+  bad "no leaked blocks or inodes after unmount" \
+      "$(e2fsck -fn "$WORK/live.img" 2>&1 | grep -m1 -vE '^e2fsck|^Pass|^$' | cut -c1-70)"
+fi
 
 if [ "$(dumpe2fs -h "$WORK/live.img" 2>/dev/null | sed -n 's/^Filesystem state: *//p')" = "clean" ]; then
   ok "cleanly unmounted volume is marked clean"

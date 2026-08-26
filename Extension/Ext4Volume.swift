@@ -52,6 +52,81 @@ final class Ext4Volume: FSVolume {
     var liveItems: [UInt32: Ext4Item] = [:]
     let itemsLock = NSLock()
 
+    /// Inodes whose last name is gone but which are still allocated, because
+    /// the kernel may still have the file open. Guarded by `itemsLock`.
+    ///
+    /// This is our stand-in for ext4's orphan list: it lives only in memory, so
+    /// an unclean shutdown with entries still in it leaks those inodes until
+    /// the next `e2fsck`. Every ordinary path -- last close, and unmount --
+    /// drains it.
+    private var pendingRelease: Set<UInt32> = []
+
+    /// How many times each inode is currently open. Guarded by `itemsLock`.
+    var openCounts: [UInt32: Int] = [:]
+
+    /// Whether anything holds this inode open right now.
+    func isOpen(_ inode: UInt32) -> Bool {
+        itemsLock.lock()
+        defer { itemsLock.unlock() }
+        return (openCounts[inode] ?? 0) > 0
+    }
+
+    func notePendingRelease(_ inode: UInt32) {
+        itemsLock.lock()
+        pendingRelease.insert(inode)
+        itemsLock.unlock()
+    }
+
+    /// Free the inode if it was waiting for its last user to go away.
+    /// Returns true when a release actually happened.
+    @discardableResult
+    func releaseIfPending(_ inode: UInt32) async -> Bool {
+        itemsLock.lock()
+        let waiting = pendingRelease.remove(inode) != nil
+        itemsLock.unlock()
+        guard waiting else { return false }
+
+        do {
+            try await executor.run { [self] in
+                try Ext4Error.check(ext4b_release_inode(try device, inode),
+                                    "release inode \(inode)")
+            }
+            return true
+        } catch {
+            // Put it back: a failure here means the inode is still allocated,
+            // and unmount gets another attempt.
+            itemsLock.lock()
+            pendingRelease.insert(inode)
+            itemsLock.unlock()
+            Ext4Log.error("could not release inode \(inode): \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// Drain everything still waiting. Called on the way out, so that a clean
+    /// unmount never leaves an unreferenced inode behind.
+    func releaseAllPending() async {
+        itemsLock.lock()
+        let waiting = pendingRelease
+        pendingRelease.removeAll()
+        itemsLock.unlock()
+
+        for inode in waiting {
+            do {
+                try await executor.run { [self] in
+                    try Ext4Error.check(ext4b_release_inode(try device, inode),
+                                        "release inode \(inode)")
+                }
+            } catch {
+                Ext4Log.error("could not release inode \(inode) at unmount: "
+                              + error.localizedDescription)
+            }
+        }
+        if !waiting.isEmpty {
+            Ext4Log.volume.info("released \(waiting.count) deferred inode(s)")
+        }
+    }
+
     init(bridge: BlockDeviceBridge,
          executor: Ext4Executor,
          probe: ext4b_probe_info,

@@ -34,6 +34,20 @@ extension Ext4Volume: FSVolume.Operations {
         isReadOnly ? .readOnly : []
     }
 
+    /// Let FSKit keep an unlinked-but-open file in the namespace until its last
+    /// close, because ext4 on its own does not.
+    ///
+    /// Without this, `removeItem` drops the last link, the inode is freed, and
+    /// any write the still-open descriptor makes afterwards allocates blocks
+    /// onto a dead inode. The data reads back correctly for the lifetime of the
+    /// descriptor, so nothing looks wrong -- but nothing ever frees those
+    /// blocks either, and `e2fsck` reports them as
+    /// `Block bitmap differences: -(4420--4483)` once the volume is unmounted.
+    /// A long-running process that repeatedly writes to files it has already
+    /// deleted would leak the volume away.
+    @available(macOS 26.0, *)
+    var enableOpenUnlinkEmulation: Bool { true }
+
     /// The one core call that does not go through the executor.
     ///
     /// FSKit declares this as a synchronous property, so there is nowhere to
@@ -86,6 +100,9 @@ extension Ext4Volume: FSVolume.Operations {
         // Flush, then close the volume properly. FSKit never calls
         // unloadResource for umount(8), so this is the last chance to stop the
         // journal and write back the superblock.
+        // Anything unlinked but still held open has to be freed before the
+        // volume closes, or it stays allocated with no name pointing at it.
+        await releaseAllPending()
         try? await executor.run { [self] in
             _ = ext4b_sync(try device)
         }
@@ -206,6 +223,10 @@ extension Ext4Volume: FSVolume.Operations {
 
     func reclaimItem(_ item: FSItem) async throws {
         guard let ext4Item = item as? Ext4Item else { return }
+        // Both this and deactivateItem can be the last word on an item,
+        // depending on how it was used; releaseIfPending is idempotent so
+        // whichever arrives first does the work.
+        await releaseIfPending(ext4Item.inode)
         forget(ext4Item)
     }
 
@@ -328,13 +349,37 @@ extension Ext4Volume: FSVolume.Operations {
         try requireWritable()
 
         let nameData = try Self.nameBytes(name)
-        try await executor.run { [self] in
-            let rc = try nameData.withUnsafeBytes { raw -> Int32 in
-                ext4b_unlink(try device, dir.inode,
-                             raw.baseAddress!.assumingMemoryBound(to: CChar.self),
-                             raw.count)
+        //
+        // Do not free the inode here even when this was its last name.
+        //
+        // The kernel can still hold the file open, and it will keep sending
+        // reads and writes for it afterwards. Freeing the inode now means those
+        // writes allocate blocks onto an inode nothing references: the data
+        // reads back correctly for the life of the descriptor, so nothing looks
+        // wrong, but the blocks are never recovered and e2fsck reports
+        // "Block bitmap differences" once the volume is unmounted.
+        //
+        // The release is deferred to deactivateItem/reclaimItem, which is when
+        // FSKit tells us the last user is gone.
+        //
+        // Defer only for a file something still has open. Everything else is
+        // freed here and now, which keeps the crash window at zero for the
+        // overwhelmingly common case.
+        let defer_ = isOpen(victim.inode)
+        let unreferenced = try await executor.run { [self] in
+            let dev = try device
+            var orphaned = false
+            let rc = nameData.withUnsafeBytes { raw -> Int32 in
+                ext4b_unlink_ex(dev, dir.inode,
+                                raw.baseAddress!.assumingMemoryBound(to: CChar.self),
+                                raw.count, defer_, &orphaned)
             }
             try Ext4Error.check(rc, "unlink")
+            return orphaned
+        }
+
+        if unreferenced {
+            notePendingRelease(victim.inode)
         }
 
         victim.invalidate()

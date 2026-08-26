@@ -8,11 +8,12 @@ Volumes mount in Finder and behave like any other native disk.
 
 ## Status
 
-**Reads and writes.** ext2/3/4 volumes mount natively through FSKit:
+**Reads and writes, and mounts by itself.** Attach an ext2/3/4 disk and it
+appears in Finder like any native volume:
 
 ```
-/dev/disk5 on /private/tmp/ext4mnt (ext4, local, nodev, nosuid, journaled,
-                                    noowners, noatime, fskit, mounted by h3ct0r)
+/dev/disk6 on /Volumes/AUTOMOUNT (ext4, local, nodev, nosuid, journaled,
+                                  noowners, noatime, fskit, mounted by h3ct0r)
 ```
 
 Through a real mount: nested `mkdir`, create and write, multi-MB files, `cp`,
@@ -41,7 +42,7 @@ make validate
 | crash consistency | 256 cut points; the Linux kernel replays each journal |
 | differential vs Linux | 28 assertions, both directions |
 | format | 29 assertions; 117 geometries, all `e2fsck`-clean |
-| mounted driver | 15 assertions against a live FSKit mount |
+| mounted driver | 17 assertions against a live FSKit mount |
 
 Testing found eight genuine bugs in lwext4 — including one that replayed stale
 journal records over live metadata, and one that hung the driver forever

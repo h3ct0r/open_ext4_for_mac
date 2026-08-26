@@ -1639,6 +1639,50 @@ int ext4b_unlink(ext4b_device *dev,
                  uint32_t parent_inode,
                  const char *name, size_t name_len)
 {
+    return ext4b_unlink_ex(dev, parent_inode, name, name_len, false, NULL);
+}
+
+int ext4b_release_inode(ext4b_device *dev, uint32_t inode)
+{
+    WRITE_PROLOGUE(dev, fs);
+    if (inode < EXT4B_ROOT_INO)
+        return EINVAL;
+
+    int r = txn_begin(fs);
+    if (r != EOK)
+        return r;
+
+    struct ext4_inode_ref ref;
+    r = ext4_fs_get_inode_ref(fs, inode, &ref);
+    if (r != EOK)
+        return txn_finish(dev, fs, r);
+
+    /* Only inodes that genuinely have no names left. Anything else means the
+     * caller lost track of a reference, and freeing it would destroy a file
+     * that is still reachable. */
+    if (ext4_inode_get_links_cnt(ref.inode) != 0) {
+        ext4_fs_put_inode_ref(&ref);
+        return txn_finish(dev, fs, EBUSY);
+    }
+
+    ext4_inode_set_del_time(ref.inode, now_seconds());
+    r = ext4_fs_truncate_inode(&ref, 0);
+    if (r == EOK)
+        r = ext4_fs_free_inode(&ref);
+
+    ext4_fs_put_inode_ref(&ref);
+    return txn_finish(dev, fs, r);
+}
+
+int ext4b_unlink_ex(ext4b_device *dev,
+                    uint32_t parent_inode,
+                    const char *name, size_t name_len,
+                    bool defer_release,
+                    bool *out_unreferenced)
+{
+    if (out_unreferenced)
+        *out_unreferenced = false;
+
     WRITE_PROLOGUE(dev, fs);
     if (name_len == 0)
         return EINVAL;
@@ -1678,12 +1722,26 @@ int ext4b_unlink(ext4b_device *dev,
         return txn_finish(dev, fs, r);
     }
 
-    /* Last name gone: release the blocks and the inode itself. */
+    /* Last name gone. Normally that means releasing the blocks and the inode
+     * right here; with defer_release the caller has said the file may still be
+     * open, so the inode stays allocated until it tells us otherwise. */
     if (ext4_inode_get_links_cnt(child.inode) == 0) {
+        /* Stamp the deletion time in both paths. An inode with no links and no
+         * dtime is what e2fsck calls a "deleted inode with zero dtime" -- the
+         * state a crash used to leave behind mid-defer, because ext4 expects
+         * an inode in that position to be on the orphan list and we have no
+         * orphan list to put it on. Recording the time makes an interrupted
+         * delete look like a completed one, which recovery already handles. */
         ext4_inode_set_del_time(child.inode, now_seconds());
-        r = ext4_fs_truncate_inode(&child, 0);
-        if (r == EOK)
-            r = ext4_fs_free_inode(&child);
+
+        if (defer_release) {
+            if (out_unreferenced)
+                *out_unreferenced = true;
+        } else {
+            r = ext4_fs_truncate_inode(&child, 0);
+            if (r == EOK)
+                r = ext4_fs_free_inode(&child);
+        }
     }
 
     ext4_fs_put_inode_ref(&child);

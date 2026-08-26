@@ -339,6 +339,35 @@ int ext4b_unlink(ext4b_device *dev,
                  uint32_t parent_inode,
                  const char *name, size_t name_len);
 
+/*
+ * Remove a name, optionally leaving the inode allocated.
+ *
+ * ext4 frees an inode as soon as its last link goes away, but a file can still
+ * be open at that moment. Freeing it then means later writes through that
+ * descriptor allocate blocks onto an inode nothing references, and those blocks
+ * are never recovered: e2fsck reports "Block bitmap differences" once the
+ * volume is unmounted.
+ *
+ * With `defer_release` the entry is removed and the link count drops, but the
+ * inode and its blocks are left alone; `*out_unreferenced` is set when the link
+ * count reached zero, and the caller owes a matching ext4b_release_inode() once
+ * nothing holds the file open any more.
+ *
+ * This is weaker than ext4's own orphan list, which survives a crash: an
+ * unclean shutdown between the two calls leaks the inode until the next
+ * e2fsck. lwext4 has no orphan-list support to build on.
+ */
+int ext4b_unlink_ex(ext4b_device *dev,
+                    uint32_t parent_inode,
+                    const char *name, size_t name_len,
+                    bool defer_release,
+                    bool *out_unreferenced);
+
+/// Truncate and free an inode left behind by ext4b_unlink_ex().
+/// Returns EBUSY if the inode still has links, rather than destroying a file
+/// that is still reachable.
+int ext4b_release_inode(ext4b_device *dev, uint32_t inode);
+
 /// Move/rename an entry, optionally between directories. If a plain file
 /// already exists at the destination it is replaced.
 int ext4b_rename(ext4b_device *dev,

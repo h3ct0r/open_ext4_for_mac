@@ -36,4 +36,7 @@ if [ "$repair_requested" -eq 1 ]; then
     echo "$self: run e2fsck from e2fsprogs to repair an ext2/3/4 volume." >&2
 fi
 
-exec /sbin/fsck_fskit -t ext4 "${args[@]}" "$device"
+# macOS ships bash 3.2, where expanding an empty array under `set -u` is an
+# unbound-variable error rather than nothing. First Aid passes no options we
+# forward, so the empty case is the common one.
+exec /sbin/fsck_fskit -t ext4 ${args[@]+"${args[@]}"} "$device"
