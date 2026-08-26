@@ -69,7 +69,7 @@ ARGON2_CFLAGS := $(CFLAGS) -Wno-everything -I$(ARGON2_DIR)
 
 CORE_LIB := $(BUILD)/lib/libext4core.a
 
-.PHONY: all core clean test test-asan test-crash test-diff test-format test-crypto test-orphan test-luks test-mount-crash test-mount-luks check-extension validate tools entitlements check-submodule patch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil
+.PHONY: all core clean test test-asan test-crash test-diff test-format test-crypto test-orphan test-luks test-mount-crash test-mount-luks check-extension check-signing validate tools entitlements check-submodule patch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil
 
 all: app
 
@@ -193,6 +193,12 @@ test-mount-crash:
 # failure; call scripts/check_extension.sh directly if you want the exit code.
 check-extension:
 	@bash scripts/check_extension.sh || true
+
+# Are the entitlements each binary claims actually authorised by the profile it
+# embeds? An unauthorised one is not refused, it is fatal at launch with no
+# crash report -- so it is checked at build time instead. Runs as part of sign.
+check-signing:
+	@bash scripts/verify_signing.sh "$(BUILD)/$(APP_NAME).app"
 
 # Everything, unattended, one stage after another. Stages 5-7 need Docker.
 validate:

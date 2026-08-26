@@ -94,5 +94,10 @@ echo
 echo "verifying..."
 codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | sed 's/^/  /'
 echo
+
+# codesign only proves the signature is intact. This proves the entitlements
+# inside it are authorised, which is the failure that has no symptom.
+bash "$ROOT/scripts/verify_signing.sh" "$APP" | sed 's/^/  /'
+echo
 echo "entitlements on the extension:"
 codesign -d --entitlements - --xml "$APPEX" 2>/dev/null | plutil -p - | sed 's/^/  /'
