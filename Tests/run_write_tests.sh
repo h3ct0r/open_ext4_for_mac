@@ -368,18 +368,36 @@ op "attribute changes are still allowed" chmod /log.txt 640 \
 
 # ========================================================== read-only guard ==
 echo
-echo "read-only enforcement"
+echo "metadata checksum seeds"
 new_image ext4_4k
 digest_before=$(shasum -a 256 "$IMG" | cut -d' ' -f1)
 
-# The UUID-changed fixture must refuse writes: lwext4 would compute every
-# checksum from the wrong seed.
-cp "$FIX/ext4_uuid_changed.img" "$TMP/ro.img"
-ro_before=$(shasum -a 256 "$TMP/ro.img" | cut -d' ' -f1)
-"$DUMP" "$TMP/ro.img" mkdir /nope >/dev/null 2>&1 && bad "UUID-changed volume rejects writes" \
-                                                  || ok "UUID-changed volume rejects writes"
-ro_after=$(shasum -a 256 "$TMP/ro.img" | cut -d' ' -f1)
-expect_eq "rejected write left the image untouched" "$ro_before" "$ro_after"
+# A volume whose UUID was changed after creation keeps the checksum seed it was
+# made with, so the seed and the UUID no longer agree. Deriving the seed from
+# the UUID -- which is all lwext4 could do before patches/lwext4/0012 -- makes
+# every checksum written to it wrong, and this is the check that says so:
+# without the patch e2fsck reports invalid group descriptor and inode
+# checksums here, nine complaints on the first write.
+seed_img="$TMP/seed.img"
+cp "$FIX/ext4_uuid_changed.img" "$seed_img"
+"$DUMP" "$seed_img" mkdir /reseeded >/dev/null 2>&1 || bad "could not write to a UUID-changed volume"
+"$DUMP" "$seed_img" create /reseeded/hello.txt >/dev/null 2>&1
+"$DUMP" "$seed_img" write /reseeded/hello.txt "stored seed" >/dev/null 2>&1
+"$DUMP" "$seed_img" setxattr /reseeded/hello.txt user.seed ok >/dev/null 2>&1
+# Enough entries to push the directory into an HTree, whose checksums are
+# seeded the same way and are a separate code path.
+for i in $(seq 1 60); do "$DUMP" "$seed_img" create "/reseeded/f$i" >/dev/null 2>&1; done
+
+got=$("$DUMP" "$seed_img" cat /reseeded/hello.txt 2>/dev/null)
+expect_eq "a UUID-changed volume reads back what we wrote" "stored seed" "$got"
+seed_fsck="$(e2fsck -fn "$seed_img" 2>&1)"
+if [ $? -eq 0 ]; then
+  FSCK_RUNS=$((FSCK_RUNS+1))
+  ok "checksums on a UUID-changed volume are seeded correctly"
+else
+  bad "checksums on a UUID-changed volume are wrong" \
+      "$(grep -iE 'checksum' <<<"$seed_fsck" | head -3)"
+fi
 
 # ==================================================================== report ==
 echo

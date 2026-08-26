@@ -345,27 +345,18 @@ int ext4b_probe(ext4b_device *dev, ext4b_probe_info *out)
     /*
      * metadata_csum_seed (INCOMPAT 0x2000) stores an explicit checksum seed in
      * the superblock so that tune2fs can change the volume UUID without
-     * rewriting every metadata checksum. lwext4 has no notion of this field --
-     * its ext4_sblock struct does not even declare it -- and always derives the
-     * seed from the UUID.
+     * rewriting every metadata checksum on it. mke2fs sets it to
+     * crc32c(~0, uuid) at creation, so the stored seed and the derived one
+     * agree until somebody runs `tune2fs -U`.
      *
-     * mke2fs sets s_checksum_seed = crc32c(~0, uuid) at creation, so the two
-     * agree until somebody changes the UUID. When they still agree, lwext4's
-     * derived seed is correct and the volume is safe. When they diverge, every
-     * checksum lwext4 computes would be wrong, so we refuse to write.
+     * lwext4 used to derive the seed from the UUID everywhere and had no
+     * notion of the field, so a volume whose UUID had been changed was
+     * downgraded to read-only here -- every checksum lwext4 wrote would have
+     * been wrong. patches/lwext4/0012 gives it ext4_sb_csum_seed(), which
+     * honours the stored value, so the volume is now writable and the
+     * downgrade is gone. The suites write to that fixture and hand it to
+     * e2fsck, which is what a wrong seed would fail.
      */
-    if (out->feature_incompat & 0x2000) {
-        uint32_t stored  = rd32(sb, SBF_CHECKSUM_SEED);
-        uint32_t derived = ext4_crc32c(EXT4_CRC32_INIT, out->uuid, 16);
-        if (stored != derived) {
-            out->verdict = EXT4B_PROBE_READ_ONLY;
-            snprintf(out->unsupported, sizeof(out->unsupported),
-                     "volume UUID was changed after creation "
-                     "(csum seed %08x != derived %08x); writing is unsafe",
-                     stored, derived);
-            return EOK;
-        }
-    }
 
     out->verdict = EXT4B_PROBE_USABLE;
     return EOK;

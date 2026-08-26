@@ -37,8 +37,14 @@ for img in ext4_4k ext4_1k ext3_4k ext2_4k; do
   expect_eq "$img probes USABLE" "USABLE" "$v"
 done
 
+# A volume whose UUID was changed after creation carries a checksum seed that
+# no longer matches it. That used to force read-only, because lwext4 derived
+# the seed from the UUID and would have written wrong checksums everywhere;
+# patches/lwext4/0012 makes it read s_checksum_seed instead. The write suite is
+# what proves the seed is actually right -- this only records that the volume
+# is no longer refused.
 v=$("$DUMP" "$FIX/ext4_uuid_changed.img" probe | awk '/^verdict:/{print $2}')
-expect_eq "UUID-changed volume is refused write access" "READ_ONLY" "$v"
+expect_eq "UUID-changed volume is usable, seed and all" "USABLE" "$v"
 
 gen=$("$DUMP" "$FIX/ext2_4k.img" probe | awk '/^generation:/{print $2}')
 expect_eq "ext2 detected as ext2" "ext2" "$gen"

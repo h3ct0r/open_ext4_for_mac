@@ -16,6 +16,7 @@ object file). Idempotent — a clean checkout builds with a plain `make`.
 | `0009-clamp-the-last-block-groups-free-count` | **Bug fix.** `mkfs` gave every block group `blocks_per_group` free blocks, including a final partial one, so any volume that was not an exact multiple of the group size came out of `mkfs` with a free-block count that was too high — and `e2fsck` reported `Free blocks count wrong` on a brand-new filesystem. |
 | `0010-set-the-bitmap-tail-padding-mkfs-writes` | **Conformance, not a bug fix.** `mkfs` wrote block and inode bitmaps as all zeroes; `mke2fs` sets the bits past the end of the group. Verified *not* load-bearing once 0011 is applied — kept so the on-disk result matches the reference implementation rather than relying on nobody reading those bits. |
 | `0011-inodes-per-group-must-be-a-multiple-of-8` | **Bug fix.** `inodes_per_group` was aligned only to the inode-table stride (`block_size / inode_size`), which is 4 for 1 KiB blocks with 256-byte inodes. ext4 requires a multiple of 8 so each group's inode bitmap starts on a byte boundary; without it `e2fsck` reports `Padding at end of inode bitmap is not set`. `mke2fs` masks off the low three bits for the same reason. |
+| `0012-honour-the-stored-metadata-checksum-seed` | **Bug fix, corruption.** Every metadata checksum was seeded with `crc32c(~0, uuid)`. ext4 stores the seed explicitly in `s_checksum_seed` when `metadata_csum_seed` is set — which `mke2fs` enables by default — precisely so that `tune2fs -U` can change a volume's UUID without rewriting every checksum on it. The two agree until somebody does that, and then *every* checksum lwext4 writes is wrong: `e2fsck` reports nine invalid group descriptor and inode checksums after a single `mkdir`. The bridge used to force such volumes read-only to avoid it; they are now writable. |
 
 Everything except 0001, 0003 and 0010 is a genuine upstream defect and worth
 sending upstream. 0002 and 0004 were found by running the write suite under
@@ -25,6 +26,10 @@ under a live mount; 0007 and 0008 together by the mounted-driver suite, which
 caught a volume that had stopped answering and sampled the extension to find
 out where it was; 0009 and 0011 by formatting across a range of volume sizes
 and block sizes and handing every result to `e2fsck`.
+
+0012 is invisible unless a fixture has had its UUID changed after creation, which
+is why one is built deliberately (`tune2fs -U` in `Tests/make_fixtures.sh`).
+Reverting the patch and writing to that volume is the whole demonstration.
 
 0009 and 0011 are both invisible at the sizes a casual test picks. 0009 needs a
 volume that is *not* an exact multiple of the block-group size, and 0011 needs
