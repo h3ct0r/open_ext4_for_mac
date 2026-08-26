@@ -16,7 +16,10 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
 
     let executor = Ext4Executor()
     private var bridge: BlockDeviceBridge?
-    private var volume: Ext4Volume?
+    /// The live volume, when there is one. Read by the maintenance operations:
+    /// FSKit loads a resource before asking for a check on it, so "is this
+    /// already mounted" is a question the check has to be able to ask.
+    private(set) var volume: Ext4Volume?
 
     /// The last resource FSKit presented, whether to probe or to load.
     ///
@@ -87,8 +90,43 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             Ext4Log.info("declining LUKS volume: unreadable UUID")
             return .notRecognized
         }
+
+        // With a key stored we can see the filesystem inside, and its own
+        // label is a far better name than "LUKS2 Encrypted Volume" -- that is
+        // what Finder puts under the icon and what /Volumes is named after.
+        //
+        // The identity stays the *container's* UUID either way. A volume that
+        // changed identity the moment it stopped being locked would look to
+        // macOS like a different volume from the one it had just seen.
+        if (try? Ext4LUKSKeys.openEncryptedIfNeeded(bridge)) == true,
+           let decrypted = bridge.device {
+            var inner = ext4b_probe_info()
+            if ext4b_probe(decrypted, &inner) == 0 {
+                switch inner.verdict {
+                case EXT4B_PROBE_USABLE:
+                    return .usable(name: name(inner, or: info), containerID: container)
+                case EXT4B_PROBE_READ_ONLY:
+                    Ext4Log.info("encrypted volume usable read-only: \(reason(inner))")
+                    return .usableButLimited(name: name(inner, or: info), containerID: container)
+                default:
+                    Ext4Log.info("declining volume inside LUKS: \(reason(inner))")
+                    return .notRecognized
+                }
+            }
+        }
+
         Ext4Log.info("LUKS\(info.version) container, \(info.sector_size)B sectors, locked")
         return .usable(name: Ext4LUKS.name(info), containerID: container)
+    }
+
+    /// The filesystem's own label, falling back to the container's name when
+    /// the volume inside has none.
+    private static func name(_ inner: ext4b_probe_info, or container: luks_info) -> String {
+        var label = inner.label
+        let text = withUnsafeBytes(of: &label) { raw -> String in
+            String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
+        }.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? Ext4LUKS.name(container) : text
     }
 
     // MARK: - Load / unload
@@ -125,48 +163,9 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
 
         // An encrypted container is recognised here rather than by the
         // filesystem probe, which would only see ciphertext.
-        if let (status, luks) = bridge.probeLUKS() {
-            guard status == LUKS_OK else {
-                bridge.close()
-                Ext4Log.error("refusing LUKS volume: \(Ext4LUKS.reason(luks))")
-                throw Ext4Error.notSupported
-            }
-
-            // Recognised, but nothing here can open it. Failing *here*
-            // rather than later is not a style choice: FSKit activates the
-            // volume whatever the container status says, and it calls neither
-            // deactivate nor unloadResource after `activate` throws -- so the
-            // resource stays registered to this extension instance and every
-            // later probe of the same media fails with "Resource busy", right
-            // through a detach and re-attach. A load that throws unwinds
-            // cleanly; a volume that refuses to activate does not.
-            var key: [UInt8]
-            switch Ext4LUKSKeys.masterKey(for: luks,
-                                          unlock: { bridge.unlockLUKS(info: luks,
-                                                                      passphrase: $0) }) {
-            case .found(let k):
-                key = k
-            case .unavailable:
-                bridge.close()
-                throw Ext4Error.posix(ENEEDAUTH)
-            case .rejected:
-                bridge.close()
-                throw Ext4Error.posix(EAUTH)
-            }
-            defer { key.resetBytes(in: 0..<key.count) }
-
-            // The device built by `init` addresses the container -- header,
-            // key slots and all. Everything from here on has to address the
-            // payload instead, so the stack is rebuilt with the cipher in the
-            // middle. Nothing above this line ever sees a decrypted byte, and
-            // nothing below it sees an encrypted one.
-            bridge.close()
-            guard bridge.openThroughLUKS(info: luks, masterKey: key),
-                  let decrypted = bridge.device else {
-                throw Ext4Error.ioError
-            }
+        if try Ext4LUKSKeys.openEncryptedIfNeeded(bridge) {
+            guard let decrypted = bridge.device else { throw Ext4Error.ioError }
             dev = decrypted
-            Ext4Log.info("unlocked LUKS\(luks.version) container, \(luks.sector_size)B sectors")
         }
 
         var info = ext4b_probe_info()

@@ -131,3 +131,46 @@ enum Ext4LUKSKeys {
         return text.isEmpty ? nil : text
     }
 }
+
+extension Ext4LUKSKeys {
+
+    /// Put the cipher underneath the filesystem, if the media needs it.
+    ///
+    /// Every entry point that opens a device for the *filesystem* has to go
+    /// through here, not just `loadResource`. A plain `ext4b_probe` of a LUKS
+    /// container reads a header where it expects a superblock and says
+    /// NOT_EXT, and the caller then reports ENOTSUP -- which is what made
+    /// `startCheck` fail, and with it every mount that goes through
+    /// DiskArbitration rather than mount(8), Finder's included.
+    ///
+    /// Returns true when the device was rebuilt through the cipher. Throws
+    /// ENEEDAUTH when no key is stored for the container and EAUTH when the
+    /// one that is stored does not open it.
+    static func openEncryptedIfNeeded(_ bridge: BlockDeviceBridge) throws -> Bool {
+        guard let (status, luks) = bridge.probeLUKS() else { return false }
+        guard status == LUKS_OK else {
+            Ext4Log.error("refusing LUKS volume: \(Ext4LUKS.reason(luks))")
+            throw Ext4Error.notSupported
+        }
+
+        var key: [UInt8]
+        switch masterKey(for: luks, unlock: { bridge.unlockLUKS(info: luks, passphrase: $0) }) {
+        case .found(let k):   key = k
+        case .unavailable:    throw Ext4Error.posix(ENEEDAUTH)
+        case .rejected:       throw Ext4Error.posix(EAUTH)
+        }
+        defer { key.resetBytes(in: 0..<key.count) }
+
+        // The device built by `init` addresses the container -- header, key
+        // slots and all. Everything from here on has to address the payload
+        // instead, so the stack is rebuilt with the cipher in the middle.
+        // Nothing above this line ever sees a decrypted byte, and nothing
+        // below it sees an encrypted one.
+        bridge.close()
+        guard bridge.openThroughLUKS(info: luks, masterKey: key) else {
+            throw Ext4Error.ioError
+        }
+        Ext4Log.info("unlocked LUKS\(luks.version) container, \(luks.sector_size)B sectors")
+        return true
+    }
+}

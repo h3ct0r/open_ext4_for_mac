@@ -13,13 +13,32 @@ import FSKit
 
 @main
 struct Ext4MacApp {
-    static func main() async {
+    static func main() {
         var arguments = Array(CommandLine.arguments.dropFirst())
-        let command = arguments.isEmpty ? "status" : arguments.removeFirst()
+
+        // With no arguments this is either someone typing `Ext4Mac`, who wants
+        // to know whether the extension is working, or Finder opening the app,
+        // which means they want the agent. The parent process tells them
+        // apart: LaunchServices hands an app to launchd, so a Finder launch is
+        // reparented to pid 1, while anything started from a shell or a script
+        // keeps that shell as its parent.
+        //
+        // Deliberately not `isatty`, which was tried and is wrong: it makes
+        // any script that captures the output get the agent instead, and the
+        // agent never returns. scripts/check_extension.sh hung on exactly that.
+        let launchedByLaunchServices = getppid() == 1
+        let command = arguments.isEmpty
+            ? (launchedByLaunchServices ? "menu" : "status")
+            : arguments.removeFirst()
 
         switch command {
         case "status":
-            await status()
+            statusSynchronously()
+
+        // Watch for encrypted volumes and ask when one turns up. Never
+        // returns; this is the app's main run loop.
+        case "menu", "watch":
+            Ext4MenuBar.run()
 
         // Encrypted volumes. The passphrase is handled here and nowhere else:
         // the extension is sandboxed, cannot prompt, and would pay for the key
@@ -32,6 +51,9 @@ struct Ext4MacApp {
             exit(Ext4Unlock.forget(which))
         case "list":
             exit(Ext4Unlock.list())
+        case "mount":
+            guard let device = arguments.first else { usage(1) }
+            exit(Ext4Mount.command(device))
 
         case "help", "-h", "--help":
             usage(0)
@@ -49,12 +71,23 @@ struct Ext4MacApp {
         Ext4Mac unlock /dev/diskN   unlock an encrypted (LUKS) volume
         Ext4Mac forget <uuid|disk>  forget a volume's key again
         Ext4Mac list                which volumes are unlocked
+        Ext4Mac mount /dev/diskN    mount a volume whose key is stored
+        Ext4Mac menu                watch for encrypted volumes and ask
 
-        Mount with:
+        Or mount anything ext4 with:
           mount -F -t ext4 <disk> <mountpoint>
         """
         print(text)
         exit(code)
+    }
+
+    /// `FSClient` is async and this entry point is not, because AppKit wants
+    /// the main thread and its own run loop. One wait, at the only point that
+    /// needs it, is simpler than making the whole program async around it.
+    static func statusSynchronously() {
+        let done = DispatchSemaphore(value: 0)
+        Task { await status(); done.signal() }
+        done.wait()
     }
 
     static func status() async {

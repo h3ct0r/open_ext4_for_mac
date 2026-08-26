@@ -635,7 +635,7 @@ not the container size: a filesystem told it has more blocks than exist
 eventually writes past the end of the medium.
 
 Verified end to end, in both directions, by real cryptsetup and the real Linux
-kernel: `Tests/run_mount_luks_tests.sh`, 32 assertions, wired into
+kernel: `Tests/run_mount_luks_tests.sh`, 35 assertions, wired into
 `make validate` as its own stage.
 
 | | LUKS1 | LUKS2 |
@@ -657,9 +657,13 @@ passphrase, and the sandbox refuses to open a path named on the mount command
 line — all three measured. So the key has to be waiting before the mount
 begins, and putting it there is the container app's job:
 
+Plug one in and a menu-bar agent asks for the passphrase; after that the
+volume mounts by itself, under its own name, for as long as the key is
+remembered. The same thing without the GUI:
+
 ```
 Ext4Mac unlock /dev/disk6      # prompts, derives, stores the master key
-mount -F -t ext4 disk6 /mnt    # immediate: nothing is derived here
+Ext4Mac mount /dev/disk6       # or just plug it in again
 Ext4Mac forget <uuid|disk>     # locked again
 Ext4Mac list                   # which volumes are unlocked, never the keys
 ```
@@ -737,13 +741,59 @@ than as a decryption bug. Every file reports `inhibitKernelOffloadedIO`, and
 for an encrypted volume that is now a *condition* rather than a comment, so
 finishing the blockmap work cannot quietly undo it.
 
+#### The agent, and what plugging a disk in actually does
+
+The app bundle is already `LSUIElement` — it exists to host the extension, not
+to be looked at — so the agent is a status item and needed no manifest change,
+which matters when Info.plist edits are what have deregistered this module
+before.
+
+It watches DiskArbitration. A volume whose name came from our probe is one of
+ours; when a locked one appears and no key is stored, it asks, derives off the
+main thread, and then asks DiskArbitration to mount. It asks **once** per
+volume, and again if the disk is unplugged and returned — which is when someone
+expects to be asked, and is not the same as asking every time a mount is
+retried.
+
+Launched with no arguments the binary decides between the agent and a status
+report by looking at its parent process: LaunchServices reparents an app to
+launchd, a shell does not. `isatty` was tried first and is wrong — it hands the
+agent to any script that captures the output, and the agent never returns.
+`scripts/check_extension.sh` hung on exactly that, and now asks for `status`
+explicitly.
+
+#### Two things only the DiskArbitration path revealed
+
+`mount -F -t ext4` and Finder do not take the same route. DiskArbitration runs
+an FSKit **check** before it mounts anything, and `mount(8)` does not — so two
+bugs hid behind a working command line.
+
+The check opened the device itself and probed it, which on a LUKS container
+reads a header where a superblock should be: `NOT_EXT`, then `ENOTSUP`, and
+DiskArbitration abandoned the mount. Every entry point that opens a device for
+the *filesystem* now goes through the same unlock path, not just
+`loadResource`.
+
+Worse, FSKit **loads the resource before calling the check** — it says so in
+its own log — so the check ran against a volume that was already mounted, with
+its journal already attached. Opening a second independent view of that device
+is not a check, it is a second writer: the journal looks unrecovered from
+outside and replaying it under the live mount fails with `EINVAL`.
+DiskArbitration then fell back to mounting **read-only**, which is a silent
+downgrade that a command-line mount never showed. A volume that is already
+mounted has answered the only question this check asks, so it now says so and
+stops.
+
+Reporting `EROFS` for a dirty journal on a read-only resource had the same
+effect for the same reason. Refusing the *check* is not the same as refusing
+the *volume*; the replay happens on the next read-write mount either way.
+
 #### Still to do
 
-Unlocking is a command, not a window: the app is a CLI. Nothing prompts when an
-encrypted volume is plugged in, so a locked volume simply fails to mount until
-somebody runs `Ext4Mac unlock`.
-
 Key material is zeroed on every path, but not `mlock`ed against swap.
+
+Nothing tells you a volume is locked except that it does not appear. A
+notification when the agent is not running would be kinder than silence.
 
 ## Not yet done
 - `newfs_fskit` reaches the module but never calls `startFormat`; see below

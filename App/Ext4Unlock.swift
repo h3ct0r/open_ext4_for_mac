@@ -78,46 +78,73 @@ let rawDeviceRead: @convention(c) (UnsafeMutableRawPointer?,
         .read(into: buf, offset: offset, count: count)
 }
 
+/// A failure with something to show the person who asked.
+///
+/// `Result<_, String>` will not do: Swift wants a real Error, and a bare
+/// string is exactly what these failures are -- a line from `luks_strstatus`
+/// or from `strerror`, already written for a human.
+struct UnlockFailure: Error {
+    let message: String
+    init(_ message: String) { self.message = message }
+}
+
 enum Ext4Unlock {
 
-    // MARK: - Commands
+    /// What a container says about itself before anyone types anything.
+    struct Container {
+        let uuid: String
+        let version: Int
+        let cipher: String
+        let sectorSize: Int
+    }
 
-    /// Read a container's header, ask for the passphrase, derive the master
-    /// key, and leave it where the extension will find it.
-    static func unlock(devicePath: String) -> Int32 {
+    /// Where a key ended up. Worth reporting: one of these is encrypted at
+    /// rest and the other is a file the user could read.
+    enum Stored {
+        case keychain
+        case containerFile(URL)
+    }
+
+    // MARK: - The two steps, usable from anywhere
+
+    /// Read a container's header. No passphrase, no side effects.
+    static func inspect(devicePath: String) -> Result<Container, UnlockFailure> {
         guard let device = RawDevice(path: devicePath) else {
-            complain("cannot open \(devicePath): \(String(cString: strerror(errno)))")
+            var message = "cannot open \(devicePath): \(String(cString: strerror(errno)))"
             if errno == EACCES || errno == EPERM {
-                // Removable media attached by this user is normally readable;
-                // a fixed disk is root:operator and is not.
-                complain("  the device node is not readable by this user")
+                message += "\nthe device node is not readable by this user"
             }
-            return 1
+            return .failure(UnlockFailure(message))
         }
-
         var info = luks_info()
         let probe = luks_probe(device.context, rawDeviceRead, &info)
         guard probe == LUKS_OK else {
-            complain("\(devicePath): \(String(cString: luks_strstatus(probe)))")
             let why = text(info.unsupported)
-            if !why.isEmpty { complain("  \(why)") }
-            return 1
+            return .failure(UnlockFailure(String(cString: luks_strstatus(probe))
+                                          + (why.isEmpty ? "" : ": " + why)))
         }
+        return .success(Container(uuid: text(info.uuid),
+                                  version: Int(info.version),
+                                  cipher: "\(text(info.cipher))-\(text(info.mode))",
+                                  sectorSize: Int(info.sector_size)))
+    }
 
+    /// Turn a passphrase into the master key and leave it where the extension
+    /// will look. The passphrase is zeroed here; the key never leaves.
+    ///
+    /// The keychain when we can reach it, the extension's container when we
+    /// cannot -- claiming the keychain group needs a provisioning profile for
+    /// this app's bundle ID, and a binary signed without one simply fails the
+    /// call rather than being killed for it.
+    static func store(passphrase: [UInt8], devicePath: String) -> Result<(Container, Stored), UnlockFailure> {
+        guard let device = RawDevice(path: devicePath) else {
+            return .failure(UnlockFailure("cannot open \(devicePath)"))
+        }
+        var info = luks_info()
+        guard luks_probe(device.context, rawDeviceRead, &info) == LUKS_OK else {
+            return .failure(UnlockFailure("\(devicePath) is not a LUKS container we can read"))
+        }
         let uuid = text(info.uuid)
-        print("LUKS\(info.version) container \(uuid)")
-        print("  cipher   \(text(info.cipher))-\(text(info.mode))")
-        print("  key      \(info.key_bytes * 8) bits, \(info.sector_size)-byte sectors")
-        print("")
-
-        guard var passphrase = askPassphrase("Passphrase for \(uuid): ") else {
-            complain("no passphrase given")
-            return 1
-        }
-        defer { zero(&passphrase) }
-
-        print("deriving the master key…", terminator: "")
-        fflush(stdout)
 
         var key = [UInt8](repeating: 0, count: Int(LUKS_MAX_MASTER_KEY))
         var length = 0
@@ -128,45 +155,98 @@ enum Ext4Unlock {
                             out.baseAddress, &length)
             }
         }
-        print("")
         defer { zero(&key) }
-
         guard status == LUKS_OK, length > 0 else {
-            complain("\(String(cString: luks_strstatus(status)))")
-            return 1
+            return .failure(UnlockFailure(String(cString: luks_strstatus(status))))
         }
 
         var master = Array(key[0..<length])
         defer { zero(&master) }
 
-        // The keychain when we can reach it, the extension's container when we
-        // cannot. Claiming the keychain group needs a provisioning profile
-        // issued for this app's bundle ID; without one this binary is not
-        // signed for it, and the call fails rather than the app being killed.
+        let container = Container(uuid: uuid, version: Int(info.version),
+                                  cipher: "\(text(info.cipher))-\(text(info.mode))",
+                                  sectorSize: Int(info.sector_size))
         do {
             try LUKSKeychain.store(masterKey: master, uuid: uuid,
                                    label: "ext4 volume \(uuid)")
-            print("unlocked. The master key is in the keychain.")
+            return .success((container, .keychain))
         } catch {
             let directory = LUKSKeyStore.directoryFromOutside()
             do {
                 try LUKSKeyStore.write(masterKey: master, uuid: uuid, in: directory)
+                return .success((container, .containerFile(directory)))
             } catch {
-                complain("could not store the key: \(error)")
-                return 1
+                return .failure(UnlockFailure("could not store the key: \(error)"))
             }
+        }
+    }
+
+    /// Whether a key is already waiting for this container.
+    static func isUnlocked(uuid: String) -> Bool {
+        if (try? LUKSKeychain.masterKey(uuid: uuid)) != nil { return true }
+        return LUKSKeyStore.material(uuid: uuid,
+                                     in: LUKSKeyStore.directoryFromOutside()) != nil
+    }
+
+    /// Forget a container's key, wherever it is.
+    static func forget(uuid: String) {
+        try? LUKSKeychain.remove(uuid: uuid)
+        LUKSKeyStore.forget(uuid: uuid, in: LUKSKeyStore.directoryFromOutside())
+    }
+
+    // MARK: - Commands
+
+    /// Read a container's header, ask for the passphrase, derive the master
+    /// key, and leave it where the extension will find it.
+    static func unlock(devicePath: String) -> Int32 {
+        let container: Container
+        switch inspect(devicePath: devicePath) {
+        case .success(let c): container = c
+        case .failure(let why):
+            for line in why.message.split(separator: "\n") { complain(String(line)) }
+            return 1
+        }
+
+        print("LUKS\(container.version) container \(container.uuid)")
+        print("  cipher   \(container.cipher)")
+        print("  sectors  \(container.sectorSize) bytes")
+        print("")
+
+        guard var passphrase = askPassphrase("Passphrase for \(container.uuid): ") else {
+            complain("no passphrase given")
+            return 1
+        }
+        defer { zero(&passphrase) }
+
+        print("deriving the master key…", terminator: "")
+        fflush(stdout)
+        let result = store(passphrase: passphrase, devicePath: devicePath)
+        print("")
+
+        switch result {
+        case .failure(let why):
+            complain(why.message)
+            return 1
+
+        case .success(let (c, .keychain)):
+            print("unlocked. The master key is in the keychain.")
+            print("")
+            print("The volume will mount until the key is forgotten:")
+            print("    Ext4Mac forget \(c.uuid)")
+            return 0
+
+        case .success(let (c, .containerFile(directory))):
             print("unlocked. The master key is in the extension's container:")
-            print("    \(directory.path)/\(uuid).key")
+            print("    \(directory.path)/\(c.uuid).key")
             print("")
             print("That file is readable by you and is not encrypted at rest.")
             print("Put App/Ext4Mac.provisionprofile in place and reinstall to")
             print("use the keychain instead; see docs/SIGNING.md.")
+            print("")
+            print("The volume will mount until the key is forgotten:")
+            print("    Ext4Mac forget \(c.uuid)")
+            return 0
         }
-
-        print("")
-        print("The volume will mount until the key is forgotten:")
-        print("    Ext4Mac forget \(uuid)")
-        return 0
     }
 
     /// Drop a stored key. Takes a UUID, or a device to read one from.
@@ -175,8 +255,7 @@ enum Ext4Unlock {
         guard let uuid else { return 1 }
         // Both places, always: which one holds the key depends on how this
         // binary was signed, and forgetting half of it is worse than useless.
-        try? LUKSKeychain.remove(uuid: uuid)
-        LUKSKeyStore.forget(uuid: uuid, in: LUKSKeyStore.directoryFromOutside())
+        forget(uuid: uuid)
         print("forgot the key for \(uuid)")
         return 0
     }
@@ -207,16 +286,10 @@ enum Ext4Unlock {
     // MARK: - Helpers
 
     private static func containerUUID(devicePath: String) -> String? {
-        guard let device = RawDevice(path: devicePath) else {
-            complain("cannot open \(devicePath)")
-            return nil
+        switch inspect(devicePath: devicePath) {
+        case .success(let c): return c.uuid
+        case .failure(let why): complain(why.message); return nil
         }
-        var info = luks_info()
-        guard luks_probe(device.context, rawDeviceRead, &info) == LUKS_OK else {
-            complain("\(devicePath) is not a LUKS container we can read")
-            return nil
-        }
-        return text(info.uuid)
     }
 
     /// Read a line from the terminal with echo off.
@@ -247,7 +320,7 @@ enum Ext4Unlock {
         return [UInt8](line.utf8)
     }
 
-    private static func zero(_ bytes: inout [UInt8]) {
+    static func zero(_ bytes: inout [UInt8]) {
         bytes.resetBytes(in: 0..<bytes.count)
     }
 
@@ -256,7 +329,7 @@ enum Ext4Unlock {
     }
 
     /// A fixed-size C char array out of `luks_info`, as a Swift string.
-    private static func text<T>(_ field: T) -> String {
+    static func text<T>(_ field: T) -> String {
         var value = field
         return withUnsafeBytes(of: &value) { raw -> String in
             String(cString: raw.bindMemory(to: CChar.self).baseAddress!)

@@ -24,7 +24,7 @@ enum Ext4LUKS {
     /// The ext4 label lives inside the ciphertext, so there is nothing better
     /// to offer until the volume is unlocked.
     static func name(_ info: luks_info) -> String {
-        "LUKS\(info.version) Encrypted Volume"
+        LUKSVolumeName.forVersion(Int(info.version))
     }
 
     /// The container's identity, taken from the LUKS UUID.

@@ -15,7 +15,9 @@
 #   stage 2  refusal       no key means a clean EAUTH, and no writes
 #   stage 3  LUKS1/512     read what Linux wrote, write it back for Linux
 #   stage 4  LUKS2/4096    the same, through argon2id and 4096-byte sectors
-#   stage 5  the whole flow unlock in the container app, mount, forget
+#   stage 5  the whole flow unlock in the container app, mount, forget --
+#                          through mount(8) and through DiskArbitration, which
+#                          are different paths and fail differently
 #
 # Stage 4 exists for one bug in particular. With a 4096-byte encryption sector,
 # dm-crypt still counts the XTS tweak in 512-byte units; getting that wrong
@@ -320,6 +322,26 @@ else
     umount "$MNT" 2>/dev/null
   else
     bad "could not mount with the key the app stored"
+  fi
+
+  # The path Finder and the menu-bar agent take, which is not the path
+  # mount(8) takes: DiskArbitration runs an FSKit *check* first, and the check
+  # has to understand encryption too or the mount silently degrades to
+  # read-only -- or fails outright.
+  if "$APP" mount "$DEV" >/dev/null 2>&1; then
+    ok "DiskArbitration mounted it, the way Finder would"
+    WHERE=$(mount | sed -n "s|^$DEV on \(.*\) (ext4.*|\1|p")
+    case "$WHERE" in
+      */LUKS2) ok "it is named after the filesystem inside, not the container" ;;
+      "")      bad "mounted, but not where mount(8) can see it" ;;
+      *)       bad "mounted at an unexpected place" "$WHERE" ;;
+    esac
+    mount | grep -q "$DEV .*read-only" \
+      && bad "DiskArbitration mounted it read-only" \
+      || ok "and read-write, like an unencrypted volume"
+    [ -n "$WHERE" ] && { umount "$WHERE" 2>/dev/null || diskutil unmount "$WHERE" >/dev/null 2>&1; }
+  else
+    bad "DiskArbitration would not mount it"
   fi
 
   "$APP" forget "$UUID2" >/dev/null 2>&1

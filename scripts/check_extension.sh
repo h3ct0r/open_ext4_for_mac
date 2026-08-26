@@ -34,7 +34,11 @@ step "installed" "yes ($APP)"
 # the module with a "+" (enabled) while FSKit has dropped it entirely. The
 # container app asks FSClient.installedExtensions, which is the same source
 # System Settings uses.
-status=$("$APP/Contents/MacOS/Ext4Mac" 2>/dev/null | sed -n 's/^status: //p')
+# `status` explicitly. Without an argument the binary decides for itself
+# whether it was opened from Finder, and a script has no business relying on
+# that guess -- an earlier version of it launched the menu-bar agent here and
+# this line never returned.
+status=$("$APP/Contents/MacOS/Ext4Mac" status 2>/dev/null | sed -n 's/^status: //p')
 
 case "$status" in
     "")

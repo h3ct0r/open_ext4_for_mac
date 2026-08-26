@@ -46,7 +46,7 @@ make validate
 | crash consistency | 303 cut points; the Linux kernel replays each journal |
 | differential vs Linux | 36 assertions, both directions |
 | mounted driver | 23 assertions against a live FSKit mount |
-| encrypted, mounted | 32 assertions; a LUKS volume through FSKit, judged by Linux |
+| encrypted, mounted | 35 assertions; a LUKS volume through FSKit, judged by Linux |
 
 A file deleted while something still has it open goes on ext4's own **orphan
 list**, so a crash in that window is recoverable by the next mount rather than
@@ -57,9 +57,12 @@ a leak — and `chattr +i` / `chattr +a` are honoured, reported to macOS as
 otherwise cannot open at all, since `cryptsetup` needs device-mapper and
 cannot be ported:
 
+Plug one in and a menu-bar agent asks for the passphrase; after that it mounts
+by itself, under its own name, like any other disk. Or without the GUI:
+
 ```bash
 Ext4Mac unlock /dev/disk6            # prompts; derives the master key
-mount -F -t ext4 disk6 /tmp/mnt      # immediate
+Ext4Mac mount /dev/disk6             # or just plug it in again
 Ext4Mac forget /dev/disk6            # locked again
 ```
 

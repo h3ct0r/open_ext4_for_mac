@@ -154,12 +154,43 @@ extension Ext4FileSystem: FSManageableResourceMaintenanceOperations {
     private func check(_ resource: FSBlockDeviceResource,
                        request: CheckRequest,
                        task: FSTask) async throws {
+        // FSKit loads the resource *before* calling this -- fskitd says so in
+        // its own log -- so by the time a check runs during a mount, the
+        // volume is already open and its journal already attached. Opening a
+        // second, independent view of the same device here is not a check, it
+        // is a second writer: the journal looks unrecovered from the outside,
+        // and replaying it underneath the live mount fails with EINVAL at
+        // best. DiskArbitration then abandons the mount and falls back to
+        // read-only, which is how an encrypted volume ended up mounting
+        // read-only through Finder while `mount -F` gave it read-write.
+        //
+        // A volume that is mounted has answered the only question this check
+        // asks.
+        if volume != nil {
+            task.logMessage("the volume is already mounted, so it is mountable")
+            task.logMessage("note: this is a mountability check, not a full "
+                            + "structural check -- use e2fsck for that")
+            return
+        }
+
         let readOnly = request.readOnly || !resource.isWritable
         guard let bridge = BlockDeviceBridge(resource: resource, forceReadOnly: readOnly),
-              let dev = bridge.device else {
+              var dev = bridge.device else {
             throw Ext4Error.ioError
         }
         defer { bridge.close() }
+
+        // An encrypted volume has to be opened through the cipher here too.
+        // Without this the probe below reads a LUKS header where it expects a
+        // superblock, reports NOT_EXT, and the check fails with ENOTSUP --
+        // which DiskArbitration runs before every mount it performs, so it
+        // took Finder and `Ext4Mac mount` down with it while `mount -F`, which
+        // skips the check, kept working.
+        if try Ext4LUKSKeys.openEncryptedIfNeeded(bridge) {
+            guard let decrypted = bridge.device else { throw Ext4Error.ioError }
+            dev = decrypted
+            task.logMessage("volume is inside a LUKS container")
+        }
 
         var info = ext4b_probe_info()
         try Ext4Error.check(ext4b_probe(dev, &info), "probe")
@@ -186,8 +217,15 @@ extension Ext4FileSystem: FSManageableResourceMaintenanceOperations {
         }
 
         guard !readOnly else {
-            task.logMessage("journal needs replaying, but the volume is read-only")
-            throw Ext4Error.posix(EROFS)
+            // Not a failure. The volume is mountable; the replay simply
+            // happens when something opens it for writing, which `loadResource`
+            // does before it lets anyone near the filesystem. Reporting EROFS
+            // here made DiskArbitration downgrade the mount it was about to
+            // perform -- refusing the check is not the same as refusing the
+            // volume, and only the second one was ever meant.
+            task.logMessage("journal needs replaying; that happens on the next "
+                            + "read-write mount, which this check cannot perform")
+            return
         }
 
         let handle = UInt(bitPattern: dev)
