@@ -91,6 +91,25 @@ final class BlockDeviceBridge {
         }
     }
 
+    // MARK: - LUKS
+
+    /// Read a LUKS header from the start of the device, if there is one.
+    ///
+    /// Deliberately separate from `ext4b_probe`: a LUKS container is not a
+    /// filesystem, it is a block layer wrapped around one, so it is recognised
+    /// before the filesystem probe ever gets a look at the bytes.
+    ///
+    /// Returns nil when the device carries no LUKS magic at all -- the common
+    /// case, and not an error. A container we recognise but cannot open comes
+    /// back with its status set, so the caller can say why.
+    func probeLUKS() -> (status: luks_status, info: luks_info)? {
+        var info = luks_info()
+        let ctx = Unmanaged.passUnretained(self).toOpaque()
+        let status = luks_probe(ctx, bridgeRead, &info)
+        guard status != LUKS_NOT_LUKS else { return nil }
+        return (status, info)
+    }
+
     // MARK: - I/O actually performed against the resource
 
     // MARK: - Alignment

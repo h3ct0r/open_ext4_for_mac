@@ -1,4 +1,5 @@
 module Ext4Core {
     header "ext4_bridge.h"
+    header "../crypto/luks.h"
     export *
 }

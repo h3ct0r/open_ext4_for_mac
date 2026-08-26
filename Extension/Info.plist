@@ -210,6 +210,31 @@
 		    -o is the standard mount option list; --rdonly and -f are handled
 		    by FSKit itself for unary filesystems.
 		-->
+		<!--
+		    Two further keys belong in this dictionary and are deliberately
+		    not here yet. FSKit's own parser,
+
+		      -[FSTaskOptionsBundle parseAndValidateActivateOptions:
+		                            activationSyntax:]
+
+		    sits among the literals "shortOptions", "dashOOptions",
+		    "pathOptions", "Path", "Directory" and
+		    FSOptionArgumentTypeNoArg/HasArg/Boolean. dashOOptions is what
+		    makes "-o name=value" parse into a named option; pathOptions
+		    marks one as a path, which is how a sandboxed module is handed
+		    a security-scoped URL through FSTaskOptions.url(forOption:).
+		    That is the only way to read a key file the user names -- a
+		    direct open of the same path fails with "you don't have
+		    permission to view it".
+
+		    Their exact shapes are unpublished and no shipping Apple module
+		    uses them. Guessing wrong is expensive: FSKit silently drops a
+		    module whose manifest it dislikes, and recovering registration
+		    costs the approval in System Settings, which only a human can
+		    restore. Both keyed by option name, with the values
+		    "FSOptionArgumentTypeHasArg" and "Path", was tried and
+		    rejected. See docs/STATUS.md.
+		-->
 		<key>FSActivateOptionSyntax</key>
 		<dict>
 			<key>shortOptions</key>

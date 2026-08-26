@@ -616,32 +616,124 @@ byte of, so it is tested on unterminated strings, mismatched brackets, control
 bytes, nesting past its ceiling, and integers too large for 64 bits. It has no
 recursion and the token budget is fixed by the caller.
 
-### Not done: mounting an encrypted volume
+### Mounting an encrypted volume
 
-Everything above runs offline. The mounted path needs one more thing, and it is
-not cryptography — it is **getting the passphrase to a sandboxed extension**.
+A locked container is now **recognised on a real mount**. `diskutil` shows it,
+and the module claims it rather than declining:
 
-FSKit has a state that looks designed for it, `FSContainerStateBlocked` with
-`ENEEDAUTH`, documented as *"a resolution that would allow the container to
-become ready, such as correcting an incorrect password"*. But nothing in FSKit
-lets a module present UI, and `FSClient` only enumerates extensions, so whether
-that state produces any system prompt for a third-party module is untested.
+```
+/dev/disk6 (disk image):
+   #:                  TYPE NAME                    SIZE       IDENTIFIER
+   0:                       LUKS1 Encrypted Volume +67.1 MB    disk6
+```
 
-The shape that avoids the question entirely: derive the key in the **container
-app**, which can prompt and can afford the gigabyte Argon2id asks for, and hand
-the extension only the 64-byte master key. The two halves are already separate
-for exactly this reason — `luks_unlock` never touches a device again after it
-returns the key, and `luks_device_open` never sees a passphrase.
+Claiming it is the part that matters: FSKit only routes a device to a module
+that said it recognised the media, so declining would mean never being asked
+about the volume again — and there would be no later point at which a
+passphrase could be offered.
 
-Also outstanding: kernel-offloaded I/O must be inhibited for encrypted volumes,
-since that path has the kernel read physical extents directly and would return
-ciphertext.
+What is still missing is the passphrase itself. Mounting one today fails with
+`EAUTH`, cleanly:
+
+```
+mount: Operation ended with error: The operation couldn’t be completed.
+       Authentication error
+```
+
+#### What the mounted path taught us
+
+Three things were measured rather than reasoned about, and two of them
+contradict the obvious reading of the headers.
+
+**`FSContainerStateBlocked` is inert for a third-party module.** It is
+documented as a state whose error "has a resolution that would allow the
+container to become ready, such as correcting an incorrect password", and
+`ENEEDAUTH` is the example given. Setting it in `loadResource` changes nothing:
+fskitd records the load as having succeeded, *nothing prompts anywhere on the
+system* — no SecurityAgent, no notification, nothing in the whole system log —
+and FSKit proceeds directly to activate the volume. There is no callback for a
+passphrase arriving because there is no prompt to produce one.
+
+**A volume that cannot answer takes the extension down with it.** Because
+activation happens regardless of the container state, a placeholder volume that
+does not implement `FSVolume.Operations` dies on an unrecognised selector:
+
+```
+-[FSModuleConnector activateVolume:resource:options:replyHandler:]
+  -[NSObject doesNotRecognizeSelector:]  →  SIGABRT
+```
+
+So a locked volume is a real `FSVolume` that refuses every operation with
+`EAUTH`. It also has to **release the block device before failing**: FSKit
+calls neither `deactivate` nor `unloadResource` after `activate` throws, so a
+device still held there stays held, and the next probe of the same media fails
+with *Resource busy* until it is physically detached.
+
+**Mount options do reach `activate`, and the sandbox blocks the path they
+name.** Given `mount -F -t ext4 -o keyfile=/path/to/pass …`, the module
+receives exactly:
+
+```
+activate options: ["-o", "keyfile=/private/tmp/.../pass.txt"]
+```
+
+and then cannot open it — *"you don't have permission to view it"*. That is the
+sandbox doing its job, and it is why the key cannot simply be read from a path
+the user types.
+
+#### The channel that remains
+
+FSKit's answer to precisely this is `FSTaskOptions.url(forOption:)`, which
+hands a sandboxed module a **security-scoped URL** for an option the manifest
+declares as a path. No public documentation says how to declare one, and none
+of the modules Apple ships (`msdos`, `exfat`, `ftp`) uses the feature. The
+schema is legible in FSKit itself, around the parser that reads it:
+
+```
+-[FSTaskOptionsBundle parseAndValidateActivateOptions:activationSyntax:]
+  shortOptions   dashOOptions   pathOptions   Path   Directory
+  FSOptionArgumentTypeNoArg / HasArg / Boolean
+```
+
+`dashOOptions` is what makes `-o name=value` parse into a named option instead
+of an opaque string; `pathOptions` marks that option as a path, which is what
+produces the security-scoped URL.
+
+The exact shapes of those two dictionaries are still unknown. The first
+combination tried — both keyed by option name, with the values
+`FSOptionArgumentTypeHasArg` and `Path` — was **rejected by FSKit**, which
+drops a module whose manifest it dislikes without saying why. This is the same
+failure mode already recorded for `FSSupportsKernelOffloadedIO`, and it is
+expensive: recovering registration costs the module's approval in System
+Settings, which nothing but a human toggling the switch can restore. Further
+attempts should be made one at a time, with someone at the keyboard.
+
+#### Why not derive the key in the container app
+
+The alternative is for the app to prompt, run the KDF, and hand the extension
+only the master key — which is better on two counts. The passphrase never
+enters the sandboxed process, and Argon2id's gigabyte is allocated by an
+ordinary application rather than an app extension. It would also work for
+Finder auto-mount, where there is no command line to carry an option at all.
+
+It needs a shared keychain access group, which means an entitlement change and
+very likely a new provisioning profile — and entitlement changes are exactly
+what has deregistered this module before.
+
+#### One trap that is already closed
+
+Kernel-offloaded I/O must never be used for an encrypted volume: that path
+hands the kernel physical extents to read directly, and it would return
+ciphertext — presenting as filesystem corruption rather than as a decryption
+bug. Every file currently reports `inhibitKernelOffloadedIO`, because the
+conformance is out of the build entirely, so the trap is shut today. It has to
+stay shut deliberately when that work resumes.
 
 ## Not yet done
 - `newfs_fskit` reaches the module but never calls `startFormat`; see below
 - A real structural check; `startCheck` only decides mountability
 - Two simultaneous open-unlinks are crash-protected for one of them, not both
-- Mounting an encrypted volume — the crypto is done, the passphrase channel is not
+- Mounting an encrypted volume — recognised and refused cleanly; the passphrase channel is not built
 - LUKS detached headers, and ciphers other than `aes-xts-plain64`
 - `FSVolumeAccessCheckOperations`
 - `FSVolumePreallocateOperations` — deliberately, for now; see below
