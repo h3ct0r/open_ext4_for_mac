@@ -227,6 +227,12 @@ uint32_t ext4_bg_num_gdb(struct ext4_sblock *s, uint32_t group);
 uint32_t ext4_num_base_meta_clusters(struct ext4_sblock *s,
 				     uint32_t block_group);
 
+/**@brief   Seed for every metadata checksum on the volume.
+ * @param   s superblock descriptor
+ * @return  s_checksum_seed when the volume carries one, otherwise the value
+ *          derived from the UUID */
+uint32_t ext4_sb_csum_seed(struct ext4_sblock *s);
+
 #ifdef __cplusplus
 }
 #endif

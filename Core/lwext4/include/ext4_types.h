@@ -174,7 +174,9 @@ struct ext4_sblock {
 	uint8_t  encrypt_algos[4];	/* Encryption algorithms in use  */
 	uint8_t  encrypt_pw_salt[16];	/* Salt used for string2key algorithm */
 	uint32_t lpf_ino;		/* Location of the lost+found inode */
-	uint32_t padding[100];	/* Padding to the end of the block */
+	uint32_t prj_quota_inum;	/* inode for tracking project quota */
+	uint32_t checksum_seed;		/* crc32c(uuid), if INCOMPAT_CSUM_SEED */
+	uint32_t padding[98];	/* Padding to the end of the block */
 	uint32_t checksum;		/* crc32c(superblock) */
 };
 
