@@ -23,6 +23,11 @@
 #   stage 2  crash sweep   snapshots taken at arbitrary moments under load
 #                          must all recover clean
 #
+# Stage 0b and 0c cover open-unlink: a file whose name is gone while a
+# descriptor is still using it. 0b checks that reads and writes through that
+# descriptor still work; 0c cuts the power while one exists and checks that the
+# inode comes back rather than leaking.
+#
 # Needs the extension signed, installed and enabled, plus Docker. Runs
 # unattended. Writes a report to build/mount-crash-report.txt.
 set -uo pipefail
@@ -45,8 +50,11 @@ SWEEP_SNAPSHOTS="${SWEEP_SNAPSHOTS:-24}"
 PASS=0; FAIL=0
 note() { echo "$*" | tee -a "$REPORT"; }
 ok()   { PASS=$((PASS+1)); note "  ok    $1"; }
-bad()  { FAIL=$((FAIL+1)); note "  FAIL  $1"; [ $# -gt 1 ] && note "        $2"; }
-
+# `bad` must end in a success status. Without it the trailing test is the
+# function's exit code, and it is false whenever there is no detail argument --
+# so the common `cmd && bad "..." || ok "..."` idiom runs *both* arms and the
+# suite reports a failure and a pass for the same check.
+bad()  { FAIL=$((FAIL+1)); note "  FAIL  $1"; [ $# -gt 1 ] && note "        $2"; return 0; }
 DEV=""
 
 # --------------------------------------------------------------- teardown --
@@ -310,6 +318,154 @@ else
   bad "files unlinked while open still read and write correctly"
 fi
 rm -rf "$MNT/openunlink" 2>/dev/null
+
+# ============================== stage 0c: a crash with one still deleted-open ==
+#
+# The interesting moment is the one stage 0b steps over: the descriptor is
+# open, the name is gone, and the power fails *right there*. The inode has no
+# name and no owner, and nothing in the directory tree leads to it -- the only
+# thing that can, after the fact, is the volume's orphan list.
+#
+# So this holds a deleted file open, freezes the driver mid-way, and asks two
+# questions of the snapshot: is the inode actually on the list (which is what
+# proves the mechanism is engaged on the FSKit path at all, and not only in the
+# offline suite), and does mounting the image afterwards give the space back.
+
+note ""
+note "stage 0c: the power fails while a deleted file is still open"
+note ""
+
+DUMP="$ROOT/build/bin/ext4dump"
+ORPHAN_IMG="$WORK/orphan-live.img"
+HOLD_READY="$WORK/holder.ready"
+rm -f "$HOLD_READY"
+
+python3 - "$MNT" "$HOLD_READY" <<'HOLDER' &
+import os, sys, time
+mnt, ready = sys.argv[1], sys.argv[2]
+p = os.path.join(mnt, "orphan-victim.bin")
+f = open(p, "w+b")
+f.write(b"O" * (1 << 20)); f.flush(); os.fsync(f.fileno())
+os.unlink(p)
+# Blocks allocated *after* the name is gone are the ones that used to leak.
+f.write(b"P" * (1 << 20)); f.flush(); os.fsync(f.fileno())
+open(ready, "w").close()
+time.sleep(60)          # keep the descriptor open until the snapshot is taken
+f.close()
+HOLDER
+HOLDER_PID=$!
+
+for _ in $(seq 1 100); do [ -f "$HOLD_READY" ] && break; sleep 0.2; done
+
+if [ ! -f "$HOLD_READY" ]; then
+  bad "a deleted-but-open file can be created at all"
+else
+  freeze_and_snapshot "$ORPHAN_IMG"
+
+  HEAD=$("$DUMP" "$ORPHAN_IMG" orphans 2>/dev/null | sed -n 's/^orphan head: //p')
+  if [ -n "$HEAD" ] && [ "$HEAD" != "0" ]; then
+    ok "the deleted-but-open inode is on the volume's orphan list (inode $HEAD)"
+  else
+    bad "the deleted-but-open inode is on the volume's orphan list"         "the list is empty, so a crash here would strand the inode"
+  fi
+
+  # Recovery by this driver alone: mount the snapshot read-write and let the
+  # cleanup run. No e2fsck, no Linux -- that is the point.
+  if "$DUMP" "$ORPHAN_IMG" label RECOVERED >/dev/null 2>&1; then
+    if e2fsck -fn "$ORPHAN_IMG" >/dev/null 2>&1; then
+      ok "mounting the snapshot reclaims it, with no repair tool involved"
+    else
+      bad "mounting the snapshot reclaims it, with no repair tool involved"           "$(e2fsck -fn "$ORPHAN_IMG" 2>&1 | grep -m1 -vE '^e2fsck|^Pass|^$' | cut -c1-60)"
+    fi
+  else
+    bad "mounting the snapshot reclaims it, with no repair tool involved"         "the snapshot could not be mounted"
+  fi
+  rm -f "$ORPHAN_IMG"
+fi
+
+kill "$HOLDER_PID" 2>/dev/null
+wait "$HOLDER_PID" 2>/dev/null
+rm -f "$MNT/orphan-victim.bin" "$HOLD_READY" 2>/dev/null
+
+# ======================================= stage 0d: chattr flags through FSKit ==
+#
+# ext4's immutable and append-only flags are enforced in the core, which the
+# write suite covers. What only a real mount can show is whether the refusal
+# reaches the *kernel* -- whether macOS sees the file as locked and stops the
+# write itself, or lets it through to us.
+
+note ""
+note "stage 0d: files Linux marked immutable, seen through a real mount"
+note ""
+
+FLAGDIR="$MNT/chattr"
+mkdir -p "$FLAGDIR"
+printf 'do not touch' > "$FLAGDIR/frozen.txt"
+printf 'line1' > "$FLAGDIR/journal.log"
+sync
+
+# Set the flags the way Linux would, then let the driver see them. The volume
+# has to be unmounted for that, so this runs against the image directly.
+FROZEN_INO=$(stat -f '%i' "$FLAGDIR/frozen.txt" 2>/dev/null)
+APPEND_INO=$(stat -f '%i' "$FLAGDIR/journal.log" 2>/dev/null)
+umount "$MNT" 2>/dev/null
+
+set_flag() {  # set_flag <inode> <bit>
+  local cur
+  cur=$(debugfs -R "stat <$1>" "$DEV" 2>/dev/null \
+        | grep -oE 'Flags: 0x[0-9a-f]+' | head -1 | sed 's/Flags: //')
+  [ -n "$cur" ] || return 1
+  debugfs -w -R "sif <$1> flags $(printf '0x%x' $(( cur | $2 )))" "$DEV" >/dev/null 2>&1
+}
+set_flag "$FROZEN_INO" 0x10
+set_flag "$APPEND_INO" 0x20
+
+if ! mount -F -t ext4 "${DEV#/dev/}" "$MNT" 2>/dev/null; then
+  note "  could not remount after setting the flags"
+  note "  everything below would measure the boot disk, so stopping here"
+  exit 1
+fi
+assert_mounted "after setting the chattr flags"
+
+flags=$(ls -lO "$FLAGDIR/frozen.txt" 2>/dev/null | awk '{print $5}')
+case "$flags" in
+  *uchg*) ok "macOS sees an ext4 immutable file as locked (uchg)" ;;
+  *)      bad "macOS sees an ext4 immutable file as locked (uchg)" "flags column: [$flags]" ;;
+esac
+
+# The redirection itself is what fails, and the shell reports that before any
+# `2>/dev/null` on the command can apply -- hence the subshell.
+if ( exec 2>/dev/null; printf 'clobber' > "$FLAGDIR/frozen.txt" ); then
+  bad "an immutable file cannot be overwritten through the mount"
+else
+  ok "an immutable file cannot be overwritten through the mount"
+fi
+content=$(cat "$FLAGDIR/frozen.txt" 2>/dev/null)
+if [ "$content" = "do not touch" ]; then
+  ok "and its content is intact"
+else
+  bad "and its content is intact" "got [$content]"
+fi
+
+if printf 'line2' >> "$FLAGDIR/journal.log" 2>/dev/null; then
+  ok "an append-only file still accepts an append through the mount"
+else
+  bad "an append-only file still accepts an append through the mount"
+fi
+
+# Leave nothing protected behind: the sweep and the final e2fsck do not need a
+# file they are not allowed to delete.
+umount "$MNT" 2>/dev/null
+set_flag "$FROZEN_INO" 0
+set_flag "$APPEND_INO" 0
+debugfs -w -R "sif <$FROZEN_INO> flags 0x80000" "$DEV" >/dev/null 2>&1
+debugfs -w -R "sif <$APPEND_INO> flags 0x80000" "$DEV" >/dev/null 2>&1
+if ! mount -F -t ext4 "${DEV#/dev/}" "$MNT" 2>/dev/null; then
+  note "  could not remount after clearing the flags"
+  exit 1
+fi
+assert_mounted "after clearing the chattr flags"
+rm -rf "$FLAGDIR" 2>/dev/null
 
 # ==================================================== stage 1: durability ==
 #

@@ -28,7 +28,11 @@ rm -rf "$WORK"; mkdir -p "$WORK"
 PASS=0; FAIL=0
 note() { echo "$*" | tee -a "$REPORT"; }
 ok()   { PASS=$((PASS+1)); note "  ok    $1"; }
-bad()  { FAIL=$((FAIL+1)); note "  FAIL  $1"; [ $# -gt 1 ] && note "        $2"; }
+# `bad` must end in a success status. Without it the trailing test is the
+# function's exit code, and it is false whenever there is no detail argument --
+# so the common `cmd && bad "..." || ok "..."` idiom runs *both* arms and the
+# suite reports a failure and a pass for the same check.
+bad()  { FAIL=$((FAIL+1)); note "  FAIL  $1"; [ $# -gt 1 ] && note "        $2"; return 0; }
 expect_eq() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected [$2] got [$3]"; fi; }
 
 [ -x "$DUMP" ] || { echo "build first: make tools"; exit 1; }

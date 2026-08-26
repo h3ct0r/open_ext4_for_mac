@@ -20,7 +20,11 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASS=0; FAIL=0; FSCK_RUNS=0
 ok()  { PASS=$((PASS+1)); printf '  \033[32mok\033[0m   %s\n' "$1"; }
-bad() { FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "$1"; [ $# -gt 1 ] && printf '         %s\n' "$2"; }
+# `bad` must end in a success status. Without it the trailing test is the
+# function's exit code, and it is false whenever there is no detail argument --
+# so the common `cmd && bad "..." || ok "..."` idiom runs *both* arms and the
+# suite reports a failure and a pass for the same check.
+bad() { FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "$1"; [ $# -gt 1 ] && printf '         %s\n' "$2"; return 0; }
 expect_eq() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected [$2] got [$3]"; fi; }
 
 
@@ -291,6 +295,76 @@ op "rm /space.bin"     rm /space.bin && ok "remove large file"
 freed=$(free_blocks)
 [ "$freed" -ge "$before" ] && ok "blocks returned on delete ($after -> $freed)" \
                            || bad "blocks returned on delete" "before=$before after-delete=$freed"
+
+# ================================================== immutable / append-only ==
+#
+# `chattr +i` and `chattr +a` are how a Linux user says "do not change this".
+# A driver that ignores them silently removes a protection the user asked for
+# and will not find out until the file is gone, so every mutating entry point
+# has to check.
+#
+# The flags are set with debugfs rather than by mounting under Linux, so this
+# stays free of Docker; the differential suite checks that flags set by the
+# real `chattr` are the same thing.
+
+echo
+echo "immutable and append-only files"
+new_image ext4_4k
+
+# OR the bit into whatever the inode already carries -- clobbering the flags
+# word would drop EXTENTS and make the file unreadable.
+set_inode_flag() {  # set_inode_flag <path> <bit>
+  local ino cur
+  ino=$("$DUMP" "$IMG" stat "$1" 2>/dev/null | sed -n 's/^inode: *//p')
+  cur=$(debugfs -R "stat <$ino>" "$IMG" 2>/dev/null \
+        | grep -oE 'Flags: 0x[0-9a-f]+' | head -1 | sed 's/Flags: //')
+  [ -n "$ino" ] && [ -n "$cur" ] || return 1
+  debugfs -w -R "sif <$ino> flags $(printf '0x%x' $(( cur | $2 )))" "$IMG" >/dev/null 2>&1
+}
+
+op "create a file to protect" create /prot.txt
+op "give it content"          write /prot.txt "original"
+set_inode_flag /prot.txt 0x10 || bad "could not set the immutable flag"
+expect_eq "the immutable flag is visible in stat" "immutable" \
+  "$("$DUMP" "$IMG" stat /prot.txt 2>/dev/null | sed -n 's/^protected: *//p')"
+
+op_must_fail "an immutable file cannot be written"     "not permitted" write /prot.txt "new"
+op_must_fail "an immutable file cannot be truncated"   "not permitted" truncate /prot.txt 1
+op_must_fail "an immutable file cannot be removed"     "not permitted" rm /prot.txt
+op_must_fail "an immutable file cannot be chmodded"    "not permitted" chmod /prot.txt 600
+op_must_fail "an immutable file cannot gain an xattr"  "not permitted" setxattr /prot.txt user.k v
+op_must_fail "an immutable file cannot be renamed"     "not permitted" mv /prot.txt /moved.txt
+op_must_fail "an immutable file cannot be hard-linked" "not permitted" ln /prot.txt /hard
+expect_eq "and its content survived every attempt" "original" \
+  "$("$DUMP" "$IMG" cat /prot.txt 2>/dev/null)"
+
+op "create a directory to protect"      mkdir /locked
+op "put something in it first"          create /locked/inside.txt
+set_inode_flag /locked 0x10 || bad "could not set the immutable flag on a directory"
+op_must_fail "an immutable directory takes no new entries" "not permitted" create /locked/new.txt
+op_must_fail "an immutable directory loses none"           "not permitted" rm /locked/inside.txt
+
+op "create an append-only file" create /log.txt
+op "seed it"                    write /log.txt "line1"
+set_inode_flag /log.txt 0x20 || bad "could not set the append-only flag"
+expect_eq "the append-only flag is visible in stat" "append-only" \
+  "$("$DUMP" "$IMG" stat /log.txt 2>/dev/null | sed -n 's/^protected: *//p')"
+
+op "appending to an append-only file is allowed" append /log.txt "line2" \
+  && ok "appending to an append-only file is allowed"
+expect_eq "and the append landed" "line1line2" "$("$DUMP" "$IMG" cat /log.txt 2>/dev/null)"
+
+# The rule is "a write that lies wholly inside the file", not "a write that
+# starts at end-of-file": through a real mount the buffer cache rewrites whole
+# pages, so an append arrives at offset 0 and the stricter rule refuses it. The
+# kernel does the enforcement that matters, refusing to open the file for
+# anything but O_APPEND once it sees the flag.
+op_must_fail "overwriting inside an append-only file is refused" "not permitted" write /log.txt "X"
+op_must_fail "truncate is refused even when it would grow"  "not permitted" truncate /log.txt 99
+op_must_fail "an append-only file cannot be removed"        "not permitted" rm /log.txt
+op_must_fail "an append-only file cannot gain an xattr"     "not permitted" setxattr /log.txt user.k v
+op "attribute changes are still allowed" chmod /log.txt 640 \
+  && ok "an append-only file can still be chmodded"
 
 # ========================================================== read-only guard ==
 echo

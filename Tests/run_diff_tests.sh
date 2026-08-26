@@ -21,15 +21,17 @@ DUMP="$ROOT/build/bin/ext4dump"
 FIX="$ROOT/Tests/fixtures"
 WORK="$ROOT/build/diff"
 REPORT="$ROOT/build/diff-report.txt"
-DOCKER_IMAGE="ext4diff:latest"
 
-# debian:stable-slim ships without setfattr/getfattr, so the xattr checks would
-# quietly pass over a missing binary. Build a small image once that has them.
+# debian:stable-slim ships without setfattr/getfattr or chattr/lsattr, so those
+# checks would quietly pass over a missing binary. Build a small image once
+# that has them. Bump IMAGE_TAG when the package list changes, or an existing
+# image from an older run will be reused and the new checks will skip.
+DOCKER_IMAGE="ext4diff:attr-chattr"
 if ! docker image inspect "$DOCKER_IMAGE" >/dev/null 2>&1; then
   echo "building $DOCKER_IMAGE (one-off, needs network)"
   docker build -q -t "$DOCKER_IMAGE" - >/dev/null <<'DOCKERFILE'
 FROM debian:stable-slim
-RUN apt-get update && apt-get install -y --no-install-recommends attr \
+RUN apt-get update && apt-get install -y --no-install-recommends attr e2fsprogs \
     && rm -rf /var/lib/apt/lists/*
 DOCKERFILE
 fi
@@ -40,7 +42,11 @@ rm -rf "$WORK"; mkdir -p "$WORK"
 PASS=0; FAIL=0
 note() { echo "$*" | tee -a "$REPORT"; }
 ok()   { PASS=$((PASS+1)); note "  ok    $1"; }
-bad()  { FAIL=$((FAIL+1)); note "  FAIL  $1"; [ $# -gt 1 ] && note "        $2"; }
+# `bad` must end in a success status. Without it the trailing test is the
+# function's exit code, and it is false whenever there is no detail argument --
+# so the common `cmd && bad "..." || ok "..."` idiom runs *both* arms and the
+# suite reports a failure and a pass for the same check.
+bad()  { FAIL=$((FAIL+1)); note "  FAIL  $1"; [ $# -gt 1 ] && note "        $2"; return 0; }
 expect_eq() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected [$2] got [$3]"; fi; }
 
 [ -x "$DUMP" ] || { echo "build first: make tools"; exit 1; }
@@ -170,6 +176,72 @@ expect_eq "multi-block content matches Linux" "$(cat "$WORK/l2m.bigsum" 2>/dev/n
 
 n=$("$DUMP" "$IMG2" ls /fromlinux/many 2>/dev/null | grep -c "f_")
 expect_eq "we enumerate the kernel's HTree directory" "300" "$n"
+
+# =============================================== protection flags from Linux ==
+#
+# The write suite sets the immutable and append-only bits with debugfs, which
+# proves the driver reads that bit pattern. This proves the bit pattern is the
+# one `chattr` actually writes -- and that after we honour it, Linux still
+# agrees the flags are set.
+
+note ""
+note "chattr protections set by Linux"
+note ""
+
+IMGF="$WORK/flags.img"
+cp "$FIX/ext4_4k.img" "$IMGF"
+
+in_linux '
+  mkdir -p /mnt/t
+  mount -o loop /work/flags.img /mnt/t || { echo "MOUNT-FAILED"; exit 1; }
+  mkdir -p /mnt/t/protected
+  echo -n "do not touch" > /mnt/t/protected/frozen.txt
+  echo -n "line1" > /mnt/t/protected/journal.log
+  command -v chattr >/dev/null || { echo "NO-CHATTR"; umount /mnt/t; exit 1; }
+  chattr +i /mnt/t/protected/frozen.txt
+  chattr +a /mnt/t/protected/journal.log
+  lsattr /mnt/t/protected/ > /work/flags.before
+  sync
+  umount /mnt/t
+' >/dev/null
+
+expect_eq "we see chattr +i as immutable" "immutable" \
+  "$("$DUMP" "$IMGF" stat /protected/frozen.txt 2>/dev/null | sed -n 's/^protected: *//p')"
+expect_eq "we see chattr +a as append-only" "append-only" \
+  "$("$DUMP" "$IMGF" stat /protected/journal.log 2>/dev/null | sed -n 's/^protected: *//p')"
+
+refuses() {  # refuses <description> <argv...>
+  local desc="$1"; shift
+  if "$DUMP" "$IMGF" "$@" >/dev/null 2>&1; then bad "$desc"; else ok "$desc"; fi
+}
+refuses "a file Linux marked immutable is not writable here"  write /protected/frozen.txt "clobbered"
+refuses "a file Linux marked immutable is not removable here" rm /protected/frozen.txt
+
+if "$DUMP" "$IMGF" append /protected/journal.log "line2" >/dev/null 2>&1; then
+  ok "a file Linux marked append-only still accepts an append"
+else
+  bad "a file Linux marked append-only still accepts an append"
+fi
+
+# Back to Linux: the flags must still be exactly what it set, and the append we
+# made must be there.
+in_linux '
+  mkdir -p /mnt/t
+  mount -o loop /work/flags.img /mnt/t || { echo "MOUNT-FAILED"; exit 1; }
+  lsattr /mnt/t/protected/ > /work/flags.after
+  cat /mnt/t/protected/journal.log > /work/flags.log
+  cat /mnt/t/protected/frozen.txt > /work/flags.frozen
+  umount /mnt/t
+' >/dev/null
+
+if diff -q "$WORK/flags.before" "$WORK/flags.after" >/dev/null 2>&1; then
+  ok "Linux still reports the same flags afterwards"
+else
+  bad "Linux still reports the same flags afterwards" \
+      "$(diff "$WORK/flags.before" "$WORK/flags.after" 2>&1 | head -4 | tr '\n' ' ')"
+fi
+expect_eq "our append is what Linux reads back" "line1line2" "$(cat "$WORK/flags.log" 2>/dev/null)"
+expect_eq "the immutable file is byte-for-byte intact" "do not touch" "$(cat "$WORK/flags.frozen" 2>/dev/null)"
 
 # ===================================================== interleaved editing ==
 note ""

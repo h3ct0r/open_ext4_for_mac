@@ -4,14 +4,16 @@
 #   1. read suite          — image-level, no dependencies
 #   2. write suite         — e2fsck after every mutating operation
 #   3. format              — volumes we create, judged by e2fsck and by Linux
-#   4. crash consistency   — cut the write stream everywhere, replay, verify
-#   5. differential        — cross-check against the real Linux ext4 driver
-#   6. mounted driver      — the same crash testing against a real mount
+#   4. open-unlink         — the orphan list, and recovery from a torn one
+#   5. crash consistency   — cut the write stream everywhere, replay, verify
+#   6. differential        — cross-check against the real Linux ext4 driver
+#   7. mounted driver      — the same crash testing against a real mount
 #
-# Stages 4-6 need a running Docker daemon (a real Linux kernel on Apple
-# Silicon); stage 6 additionally needs the signed extension installed and
+# Stages 5-7 need a running Docker daemon (a real Linux kernel on Apple
+# Silicon); stage 7 additionally needs the signed extension installed and
 # enabled. They are skipped with a warning rather than failing the run if that
-# is unavailable, so this is still useful on a machine without it.
+# is unavailable, so this is still useful on a machine without it. Stages 3 and
+# 4 each have one section that wants Docker and skip just that section.
 #
 # Usage:  bash scripts/run_full_validation.sh [--asan]
 # Exits non-zero if any stage that actually ran failed.
@@ -98,22 +100,25 @@ stage "2. write suite" bash Tests/run_write_tests.sh
 # section by itself; the geometry sweep needs nothing but e2fsck.
 stage "3. format" bash Tests/run_format_tests.sh
 
-if docker info >/dev/null 2>&1; then
-  stage "4. crash consistency" bash Tests/run_crash_tests.sh
-  stage "5. differential vs Linux" bash Tests/run_diff_tests.sh
+# Same arrangement: only its cross-check against the Linux kernel needs Docker.
+stage "4. open-unlink recovery" bash Tests/run_orphan_tests.sh
 
-  # Stages 1-5 all drive the core directly through a plain file. Only this one
+if docker info >/dev/null 2>&1; then
+  stage "5. crash consistency" bash Tests/run_crash_tests.sh
+  stage "6. differential vs Linux" bash Tests/run_diff_tests.sh
+
+  # Stages 1-6 all drive the core directly through a plain file. Only this one
   # goes through FSKit, so it is the only evidence about the path a real mount
   # takes. It needs the signed extension installed *and enabled*.
   if pluginkit -m -p com.apple.fskit.fsmodule 2>/dev/null | grep -q "dev.h3ct0r.ext4mac.Ext4FS"; then
-    stage "6. mounted driver" bash Tests/run_mount_crash_tests.sh
+    stage "7. mounted driver" bash Tests/run_mount_crash_tests.sh
   else
-    skip "6. mounted driver" "the FSKit extension is not installed"
+    skip "7. mounted driver" "the FSKit extension is not installed"
   fi
 else
-  skip "4. crash consistency"     "docker daemon not reachable"
-  skip "5. differential vs Linux" "docker daemon not reachable"
-  skip "6. mounted driver"        "docker daemon not reachable"
+  skip "5. crash consistency"     "docker daemon not reachable"
+  skip "6. differential vs Linux" "docker daemon not reachable"
+  skip "7. mounted driver"        "docker daemon not reachable"
 fi
 
 TOTAL=$(( SECONDS - START ))

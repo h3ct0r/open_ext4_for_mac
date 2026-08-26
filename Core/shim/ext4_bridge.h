@@ -195,6 +195,12 @@ typedef enum {
     EXT4B_TYPE_SOCKET,
 } ext4b_item_type;
 
+/* The two ext4 inode flags this driver enforces, from `chattr +i` and
+ * `chattr +a`. Named here because callers need to recognise them; the rest of
+ * the flags word is passed through untouched. */
+#define EXT4B_INODE_IMMUTABLE   0x00000010u
+#define EXT4B_INODE_APPEND_ONLY 0x00000020u
+
 typedef struct {
     uint32_t inode;
     ext4b_item_type type;
@@ -204,7 +210,7 @@ typedef struct {
     uint32_t link_count;
     uint64_t size;
     uint64_t alloc_size;    /* bytes actually allocated on disk         */
-    uint32_t flags;         /* ext4 inode flags (EXT4_INODE_FLAG_*)     */
+    uint32_t flags;         /* ext4 inode flags (EXT4B_INODE_* below)   */
     int64_t  atime, mtime, ctime, crtime;   /* seconds since epoch      */
     uint32_t atime_ns, mtime_ns, ctime_ns, crtime_ns;
     bool     uses_extents;  /* false ⇒ indirect blocks (ext2/3 layout)  */
@@ -353,9 +359,10 @@ int ext4b_unlink(ext4b_device *dev,
  * count reached zero, and the caller owes a matching ext4b_release_inode() once
  * nothing holds the file open any more.
  *
- * This is weaker than ext4's own orphan list, which survives a crash: an
- * unclean shutdown between the two calls leaks the inode until the next
- * e2fsck. lwext4 has no orphan-list support to build on.
+ * The inode is recorded on the volume's orphan list for the duration, so an
+ * unclean shutdown between the two calls is recoverable rather than a
+ * permanent leak -- by ext4b_orphan_cleanup() at the next mount, and equally
+ * by Linux or e2fsck, since the on-disk convention is the same one they use.
  */
 int ext4b_unlink_ex(ext4b_device *dev,
                     uint32_t parent_inode,
@@ -363,10 +370,35 @@ int ext4b_unlink_ex(ext4b_device *dev,
                     bool defer_release,
                     bool *out_unreferenced);
 
-/// Truncate and free an inode left behind by ext4b_unlink_ex().
+/// Truncate and free an inode left behind by ext4b_unlink_ex(), taking it off
+/// the orphan list first.
 /// Returns EBUSY if the inode still has links, rather than destroying a file
 /// that is still reachable.
 int ext4b_release_inode(ext4b_device *dev, uint32_t inode);
+
+/*
+ * Settle whatever an interrupted session left on the orphan list.
+ *
+ * Called automatically at the end of a read-write mount, after journal
+ * recovery. Entries whose link count reached zero are finished off -- blocks
+ * truncated, inode freed; entries that still have a name are dropped from the
+ * list and left untouched, which is how an add that was cut short is undone.
+ *
+ * `*out_freed` and `*out_dropped` count each kind. Both may be NULL.
+ */
+int ext4b_orphan_cleanup(ext4b_device *dev,
+                         uint32_t *out_freed,
+                         uint32_t *out_dropped);
+
+/// Turn the automatic mount-time orphan cleanup off. For tests that need to
+/// look at what an interrupted session actually left on the medium, which an
+/// ordinary read-write mount would have tidied away before they could see it.
+/// On by default; must be called before ext4b_mount().
+void ext4b_set_orphan_cleanup(ext4b_device *dev, bool enabled);
+
+/// The head of the orphan list, or 0 when nothing is on it. For tests: a
+/// deferred delete must show up here, and a clean unmount must leave it empty.
+int ext4b_orphan_head(ext4b_device *dev, uint32_t *out_head);
 
 /// Move/rename an entry, optionally between directories. If a plain file
 /// already exists at the destination it is replaced.

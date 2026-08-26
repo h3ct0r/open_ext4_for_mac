@@ -18,7 +18,17 @@ extension Ext4Volume: FSVolume.RenameOperations {
     /// A read-only volume cannot be renamed, and FSKit is better off knowing
     /// that up front than discovering it when the user has already typed a new
     /// name.
-    var isVolumeRenameInhibited: Bool { isReadOnly }
+    ///
+    /// Read-write because the protocol declares it that way. A get-only
+    /// property compiles, but it does not satisfy the requirement -- the
+    /// compiler calls it a "nearly matches optional requirement" -- and FSKit
+    /// then never reads it, which is exactly the failure mode a silent
+    /// mismatch produces. FSKit reads this once after `loadResource` and
+    /// ignores later changes, so the setter has nothing to do.
+    var isVolumeRenameInhibited: Bool {
+        get { isReadOnly }
+        set { }
+    }
 
     func setVolumeName(_ name: FSFileName) async throws -> FSFileName {
         try requireWritable()

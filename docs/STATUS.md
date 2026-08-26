@@ -129,6 +129,36 @@ read-write whenever the probe rates it safe, and read-only otherwise —
 unsupported features, a dirty journal, or a `metadata_csum_seed` that no longer
 matches the UUID all force read-only.
 
+### Files Linux marked as protected
+
+`chattr +i` and `chattr +a` are how a Linux user says *do not change this*. A
+driver that ignores them removes the protection silently, and the user finds
+out when the file is gone — so every mutating entry point checks:
+
+| | what is refused |
+|---|---|
+| immutable | writes, truncate, chmod/chown/times, xattrs, rename, hard link, and removal — and, for a directory, gaining or losing any entry |
+| append-only | truncate, removal, rename, xattrs, and any write that lies wholly inside the file |
+
+They are reported to macOS as `UF_IMMUTABLE` and `UF_APPEND`, which are exactly
+the same two ideas in the BSD vocabulary, so `ls -lO` shows `uchg` / `uappnd`
+and Finder shows the file as locked. That matters more than it sounds: it turns
+an unexplained *Operation not permitted* into something the user can see the
+reason for. macOS then does the enforcement itself — an append-only file cannot
+even be **opened** for ordinary writing.
+
+Which is what makes the obvious rule for append-only the wrong one. Requiring a
+write to start at end-of-file refuses real appends: the buffer cache rewrites
+whole pages, so appending five bytes to a five-byte file arrives as a ten-byte
+write at offset zero. That was measured on a live mount, not reasoned about,
+and the check is now the one no cache produces — a write that lies entirely
+inside the file and does not reach its end.
+
+Setting or clearing the flags is not supported. lwext4 offers no way to rewrite
+the inode's flags word, and on Linux only root may clear either flag in any
+case. A `chflags` that would really change something is refused rather than
+reported as a success that did not happen; use `chattr -i` on Linux.
+
 ### How it is tested
 
 `e2fsck` runs after **every** mutating operation, not once at the end — a write
@@ -142,26 +172,28 @@ how two genuine lwext4 defects were found; see `patches/lwext4/README.md`.
 ## Validation
 
 ```bash
-make validate           # all six stages, unattended
+make validate           # all seven stages, unattended
 make validate-asan      # the same under AddressSanitizer + UBSan
 make test-format        # stage 3 on its own
-make test-mount-crash   # stage 6 on its own
+make test-orphan        # stage 4 on its own
+make test-mount-crash   # stage 7 on its own
 ```
 
 | Stage | What it proves |
 |---|---|
 | read suite | 41 assertions, content verified byte-for-byte against `debugfs` |
-| write suite | 82 assertions, `e2fsck` after **every** mutating operation |
-| crash consistency | 256 cut points across 12 operations; the write stream is severed at every point, the **real Linux kernel** replays the journal, and `e2fsck` must be clean |
-| differential vs Linux | 28 assertions; volumes round-trip between our driver and the real Linux ext4 driver in both directions, with the kernel log required to be silent |
+| write suite | 101 assertions, `e2fsck` after **every** mutating operation |
 | format | 29 assertions; 117 size/block-size/generation combinations must be `e2fsck`-clean, and the volume must round-trip through the Linux kernel |
-| mounted driver | 17 assertions against a **real mount** — the only stage that goes through FSKit |
+| open-unlink recovery | 23 assertions; every cut point of a deferred delete recovers by *mounting*, and the orphan lists we write are cleaned up by `e2fsck` and by the Linux kernel |
+| crash consistency | 303 cut points across 14 operations; the write stream is severed at every point, the **real Linux kernel** replays the journal, and `e2fsck` must be clean |
+| differential vs Linux | 36 assertions; volumes round-trip between our driver and the real Linux ext4 driver in both directions, with the kernel log required to be silent |
+| mounted driver | 23 assertions against a **real mount** — the only stage that goes through FSKit |
 
-Stages 4–6 use Docker, which on Apple Silicon is a real Linux VM — so the
+Stages 5–7 use Docker, which on Apple Silicon is a real Linux VM — so the
 oracle is the actual ext4 implementation, not another copy of our assumptions.
-They skip with a warning if Docker is not running; stage 6 also skips if the
-signed extension is not installed and enabled. Stage 3 runs either way — only
-its round-trip section needs Docker.
+They skip with a warning if Docker is not running; stage 7 also skips if the
+signed extension is not installed and enabled. Stages 3 and 4 run either way —
+only one section of each needs Docker.
 
 The power-failure model matters: after the cut point, writes are **silently
 discarded while still reporting success**. A real power loss does not hand the
@@ -183,6 +215,7 @@ driver resumed, and the image handed to the Linux kernel to replay.
 |---|---|
 | concurrent readers and writers finish, and the extension goes idle afterwards | FSKit issues volume operations in parallel; every core entry must be serialised or lwext4's block cache corrupts and the volume wedges |
 | seven metadata operations survive a cut taken the instant they return | recovering to *some* consistent state is not enough — a driver that discarded everything would also pass |
+| a deleted-but-still-open file is on the volume's orphan list, and a snapshot taken while one exists is reclaimed by *mounting* it | the orphan list is the only thing that can find such an inode afterwards; this is the check that it is engaged on the FSKit path and not only offline |
 | every snapshot taken under load recovers clean | the actual crash-consistency claim |
 | no snapshot falsely reports filesystem errors | a volume that recovers but reports itself damaged sends the user to a repair tool they do not need |
 | the extension produced no crash report | FSKit relaunches a dead extension and the volume keeps working, so a driver that traps on every unmount otherwise looks perfectly green |
@@ -313,20 +346,70 @@ open; `removeItem` defers freeing **only** for those, and
 unmount all drain the deferred set.
 
 Deferring every delete instead was tried and is worse. The inode then sits with
-no links and no owner until FSKit reclaims it, and a power cut inside that
-window leaves exactly the leak described above — the crash-consistency suite
-caught it as `Block bitmap differences` in 4 of 24 snapshots. ext4 solves this
-with an on-disk orphan list; lwext4 has none, and the modern `orphan_file`
-feature changes where that list lives, so adding one is a larger job than it
-first appears.
+no links and no owner until FSKit reclaims it, widening the window in which a
+power cut leaves exactly the leak described above — the crash-consistency suite
+caught it as `Block bitmap differences` in 4 of 24 snapshots.
 
-What remains, honestly: a crash while a deleted-but-still-open file exists
-leaks that inode until the next `e2fsck`. That window is the one ext4's orphan
-list covers and we do not.
+### The orphan list
 
-`FSKit`'s own `enableOpenUnlinkEmulation` is set, but it changed nothing
-observable here — no hidden temporary file appears and the leak was unaffected,
-with the deployment target at either 15.4 or 26.0.
+That in-memory set says what to do while the driver is running. It says nothing
+about a driver that stops running. ext4's answer is the **orphan list**, and
+this driver now keeps one: a chain of exactly the inodes in that state, rooted
+in the superblock's `s_last_orphan` and threaded through each inode's `i_dtime`
+— which is meaningless until an inode is really deleted, so it is free to be a
+pointer until then.
+
+It is the same on-disk convention Linux and `e2fsck` use, which is the point.
+All three settle a volume the others left:
+
+```
+ours     orphan list: reclaimed 3 interrupted delete(s), dropped 0 stale entries
+e2fsck   Clearing orphaned inode 526 (uid=501, gid=20, mode=0100644, size=60000)
+Linux    EXT4-fs (loop0): 3 orphan inodes deleted
+```
+
+Cleanup runs at the end of every read-write mount, after journal recovery, so a
+volume this driver crashed on comes back whole without anyone reaching for a
+repair tool. Entries whose link count is zero are finished off; entries that
+still have a name are dropped and left alone, which is how an interrupted
+*addition* undoes itself.
+
+**Where it is not atomic, and why that is the shape it is.** Linux journals the
+superblock alongside the inode, so a list edit and the change it protects
+commit together. lwext4 writes the superblock outside the journal
+(`ext4_block_writebytes` goes straight to the device, past both the block cache
+and the transaction), so the two halves land separately and the *order* has to
+do the work instead:
+
+| | order | what a cut in the middle leaves |
+|---|---|---|
+| adding | publish the head, **then** commit the unlink | an inode that is on the list and still has its name — which recovery recognises by the link count and drops. Nothing lost |
+| removing | free the inode, **then** drop it from the list | a list entry pointing at an inode that is already free — which recovery recognises from the inode bitmap and skips |
+
+Both orderings were chosen by measurement, not argument: the opposite choice on
+the removal side failed 6 of 41 cut points with `Deleted inode has zero dtime`,
+and the sweep is what said so.
+
+One case is still imperfect and is documented rather than hidden. The new head
+carries its own next pointer inside the transaction, so a cut between
+publishing the head and committing loses the *rest* of the chain — every other
+inode that happened to be deleted-but-open at that instant. Those leak exactly
+as they did before any of this existed, so it is not a regression; it means a
+volume with two simultaneous open-unlinks is protected for one of them rather
+than both. Closing it needs the superblock inside the transaction, which needs
+the block cache to accept block 0, which `patches/lwext4/0008` deliberately
+forbids.
+
+**`FSKit`'s own `enableOpenUnlinkEmulation` is deliberately not enabled**, and
+the reason it appeared to do nothing earlier turned out to be a mistake worth
+recording: the property was declared get-only, and FSKit's protocol declares it
+read-write, so it never satisfied the requirement and was never read. The
+compiler said as much — *"nearly matches optional requirement"* — in a warning
+that was easy to scroll past. `requestedMountOptions` and
+`isVolumeRenameInhibited` were silently inert for the same reason and are now
+fixed; the emulation is left off on purpose, because it works by keeping a
+hidden directory entry that only FSKit knows to clean up, and an orphan record
+is both invisible and understood by Linux.
 
 ### Renaming
 
@@ -401,10 +484,31 @@ The same core path is fully covered offline: `ext4dump format` builds volumes
 across 117 geometries, all `e2fsck`-clean.
 
 ## Not yet done
-- An on-disk orphan list, so a crash cannot leak a deleted-but-open inode
 - `newfs_fskit` reaches the module but never calls `startFormat`; see below
 - A real structural check; `startCheck` only decides mountability
-- `FSVolumePreallocateOperations` and `FSVolumeAccessCheckOperations`
+- Two simultaneous open-unlinks are crash-protected for one of them, not both
+- `FSVolumeAccessCheckOperations`
+- `FSVolumePreallocateOperations` — deliberately, for now; see below
 - Kernel-offloaded I/O for writes (reads already use it)
-- `startCheck` / `startFormat` for Disk Utility integration
 - Notarised DMG
+
+### Why `preallocateSpace` is not implemented
+
+`fcntl(F_PREALLOCATE)` asks for blocks without content, and ext4 answers it
+with **unwritten extents**: allocated, marked as not-yet-written, and read back
+as zeroes without anyone having written zeroes. lwext4 can *read* unwritten
+extents — `ext4_fs_get_inode_dblk_idx` returns a hole for them — but exposes no
+way to create one.
+
+That leaves two possible implementations and neither is worth shipping.
+Allocating ordinary initialised blocks past end-of-file would hand back
+whatever those blocks previously held the moment the file was extended into
+them, which is a disclosure bug, not a feature. Zero-filling them instead is
+correct but defeats the point: the whole reason to preallocate is that it is
+cheap, and a caller asking for a gigabyte would block writing a gigabyte of
+zeroes — slower than the writes it was trying to avoid.
+
+Not conforming means `F_PREALLOCATE` returns `ENOTSUP`, which callers already
+handle, because plenty of filesystems do not support it. Doing this properly
+means teaching lwext4's extent code to create unwritten extents, which is the
+most delicate code in the vendored tree.

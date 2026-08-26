@@ -52,13 +52,30 @@ final class Ext4Volume: FSVolume {
     var liveItems: [UInt32: Ext4Item] = [:]
     let itemsLock = NSLock()
 
+    /// Take `itemsLock` for the duration of a synchronous body.
+    ///
+    /// Not a convenience: `NSLock.lock()` is unavailable from an async context
+    /// -- an error in Swift 6 -- because a suspension while holding it can
+    /// resume on a different thread and unlock from the wrong one. Every
+    /// critical section here is a handful of dictionary accesses with no
+    /// `await` in it, and this makes that structurally true rather than a
+    /// convention.
+    @inline(__always)
+    func withItems<T>(_ body: () -> T) -> T {
+        itemsLock.lock()
+        defer { itemsLock.unlock() }
+        return body()
+    }
+
     /// Inodes whose last name is gone but which are still allocated, because
     /// the kernel may still have the file open. Guarded by `itemsLock`.
     ///
-    /// This is our stand-in for ext4's orphan list: it lives only in memory, so
-    /// an unclean shutdown with entries still in it leaks those inodes until
-    /// the next `e2fsck`. Every ordinary path -- last close, and unmount --
-    /// drains it.
+    /// This set is the *live* half of the bookkeeping and exists only in
+    /// memory; the durable half is ext4's own orphan list, which the core puts
+    /// the inode on for as long as it is in this state. So an unclean shutdown
+    /// with entries still here is recoverable rather than a leak -- the next
+    /// mount settles them. Every ordinary path -- last close, deactivation,
+    /// reclaim, and unmount -- drains this set first.
     private var pendingRelease: Set<UInt32> = []
 
     /// How many times each inode is currently open. Guarded by `itemsLock`.
@@ -66,24 +83,18 @@ final class Ext4Volume: FSVolume {
 
     /// Whether anything holds this inode open right now.
     func isOpen(_ inode: UInt32) -> Bool {
-        itemsLock.lock()
-        defer { itemsLock.unlock() }
-        return (openCounts[inode] ?? 0) > 0
+        withItems { (openCounts[inode] ?? 0) > 0 }
     }
 
     func notePendingRelease(_ inode: UInt32) {
-        itemsLock.lock()
-        pendingRelease.insert(inode)
-        itemsLock.unlock()
+        withItems { _ = pendingRelease.insert(inode) }
     }
 
     /// Free the inode if it was waiting for its last user to go away.
     /// Returns true when a release actually happened.
     @discardableResult
     func releaseIfPending(_ inode: UInt32) async -> Bool {
-        itemsLock.lock()
-        let waiting = pendingRelease.remove(inode) != nil
-        itemsLock.unlock()
+        let waiting = withItems { pendingRelease.remove(inode) != nil }
         guard waiting else { return false }
 
         do {
@@ -95,9 +106,7 @@ final class Ext4Volume: FSVolume {
         } catch {
             // Put it back: a failure here means the inode is still allocated,
             // and unmount gets another attempt.
-            itemsLock.lock()
-            pendingRelease.insert(inode)
-            itemsLock.unlock()
+            withItems { _ = pendingRelease.insert(inode) }
             Ext4Log.error("could not release inode \(inode): \(error.localizedDescription)")
             return false
         }
@@ -106,10 +115,11 @@ final class Ext4Volume: FSVolume {
     /// Drain everything still waiting. Called on the way out, so that a clean
     /// unmount never leaves an unreferenced inode behind.
     func releaseAllPending() async {
-        itemsLock.lock()
-        let waiting = pendingRelease
-        pendingRelease.removeAll()
-        itemsLock.unlock()
+        let waiting = withItems { () -> Set<UInt32> in
+            let snapshot = pendingRelease
+            pendingRelease.removeAll()
+            return snapshot
+        }
 
         for inode in waiting {
             do {
@@ -168,26 +178,39 @@ final class Ext4Volume: FSVolume {
     // MARK: - Item bookkeeping
 
     func item(for inode: UInt32) -> Ext4Item {
-        itemsLock.lock()
-        defer { itemsLock.unlock() }
-        if let existing = liveItems[inode] { return existing }
-        let fresh = Ext4Item(inode: inode)
-        liveItems[inode] = fresh
-        return fresh
+        withItems {
+            if let existing = liveItems[inode] { return existing }
+            let fresh = Ext4Item(inode: inode)
+            liveItems[inode] = fresh
+            return fresh
+        }
     }
 
-    /// Drop every cached item. Synchronous by design: NSLock must not be held
-    /// across a suspension point.
+    /// Drop every cached item.
     func forgetAllItems() {
-        itemsLock.lock()
-        liveItems.removeAll()
-        itemsLock.unlock()
+        withItems { liveItems.removeAll() }
     }
 
     func forget(_ item: Ext4Item) {
-        itemsLock.lock()
-        liveItems.removeValue(forKey: item.inode)
-        itemsLock.unlock()
+        withItems { _ = liveItems.removeValue(forKey: item.inode) }
+    }
+
+    /// ext4's inode flags, in the BSD `st_flags` vocabulary macOS speaks.
+    ///
+    /// Two of ext4's flags mean exactly what two BSD flags mean, and they are
+    /// the two this driver enforces: `chattr +i` is `UF_IMMUTABLE` and
+    /// `chattr +a` is `UF_APPEND`. Reporting them is what turns a refusal into
+    /// something the user can see — Finder shows the file as locked, `ls -lO`
+    /// names the flag — instead of an unexplained "Operation not permitted".
+    ///
+    /// The rest of ext4's flags word describes on-disk layout (extents, inline
+    /// data, hashed directories) and has no BSD counterpart, so it is not
+    /// reported here.
+    static func bsdFlags(from a: ext4b_attrs) -> UInt32 {
+        var flags: UInt32 = 0
+        if a.flags & EXT4B_INODE_IMMUTABLE != 0   { flags |= UInt32(UF_IMMUTABLE) }
+        if a.flags & EXT4B_INODE_APPEND_ONLY != 0 { flags |= UInt32(UF_APPEND) }
+        return flags
     }
 
     /// Synchronous attribute fetch. Callers must already be on the executor.
@@ -231,10 +254,7 @@ final class Ext4Volume: FSVolume {
         // reading inhibitKernelOffloadedIO and sends every write down the
         // blockmap path. Both of these must always be answered.
         if requested.contains(.flags) {
-            // BSD flags (UF_HIDDEN, UF_IMMUTABLE, ...). ext4's own inode flags
-            // are a different space and are reported separately; nothing here
-            // maps onto them, so report none set.
-            target.flags = 0
+            target.flags = Self.bsdFlags(from: a)
         }
         if requested.contains(.parentID) {
             let parent = parentHint ?? parentInode(of: a)
@@ -281,9 +301,7 @@ final class Ext4Volume: FSVolume {
             if rc == 0, found != 0 { return found }
         }
 
-        itemsLock.lock()
-        let hint = liveItems[a.inode]?.parent
-        itemsLock.unlock()
+        let hint = withItems { liveItems[a.inode]?.parent }
         return hint ?? UInt32(EXT4B_ROOT_INO)
     }
 

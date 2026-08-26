@@ -246,7 +246,8 @@ static bool is_write_cmd(const char *c)
     static const char *w[] = { "mkdir", "create", "write", "append", "rm",
                                "mv", "ln", "symlink", "truncate", "chmod",
                                "chown", "setxattr", "rmxattr", "script",
-                               "format", "label", NULL };
+                               "format", "label", "rm-open", "rm-cycle",
+                               "release", NULL };
     for (int i = 0; w[i]; i++)
         if (strcmp(c, w[i]) == 0) return true;
     return false;
@@ -266,12 +267,19 @@ int main(int argc, char **argv)
             "  cat <path>         write file contents to stdout\n"
             "  extents <path>     show the logical->physical extent map\n"
             "  xattr <path>       list extended attributes\n"
+            "  orphans            show the head of the orphan list\n"
             "\nwrite commands (open the image read-write):\n"
             "  mkdir <path>            create a directory\n"
             "  create <path> [mode]    create an empty file\n"
             "  write <path> <text>     write text at offset 0\n"
             "  append <path> <text>    append text at end of file\n"
             "  rm <path>               remove a file or empty directory\n"
+            "  rm-open <path>...       remove the name only, as if the file\n"
+            "                          were still open: the inode stays\n"
+            "                          allocated and joins the orphan list\n"
+            "  rm-cycle <path>...      rm-open followed by the release, i.e.\n"
+            "                          the whole open-unlink lifecycle\n"
+            "  release <inode>...      free an inode left by rm-open\n"
             "  mv <src> <dst>          rename/move\n"
             "  ln <target> <name>      create a hard link\n"
             "  symlink <target> <name> create a symbolic link\n"
@@ -384,6 +392,12 @@ int main(int argc, char **argv)
         goto out;
     }
 
+    /* A read-write mount normally settles the orphan list before returning,
+     * which is exactly what a test trying to inspect an interrupted delete
+     * does not want. */
+    if (getenv("EXT4DUMP_KEEP_ORPHANS"))
+        ext4b_set_orphan_cleanup(dev, false);
+
     int r = ext4b_mount(dev, !writable);
     if (r != 0) {
         fprintf(stderr, "mount failed: %s\n", ext4b_strerror(r));
@@ -425,6 +439,15 @@ int main(int argc, char **argv)
         printf("alloc:      %" PRIu64 "\n", a.alloc_size);
         printf("layout:     %s%s\n", a.uses_extents ? "extents" : "indirect blocks",
                a.inline_data ? " + inline data" : "");
+        /* The two flags a Linux user sets with chattr to stop a file being
+         * changed. Worth showing, because a write that returns EPERM is
+         * otherwise indistinguishable from a permissions problem. */
+        if (a.flags & (EXT4B_INODE_IMMUTABLE | EXT4B_INODE_APPEND_ONLY))
+            printf("protected:  %s%s%s\n",
+                   (a.flags & EXT4B_INODE_IMMUTABLE)   ? "immutable" : "",
+                   ((a.flags & EXT4B_INODE_IMMUTABLE) &&
+                    (a.flags & EXT4B_INODE_APPEND_ONLY)) ? " + " : "",
+                   (a.flags & EXT4B_INODE_APPEND_ONLY) ? "append-only" : "");
         printf("mtime:      %lld.%09u\n", a.mtime, a.mtime_ns);
         printf("crtime:     %lld.%09u\n", a.crtime, a.crtime_ns);
 
@@ -443,6 +466,12 @@ int main(int argc, char **argv)
         r = ext4b_listxattr(dev, ino, on_xattr, NULL);
         if (r != 0)
             fprintf(stderr, "listxattr: %s\n", ext4b_strerror(r));
+
+    } else if (strcmp(cmd, "orphans") == 0) {
+        uint32_t head = 0;
+        r = ext4b_orphan_head(dev, &head);
+        if (r != 0) { fprintf(stderr, "orphans: %s\n", ext4b_strerror(r)); rc = 1; }
+        else printf("orphan head: %u\n", head);
 
     } else if (writable) {
         /* ---------------------------------------------------- mutations -- */
@@ -483,6 +512,44 @@ int main(int argc, char **argv)
             if (!parent) { rc = 1; goto unmount; }
             r = ext4b_unlink(dev, parent, name, name_len);
             if (r != 0) { fprintf(stderr, "rm: %s\n", ext4b_strerror(r)); rc = 1; }
+
+        } else if (strcmp(cmd, "rm-open") == 0 || strcmp(cmd, "rm-cycle") == 0) {
+            /* Delete a name while pretending something still holds the file
+             * open, which is what the mounted driver does for a file with a
+             * live descriptor. The inode stays allocated and goes on the
+             * orphan list; rm-cycle then completes the release, rm-open leaves
+             * it there so a crash can be simulated mid-lifecycle. */
+            if (argc < 4) { fprintf(stderr, "%s needs a path\n", cmd); rc = 2; goto unmount; }
+            bool cycle = (strcmp(cmd, "rm-cycle") == 0);
+            for (int i = 3; i < argc; i++) {
+                uint32_t parent = resolve_parent(dev, argv[i], &name, &name_len);
+                if (!parent) { rc = 1; goto unmount; }
+                uint32_t victim = resolve(dev, argv[i], NULL);
+                bool unreferenced = false;
+                r = ext4b_unlink_ex(dev, parent, name, name_len, true, &unreferenced);
+                if (r != 0) {
+                    fprintf(stderr, "%s: %s\n", cmd, ext4b_strerror(r));
+                    rc = 1;
+                    break;
+                }
+                printf("unlinked %s (inode %u%s)\n", argv[i], victim,
+                       unreferenced ? ", deferred" : "");
+                if (cycle && unreferenced) {
+                    r = ext4b_release_inode(dev, victim);
+                    if (r != 0) {
+                        fprintf(stderr, "release: %s\n", ext4b_strerror(r));
+                        rc = 1;
+                        break;
+                    }
+                }
+            }
+
+        } else if (strcmp(cmd, "release") == 0) {
+            if (argc < 4) { fprintf(stderr, "release needs an inode number\n"); rc = 2; goto unmount; }
+            for (int i = 3; i < argc; i++) {
+                r = ext4b_release_inode(dev, (uint32_t)strtoul(argv[i], NULL, 10));
+                if (r != 0) { fprintf(stderr, "release: %s\n", ext4b_strerror(r)); rc = 1; break; }
+            }
 
         } else if (strcmp(cmd, "mv") == 0) {
             if (argc < 5) { fprintf(stderr, "mv needs <src> <dst>\n"); rc = 2; goto unmount; }

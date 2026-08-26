@@ -86,6 +86,7 @@ struct ext4b_device {
     bool     mounted;
     bool     journal_running;
     bool     bcache_ready;
+    bool     skip_orphan_cleanup;   /* tests only; see ext4b_set_orphan_cleanup */
 };
 
 /*
@@ -518,6 +519,28 @@ int ext4b_mount(ext4b_device *dev, bool read_only)
                 return r;
             }
             dev->journal_running = true;
+        }
+
+        /*
+         * Finish anything the last session was in the middle of deleting.
+         * After journal recovery, because the list itself is journaled state;
+         * after the journal is running, because settling an entry means
+         * freeing blocks and that has to be a transaction like any other.
+         */
+        uint32_t freed = 0, dropped = 0;
+        int orphan_r = dev->skip_orphan_cleanup
+                     ? EOK
+                     : ext4b_orphan_cleanup(dev, &freed, &dropped);
+        if (orphan_r != EOK) {
+            bridge_log(3, "orphan-list cleanup failed; the volume is usable "
+                          "but some space may still be unreclaimed");
+        } else if (freed || dropped) {
+            char msg[128];
+            snprintf(msg, sizeof(msg),
+                     "orphan list: reclaimed %u interrupted delete(s), "
+                     "dropped %u stale entry/entries",
+                     freed, dropped);
+            bridge_log(1, msg);
         }
     }
 
@@ -1158,6 +1181,8 @@ int ext4b_getxattr(ext4b_device *dev, uint32_t inode,
 
 #include <ext4_balloc.h>
 #include <ext4_ialloc.h>
+#include <ext4_bitmap.h>
+#include <ext4_block_group.h>
 #include <ext4_journal.h>
 #include <ext4_dir_idx.h>
 #include <ext4_trans.h>
@@ -1450,6 +1475,51 @@ static int unlink_child(struct ext4_fs *fs,
     return EOK;
 }
 
+/* ------------------------------------------------ immutable / append-only -- */
+/*
+ * `chattr +i` and `chattr +a`. These are the two inode flags a Linux user sets
+ * specifically to stop a file being changed, so a driver that ignores them
+ * hands back exactly the protection the user asked for -- and the user has no
+ * way to know until the file is gone.
+ *
+ * The rules below are Linux's, from may_delete(), vfs_link(), notify_change()
+ * and xattr_permission():
+ *
+ *   immutable    nothing about the file may change: not its contents, not its
+ *                size, not its attributes, not its extended attributes, not
+ *                its names. A directory that is immutable cannot gain or lose
+ *                entries either.
+ *   append-only  the file may grow but its existing contents may not be
+ *                rewritten in place. Size changes through truncate are refused
+ *                even when they would grow the file, because truncate is not
+ *                an append. Attribute changes are still allowed; only root can
+ *                clear the flag, and clearing it is not something this driver
+ *                offers at all. See ext4b_write for what "in place" can and
+ *                cannot mean once a buffer cache is in the way.
+ *
+ * Both refuse with EPERM, which is what Linux returns and what the tools that
+ * set these flags expect to see.
+ */
+
+static bool is_immutable(struct ext4_inode_ref *ref)
+{
+    return ext4_inode_has_flag(ref->inode, EXT4_INODE_FLAG_IMMUTABLE);
+}
+
+static bool is_append_only(struct ext4_inode_ref *ref)
+{
+    return ext4_inode_has_flag(ref->inode, EXT4_INODE_FLAG_APPEND);
+}
+
+/* Removing or renaming an entry changes both the directory and the thing named
+ * in it, so both have to allow it. */
+static bool unlink_forbidden(struct ext4_inode_ref *dir,
+                             struct ext4_inode_ref *victim)
+{
+    return is_immutable(dir) || is_append_only(dir)
+        || is_immutable(victim) || is_append_only(victim);
+}
+
 /* ---------------------------------------------------------------- create -- */
 
 static int create_common(ext4b_device *dev, struct ext4_fs *fs,
@@ -1471,6 +1541,11 @@ static int create_common(ext4b_device *dev, struct ext4_fs *fs,
     r = ext4_fs_get_inode_ref(fs, parent_inode, &parent);
     if (r != EOK)
         return txn_finish(dev, fs, r);
+
+    if (is_immutable(&parent)) {
+        ext4_fs_put_inode_ref(&parent);
+        return txn_finish(dev, fs, EPERM);
+    }
 
     if (!ext4_inode_is_type(&fs->sb, parent.inode, EXT4_INODE_MODE_DIRECTORY)) {
         ext4_fs_put_inode_ref(&parent);
@@ -1614,6 +1689,13 @@ int ext4b_hardlink(ext4b_device *dev,
         return txn_finish(dev, fs, r);
     }
 
+    /* A new name is a change to the file as much as to the directory. */
+    if (is_immutable(&parent) || is_immutable(&child) || is_append_only(&child)) {
+        ext4_fs_put_inode_ref(&child);
+        ext4_fs_put_inode_ref(&parent);
+        return txn_finish(dev, fs, EPERM);
+    }
+
     /* POSIX forbids hard links to directories: they would let a user create
      * cycles that fsck cannot untangle. */
     if (ext4_inode_is_type(&fs->sb, child.inode, EXT4_INODE_MODE_DIRECTORY)) {
@@ -1633,6 +1715,310 @@ int ext4b_hardlink(ext4b_device *dev,
     return txn_finish(dev, fs, r);
 }
 
+/* ---------------------------------------------------------- orphan list -- */
+/*
+ * An inode that has lost its last name but is still open cannot be freed yet.
+ * ext4 records those on a singly-linked list so that a crash in that window is
+ * recoverable instead of a permanent leak: the head is the superblock's
+ * s_last_orphan, and each entry stores the next inode number in its own
+ * i_dtime -- a field that means nothing until the inode is really deleted.
+ *
+ * This is deliberately the same on-disk convention Linux and e2fsck already
+ * use. A volume left with orphans by this driver is cleaned up correctly by
+ * either of them, and one left by Linux is cleaned up by us.
+ *
+ * The one thing that cannot be copied from Linux is atomicity. Linux journals
+ * the superblock alongside the inode, so a list edit and the change it
+ * protects commit together. lwext4 writes the superblock outside the journal
+ * (ext4_block_writebytes goes straight to the device, bypassing both the block
+ * cache and the transaction), so the two halves land separately. The orderings
+ * below are chosen so that whichever half survives, the worst outcome is a
+ * leaked inode that e2fsck reclaims -- never a live file destroyed:
+ *
+ *   adding    publish the head first, commit the unlink second. Cut in
+ *             between, the volume has a listed inode that still has its name
+ *             and its link -- and recovery, ours and Linux's alike, tells the
+ *             two apart by the link count and simply drops such an entry. The
+ *             file is untouched and nothing leaks. Committing first would
+ *             instead leave the inode unreferenced and on no list for the
+ *             width of one device write, which is the leak this exists to
+ *             close.
+ *   removing  free the inode first, drop it from the list second -- the
+ *             opposite way round, and for the same reason. Cut in between,
+ *             the list points at an inode that is already free, which
+ *             recovery recognises from the inode bitmap and skips; cut before
+ *             it, the entry is still there and recovery finishes the job.
+ *             Detaching first would leave the inode unreferenced and on no
+ *             list for the width of one commit. This only works for the head
+ *             of the list, because that is the one entry whose removal is a
+ *             superblock write; taking out a middle entry means rewriting its
+ *             predecessor's inode, which is journaled and cannot be ordered
+ *             against the superblock, so that path detaches first and accepts
+ *             the window.
+ *
+ * One case is still not perfect, and it is the reason the ordering above is a
+ * choice rather than an answer. The new head's own next pointer travels in the
+ * transaction, so a cut between publishing the head and committing loses the
+ * rest of the chain -- every *other* inode that was already deleted-but-open
+ * at that instant. Those leak, exactly as they did before any of this existed,
+ * so it is not a regression; it just means a volume with two simultaneous
+ * open-unlinks is protected for one of them rather than both. Closing it
+ * properly needs the superblock inside the transaction, which needs the block
+ * cache to accept block 0, which patch 0008 deliberately forbids.
+ */
+
+/* A corrupt or circular chain must not be able to spin the driver. */
+#define ORPHAN_WALK_LIMIT 4096
+
+static uint32_t orphan_next(struct ext4_inode_ref *ref)
+{
+    return ext4_inode_get_del_time(ref->inode);
+}
+
+static void orphan_set_next(struct ext4_inode_ref *ref, uint32_t next)
+{
+    ext4_inode_set_del_time(ref->inode, next);
+    ref->dirty = true;
+}
+
+/* Reserved inodes are never orphans, and neither is anything past the end of
+ * the table. Anything else terminates the walk rather than being followed. */
+static bool orphan_plausible(struct ext4_fs *fs, uint32_t ino)
+{
+    uint32_t first = ext4_get32(&fs->sb, first_inode);
+    if (first < EXT4B_ROOT_INO)
+        first = EXT4_GOOD_OLD_FIRST_INO;
+    return ino >= first && ino <= ext4_get32(&fs->sb, inodes_count);
+}
+
+/*
+ * Is this inode actually allocated? lwext4's free_inode clears the bitmap bit
+ * but leaves the inode body alone, so link count and mode look exactly the
+ * same before and after -- the bitmap is the only thing that can tell them
+ * apart, and telling them apart is what stops recovery freeing an inode twice.
+ */
+static int inode_in_use(struct ext4_fs *fs, uint32_t index, bool *out)
+{
+    uint32_t per_group = ext4_get32(&fs->sb, inodes_per_group);
+    if (per_group == 0 || index == 0)
+        return EINVAL;
+
+    struct ext4_block_group_ref bg_ref;
+    int r = ext4_fs_get_block_group_ref(fs, (index - 1) / per_group, &bg_ref);
+    if (r != EOK)
+        return r;
+
+    struct ext4_block b;
+    r = ext4_block_get(fs->bdev, &b,
+                       ext4_bg_get_inode_bitmap(bg_ref.block_group, &fs->sb));
+    if (r != EOK) {
+        ext4_fs_put_block_group_ref(&bg_ref);
+        return r;
+    }
+
+    *out = ext4_bmap_is_bit_set(b.data, (index - 1) % per_group);
+
+    ext4_block_set(fs->bdev, &b);
+    ext4_fs_put_block_group_ref(&bg_ref);
+    return EOK;
+}
+
+/* The head is the only part of the list that is not inside an inode, so this
+ * is the only place the superblock is written for it. It goes to the medium
+ * immediately -- an orphan record that is still sitting in a cache when the
+ * power fails protects nothing. */
+static int orphan_publish_head(ext4b_device *dev, struct ext4_fs *fs,
+                               uint32_t ino)
+{
+    ext4_set32(&fs->sb, last_orphan, ino);
+    int r = ext4_sb_write(fs->bdev, &fs->sb);
+    if (r != EOK)
+        return r;
+    if (dev->flush_fn)
+        return dev->flush_fn(dev->ctx);
+    return EOK;
+}
+
+/* Take an inode off the list. Runs in its own transaction: patching a
+ * mid-chain predecessor is an inode write and has to be journaled like any
+ * other. */
+static int orphan_del(ext4b_device *dev, struct ext4_fs *fs, uint32_t ino)
+{
+    uint32_t head = ext4_get32(&fs->sb, last_orphan);
+    if (head == 0 || ino == 0)
+        return EOK;
+
+    int r = txn_begin(fs);
+    if (r != EOK)
+        return r;
+
+    /* What follows the victim, so the chain can be closed over it. */
+    uint32_t after = 0;
+    struct ext4_inode_ref victim;
+    r = ext4_fs_get_inode_ref(fs, ino, &victim);
+    if (r != EOK)
+        return txn_finish(dev, fs, r);
+    after = orphan_next(&victim);
+    if (!orphan_plausible(fs, after))
+        after = 0;
+    /* Clear the pointer while the inode is still ours to write. Leaving a
+     * stale inode number in i_dtime would look like a deletion timestamp far
+     * in the future to anything reading the inode afterwards. */
+    orphan_set_next(&victim, 0);
+    ext4_fs_put_inode_ref(&victim);
+
+    if (head == ino) {
+        r = txn_finish(dev, fs, EOK);
+        if (r != EOK)
+            return r;
+        return orphan_publish_head(dev, fs, after);
+    }
+
+    uint32_t prev = head;
+    for (uint32_t guard = 0; prev != 0 && guard < ORPHAN_WALK_LIMIT; guard++) {
+        if (!orphan_plausible(fs, prev))
+            break;
+
+        struct ext4_inode_ref ref;
+        r = ext4_fs_get_inode_ref(fs, prev, &ref);
+        if (r != EOK)
+            return txn_finish(dev, fs, r);
+
+        uint32_t next = orphan_next(&ref);
+        if (next == ino) {
+            orphan_set_next(&ref, after);
+            ext4_fs_put_inode_ref(&ref);
+            return txn_finish(dev, fs, EOK);
+        }
+        ext4_fs_put_inode_ref(&ref);
+        prev = next;
+    }
+
+    /* Not on the list. Not an error: release_inode is also reached for inodes
+     * that were never deferred. */
+    return txn_finish(dev, fs, EOK);
+}
+
+/*
+ * Walk the list left behind by an interrupted session and settle every entry.
+ * Called once at mount, after journal recovery, so that a volume this driver
+ * crashed on comes back whole without anyone having to run e2fsck.
+ *
+ * Two kinds of entry can be on the list, and they are told apart by the link
+ * count exactly as Linux tells them apart:
+ *
+ *   links == 0  the delete was interrupted after the name went away. Finish
+ *               it: truncate the blocks and free the inode.
+ *   links  > 0  the inode still has a name, so this is an entry we published
+ *               and then crashed before -- or after -- the transaction that
+ *               was supposed to unlink it. Drop it from the list and leave the
+ *               file alone. Linux truncates such an inode to its own i_size
+ *               here, which for an intact file is a no-op; not touching it at
+ *               all reaches the same result without needing i_size to be
+ *               trustworthy.
+ */
+int ext4b_orphan_cleanup(ext4b_device *dev, uint32_t *out_freed,
+                         uint32_t *out_dropped)
+{
+    if (out_freed)   *out_freed = 0;
+    if (out_dropped) *out_dropped = 0;
+
+    WRITE_PROLOGUE(dev, fs);
+
+    for (uint32_t guard = 0; guard < ORPHAN_WALK_LIMIT; guard++) {
+        uint32_t ino = ext4_get32(&fs->sb, last_orphan);
+        if (ino == 0)
+            return EOK;
+
+        if (!orphan_plausible(fs, ino)) {
+            /* An inode number outside the table, or one of the reserved ones,
+             * cannot be an orphan under any writer -- so there is nothing in
+             * it for anyone to recover, and leaving it would mean complaining
+             * about the same superblock at every mount from now on. Linux
+             * clears the head and stops here too. */
+            bridge_log(3, "orphan list head is not a usable inode; clearing it");
+            return orphan_publish_head(dev, fs, 0);
+        }
+
+        int r = txn_begin(fs);
+        if (r != EOK)
+            return r;
+
+        struct ext4_inode_ref ref;
+        r = ext4_fs_get_inode_ref(fs, ino, &ref);
+        if (r != EOK)
+            return txn_finish(dev, fs, r);
+
+        uint32_t next = orphan_next(&ref);
+        if (!orphan_plausible(fs, next))
+            next = 0;
+
+        /* The release may have got as far as freeing the inode and no
+         * further, in which case there is nothing left to do but drop the
+         * entry. Freeing it a second time would corrupt the group counters. */
+        bool in_use = true;
+        if (inode_in_use(fs, ino, &in_use) != EOK)
+            in_use = true;   /* if we cannot tell, do not touch it */
+
+        r = orphan_publish_head(dev, fs, next);
+        if (r != EOK) {
+            ext4_fs_put_inode_ref(&ref);
+            return txn_finish(dev, fs, r);
+        }
+
+        bool freed = false;
+        if (!in_use) {
+            /* Already freed. Its i_dtime holds a real deletion time now, and
+             * clearing it would turn a settled inode back into e2fsck's
+             * "deleted inode with zero dtime", so the inode is left exactly as
+             * it is. */
+            ext4_fs_put_inode_ref(&ref);
+            r = txn_finish(dev, fs, EOK);
+            if (r == EOK && out_dropped)
+                (*out_dropped)++;
+        } else if (ext4_inode_get_links_cnt(ref.inode) != 0) {
+            orphan_set_next(&ref, 0);
+            ext4_fs_put_inode_ref(&ref);
+            r = txn_finish(dev, fs, EOK);
+            if (r == EOK && out_dropped)
+                (*out_dropped)++;
+        } else {
+            ext4_inode_set_del_time(ref.inode, now_seconds());
+            ref.dirty = true;
+            r = ext4_fs_truncate_inode(&ref, 0);
+            if (r == EOK)
+                r = ext4_fs_free_inode(&ref);
+            ext4_fs_put_inode_ref(&ref);
+            r = txn_finish(dev, fs, r);
+            freed = (r == EOK);
+            if (freed && out_freed)
+                (*out_freed)++;
+        }
+        if (r != EOK)
+            return r;
+    }
+
+    bridge_log(3, "orphan list is longer than expected or circular; stopping");
+    return EOK;
+}
+
+void ext4b_set_orphan_cleanup(ext4b_device *dev, bool enabled)
+{
+    if (dev)
+        dev->skip_orphan_cleanup = !enabled;
+}
+
+int ext4b_orphan_head(ext4b_device *dev, uint32_t *out_head)
+{
+    if (!dev || !dev->mounted || !out_head)
+        return EINVAL;
+    struct ext4_fs *fs = bridge_fs(dev);
+    if (!fs)
+        return EINVAL;
+    *out_head = ext4_get32(&fs->sb, last_orphan);
+    return EOK;
+}
+
 /* ---------------------------------------------------------------- unlink -- */
 
 int ext4b_unlink(ext4b_device *dev,
@@ -1647,6 +2033,16 @@ int ext4b_release_inode(ext4b_device *dev, uint32_t inode)
     WRITE_PROLOGUE(dev, fs);
     if (inode < EXT4B_ROOT_INO)
         return EINVAL;
+
+    /* One file deleted while open is the overwhelmingly common case, and it is
+     * the head of the list. Only a middle entry has to come off before it is
+     * freed -- see the ordering note above. */
+    bool is_head = (ext4_get32(&fs->sb, last_orphan) == inode);
+    if (!is_head) {
+        int dr = orphan_del(dev, fs, inode);
+        if (dr != EOK)
+            return dr;
+    }
 
     int r = txn_begin(fs);
     if (r != EOK)
@@ -1665,13 +2061,38 @@ int ext4b_release_inode(ext4b_device *dev, uint32_t inode)
         return txn_finish(dev, fs, EBUSY);
     }
 
+    /* Somebody may have got here first -- mount-time cleanup settles exactly
+     * these inodes, and a caller that also remembers owing a release will ask
+     * for one it no longer owes. Freeing an inode twice does not fail, it
+     * quietly decrements the group's free count a second time and leaves the
+     * volume reporting "Free inodes count wrong", so this is checked rather
+     * than assumed. Doing nothing is the honest answer: the inode is already
+     * in the state the caller wanted. */
+    bool in_use = true;
+    if (inode_in_use(fs, inode, &in_use) == EOK && !in_use) {
+        ext4_fs_put_inode_ref(&ref);
+        return txn_finish(dev, fs, EOK);
+    }
+
+    /* Read the successor out before the deletion time overwrites the field it
+     * lives in. */
+    uint32_t next = orphan_next(&ref);
+    if (!orphan_plausible(fs, next))
+        next = 0;
+
     ext4_inode_set_del_time(ref.inode, now_seconds());
+    ref.dirty = true;
     r = ext4_fs_truncate_inode(&ref, 0);
     if (r == EOK)
         r = ext4_fs_free_inode(&ref);
 
     ext4_fs_put_inode_ref(&ref);
-    return txn_finish(dev, fs, r);
+    r = txn_finish(dev, fs, r);
+
+    if (r == EOK && is_head)
+        (void)orphan_publish_head(dev, fs, next);
+
+    return r;
 }
 
 int ext4b_unlink_ex(ext4b_device *dev,
@@ -1715,6 +2136,12 @@ int ext4b_unlink_ex(ext4b_device *dev,
         return txn_finish(dev, fs, r);
     }
 
+    if (unlink_forbidden(&parent, &child)) {
+        ext4_fs_put_inode_ref(&child);
+        ext4_fs_put_inode_ref(&parent);
+        return txn_finish(dev, fs, EPERM);
+    }
+
     r = unlink_child(fs, &parent, &child, name, (uint32_t)name_len);
     if (r != EOK) {
         ext4_fs_put_inode_ref(&child);
@@ -1725,19 +2152,21 @@ int ext4b_unlink_ex(ext4b_device *dev,
     /* Last name gone. Normally that means releasing the blocks and the inode
      * right here; with defer_release the caller has said the file may still be
      * open, so the inode stays allocated until it tells us otherwise. */
+    bool joined_orphans = false;
+    uint32_t prev_head = ext4_get32(&fs->sb, last_orphan);
     if (ext4_inode_get_links_cnt(child.inode) == 0) {
-        /* Stamp the deletion time in both paths. An inode with no links and no
-         * dtime is what e2fsck calls a "deleted inode with zero dtime" -- the
-         * state a crash used to leave behind mid-defer, because ext4 expects
-         * an inode in that position to be on the orphan list and we have no
-         * orphan list to put it on. Recording the time makes an interrupted
-         * delete look like a completed one, which recovery already handles. */
-        ext4_inode_set_del_time(child.inode, now_seconds());
-
         if (defer_release) {
+            /* An inode with no links, no dtime and no orphan record is what
+             * e2fsck calls a "deleted inode with zero dtime": ext4 expects
+             * anything in that position to be on the orphan list, so that is
+             * where it goes. i_dtime carries the next pointer until the inode
+             * is really deleted, which is the same use Linux puts it to. */
+            orphan_set_next(&child, prev_head);
+            joined_orphans = true;
             if (out_unreferenced)
                 *out_unreferenced = true;
         } else {
+            ext4_inode_set_del_time(child.inode, now_seconds());
             r = ext4_fs_truncate_inode(&child, 0);
             if (r == EOK)
                 r = ext4_fs_free_inode(&child);
@@ -1746,7 +2175,25 @@ int ext4b_unlink_ex(ext4b_device *dev,
 
     ext4_fs_put_inode_ref(&child);
     ext4_fs_put_inode_ref(&parent);
-    return txn_finish(dev, fs, r);
+
+    /* Before the commit, not after -- see the ordering note above. */
+    if (r == EOK && joined_orphans) {
+        int pr = orphan_publish_head(dev, fs, child_ino);
+        if (pr != EOK) {
+            bridge_log(3, "could not record the deleted-but-open inode on the "
+                          "orphan list; a crash before it is closed would leak "
+                          "it");
+            joined_orphans = false;
+        }
+    }
+
+    r = txn_finish(dev, fs, r);
+
+    /* The unlink did not happen after all, so neither should the list entry. */
+    if (r != EOK && joined_orphans)
+        orphan_publish_head(dev, fs, prev_head);
+
+    return r;
 }
 
 /* ---------------------------------------------------------------- rename -- */
@@ -1795,6 +2242,14 @@ int ext4b_rename(ext4b_device *dev,
         goto out;
     have_child = true;
 
+    /* A rename takes a name away from one directory and gives it to another,
+     * so it is subject to the same protection as an unlink at the source and
+     * a create at the destination. */
+    if (unlink_forbidden(&sp, &child) || is_immutable(&dp)) {
+        r = EPERM;
+        goto out;
+    }
+
     /* If something already occupies the destination, remove it first --
      * rename(2) replaces the target atomically. */
     struct ext4_dir_search_result dst_res;
@@ -1807,6 +2262,14 @@ int ext4b_rename(ext4b_device *dev,
             r = ext4_fs_get_inode_ref(fs, victim_ino, &victim);
             if (r != EOK)
                 goto out;
+
+            /* Renaming over a protected file destroys it just as surely as
+             * unlinking it would. */
+            if (unlink_forbidden(&dp, &victim)) {
+                ext4_fs_put_inode_ref(&victim);
+                r = EPERM;
+                goto out;
+            }
 
             r = unlink_child(fs, &dp, &victim, dst_name, (uint32_t)dst_len);
             if (r == EOK && ext4_inode_get_links_cnt(victim.inode) == 0) {
@@ -1883,6 +2346,28 @@ int ext4b_write(ext4b_device *dev,
 
     const uint32_t bsize = ext4_sb_get_block_size(&fs->sb);
     uint64_t fsize = ext4_inode_get_size(&fs->sb, ref.inode);
+
+    /*
+     * Append-only, at the level this layer can see it.
+     *
+     * The obvious rule -- the write must start exactly at end-of-file -- is
+     * wrong here, and measurably so: through a real mount an append does not
+     * arrive as a write at EOF. macOS's buffer cache rewrites whole pages, so
+     * appending five bytes to a five-byte file arrives as a ten-byte write at
+     * offset zero, and a strict check refuses it. The kernel does the real
+     * enforcement anyway, and does it better than this layer could: with
+     * UF_APPEND reported, open(2) for anything but O_APPEND fails with EPERM
+     * before a byte reaches us.
+     *
+     * What is left worth checking is the case no cache produces: a write that
+     * lies wholly inside the existing file and does not reach its end. That is
+     * an overwrite by any reading, and it is refused.
+     */
+    if (is_immutable(&ref) ||
+        (is_append_only(&ref) && offset + count < fsize)) {
+        ext4_fs_put_inode_ref(&ref);
+        return txn_finish(dev, fs, EPERM);
+    }
 
     /* Blocks the file already has backing for. */
     uint32_t have_blocks = (uint32_t)((fsize + bsize - 1) / bsize);
@@ -1976,6 +2461,11 @@ int ext4b_truncate(ext4b_device *dev, uint32_t inode, uint64_t new_size)
         return txn_finish(dev, fs, EISDIR);
     }
 
+    if (is_immutable(&ref) || is_append_only(&ref)) {
+        ext4_fs_put_inode_ref(&ref);
+        return txn_finish(dev, fs, EPERM);
+    }
+
     uint64_t old_size = ext4_inode_get_size(&fs->sb, ref.inode);
 
     if (new_size < old_size) {
@@ -2023,6 +2513,13 @@ int ext4b_setattr(ext4b_device *dev,
     if (r != EOK)
         return txn_finish(dev, fs, r);
 
+    /* Append-only leaves attributes alone -- only the size is protected, and
+     * that went through ext4b_truncate above. Immutable means what it says. */
+    if (is_immutable(&ref)) {
+        ext4_fs_put_inode_ref(&ref);
+        return txn_finish(dev, fs, EPERM);
+    }
+
     if (mask & EXT4B_SET_MODE) {
         uint32_t m = ext4_inode_get_mode(&fs->sb, ref.inode);
         m = (m & EXT4_INODE_MODE_TYPE_MASK) | (attrs->mode & 0x0FFF);
@@ -2065,6 +2562,13 @@ int ext4b_setxattr(ext4b_device *dev, uint32_t inode,
     if (r != EOK)
         return txn_finish(dev, fs, r);
 
+    /* Linux refuses xattr changes on both, not just immutable: an append-only
+     * file whose metadata can be rewritten is not append-only. */
+    if (is_immutable(&ref) || is_append_only(&ref)) {
+        ext4_fs_put_inode_ref(&ref);
+        return txn_finish(dev, fs, EPERM);
+    }
+
     r = ext4_xattr_set(&ref, name_index, short_name, short_len, value, value_len);
     if (r == EOK)
         touch(fs, &ref, TOUCH_CTIME);
@@ -2091,6 +2595,11 @@ int ext4b_removexattr(ext4b_device *dev, uint32_t inode, const char *name)
     r = ext4_fs_get_inode_ref(fs, inode, &ref);
     if (r != EOK)
         return txn_finish(dev, fs, r);
+
+    if (is_immutable(&ref) || is_append_only(&ref)) {
+        ext4_fs_put_inode_ref(&ref);
+        return txn_finish(dev, fs, EPERM);
+    }
 
     r = ext4_xattr_remove(&ref, name_index, short_name, short_len);
     if (r == EOK)

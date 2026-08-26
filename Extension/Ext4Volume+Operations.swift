@@ -29,24 +29,38 @@ extension Ext4Volume: FSVolume.Operations {
     /// Ask FSKit to mark the mount read-only when the volume must not be
     /// written, so the restriction is enforced at the VFS layer rather than
     /// only by our own operations returning EROFS.
+    ///
+    /// The setter exists because the protocol declares this read-write and a
+    /// get-only property does not satisfy it -- the compiler says so, as
+    /// "nearly matches optional requirement", and the property is then simply
+    /// never read. FSKit only reads this once, just after `mount` replies, and
+    /// the header says changing it later has no effect, so there is nothing
+    /// for a setter to do.
     @available(macOS 26.4, *)
     var requestedMountOptions: FSVolume.MountOptions {
-        isReadOnly ? .readOnly : []
+        get { isReadOnly ? .readOnly : [] }
+        set { }
     }
 
-    /// Let FSKit keep an unlinked-but-open file in the namespace until its last
-    /// close, because ext4 on its own does not.
-    ///
-    /// Without this, `removeItem` drops the last link, the inode is freed, and
-    /// any write the still-open descriptor makes afterwards allocates blocks
-    /// onto a dead inode. The data reads back correctly for the lifetime of the
-    /// descriptor, so nothing looks wrong -- but nothing ever frees those
-    /// blocks either, and `e2fsck` reports them as
-    /// `Block bitmap differences: -(4420--4483)` once the volume is unmounted.
-    /// A long-running process that repeatedly writes to files it has already
-    /// deleted would leak the volume away.
-    @available(macOS 26.0, *)
-    var enableOpenUnlinkEmulation: Bool { true }
+    //
+    // FSKit's own open-unlink emulation is deliberately *not* enabled.
+    //
+    // It works by keeping the file in the namespace under a hidden name until
+    // its last close, which is the right answer for a filesystem that has no
+    // way to describe "deleted but still in use" on the medium -- FAT, for
+    // instance. ext4 does have one: the orphan list, which this driver now
+    // maintains (see ext4b_unlink_ex and ext4b_orphan_cleanup).
+    //
+    // Two mechanisms would be worse than either alone. The emulation leaves a
+    // real directory entry behind if the machine loses power mid-way, and it
+    // is an entry only FSKit knows to clean up -- a Linux box would find a
+    // stray hidden file on the volume and no reason to remove it. An orphan
+    // record is invisible, and Linux, e2fsck and this driver all know what it
+    // means.
+    //
+    // Not implementing the property at all is how the emulation stays off; the
+    // header is explicit that this is the default.
+    //
 
     /// The one core call that does not go through the executor.
     ///
@@ -154,6 +168,20 @@ extension Ext4Volume: FSVolume.Operations {
         }
         if wanted.contains(.modifyTime) {
             mask |= EXT4B_SET_MTIME.rawValue; attrs.mtime = Int64(request.modifyTime.tv_sec)
+        }
+
+        // Flags can be read but not written. lwext4 offers no way to rewrite
+        // the inode's flags word, and on Linux only root may clear immutable or
+        // append-only in any case. A request that asks for the flags already
+        // there costs nothing and is allowed through -- macOS sends those while
+        // copying files. One that would really change something is refused,
+        // because reporting a success that did not happen is how a user ends up
+        // believing a file is unlocked when it is not.
+        if wanted.contains(.flags) {
+            let current = try await executor.run { [self] in
+                Ext4Volume.bsdFlags(from: try fetchAttributes(inode: ext4Item.inode))
+            }
+            guard request.flags == current else { throw Ext4Error.posix(EPERM) }
         }
 
         if mask != 0 {

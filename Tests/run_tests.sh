@@ -17,8 +17,11 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); printf '  \033[32mok\033[0m   %s\n' "$1"; }
-bad()  { FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "$1"; [ $# -gt 1 ] && printf '         %s\n' "$2"; }
-
+# `bad` must end in a success status. Without it the trailing test is the
+# function's exit code, and it is false whenever there is no detail argument --
+# so the common `cmd && bad "..." || ok "..."` idiom runs *both* arms and the
+# suite reports a failure and a pass for the same check.
+bad()  { FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "$1"; [ $# -gt 1 ] && printf '         %s\n' "$2"; return 0; }
 expect_eq() { # desc expected actual
   if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected [$2], got [$3]"; fi
 }

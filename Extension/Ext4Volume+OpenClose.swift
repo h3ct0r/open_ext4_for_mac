@@ -15,36 +15,35 @@ import Ext4Core
 /// descriptor afterwards, and writes through it would allocate blocks onto an
 /// inode nothing references.
 ///
-/// Deferring *every* delete would fix that and cost something worse. The inode
-/// then sits with no links and no owner for as long as it takes FSKit to
-/// reclaim it, and a power cut inside that window leaves blocks marked in use
-/// with nothing pointing at them — which the crash-consistency suite catches as
-/// `Block bitmap differences`. ext4 solves this with an on-disk orphan list;
-/// lwext4 has none, and adding one is a larger job than it looks because the
-/// modern `orphan_file` feature changes where the list lives.
+/// Deferring *every* delete would fix that and cost something worse: the inode
+/// would sit with no links and no owner for as long as it takes FSKit to
+/// reclaim it, widening the window in which a power cut leaves blocks marked in
+/// use with nothing pointing at them. So the deferral is confined to the case
+/// that actually needs it — a file nobody has open is freed immediately.
 ///
-/// So the deferral is confined to the case that actually needs it. A file
-/// nobody has open is freed immediately, exactly as before.
+/// The window that remains is covered on the medium rather than in memory: a
+/// deferred inode goes on ext4's orphan list, so a crash while one exists is
+/// recoverable by the next mount (see `ext4b_orphan_cleanup`), by `e2fsck`, or
+/// by Linux.
 extension Ext4Volume: FSVolume.OpenCloseOperations {
 
     func openItem(_ item: FSItem, modes: FSVolume.OpenModes) async throws {
         guard let ext4Item = item as? Ext4Item else { throw Ext4Error.invalid }
-        itemsLock.lock()
-        openCounts[ext4Item.inode, default: 0] += 1
-        itemsLock.unlock()
+        withItems { openCounts[ext4Item.inode, default: 0] += 1 }
     }
 
     func closeItem(_ item: FSItem, modes: FSVolume.OpenModes) async throws {
         guard let ext4Item = item as? Ext4Item else { throw Ext4Error.invalid }
 
-        itemsLock.lock()
-        let remaining = (openCounts[ext4Item.inode] ?? 0) - 1
-        if remaining > 0 {
-            openCounts[ext4Item.inode] = remaining
-        } else {
-            openCounts.removeValue(forKey: ext4Item.inode)
+        let remaining = withItems { () -> Int in
+            let left = (openCounts[ext4Item.inode] ?? 0) - 1
+            if left > 0 {
+                openCounts[ext4Item.inode] = left
+            } else {
+                openCounts.removeValue(forKey: ext4Item.inode)
+            }
+            return left
         }
-        itemsLock.unlock()
 
         // Last close of a file that was unlinked while open: this is the moment
         // its inode can finally go.

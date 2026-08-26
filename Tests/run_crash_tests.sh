@@ -94,6 +94,12 @@ sweep mkdir     ""                                   mkdir /a
 sweep create    ""                                   create /f.txt
 sweep write     "create /f.txt"                      write /f.txt "some file content here"
 sweep unlink    "create /f.txt"                      rm /f.txt
+# Deleting a file that something still has open. The name goes, the inode does
+# not, and the volume carries an orphan-list entry until the descriptor closes
+# -- so a cut anywhere in here has to leave either a file or a reclaimable
+# orphan, never an inode that nothing points at.
+sweep unlink_open  $'create /o.txt\nwrite /o.txt xxxxxxxxxxxxxxxxxxxx' rm-open /o.txt
+sweep unlink_cycle $'create /c.txt\nwrite /c.txt xxxxxxxxxxxxxxxxxxxx' rm-cycle /c.txt
 sweep rmdir     "mkdir /d"                           rm /d
 sweep rename    "create /a.txt"                      mv /a.txt /b.txt
 sweep rename_x  $'mkdir /src\nmkdir /dst\ncreate /src/f' mv /src/f /dst/f

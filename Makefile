@@ -129,6 +129,12 @@ test-diff: tools
 test-format: tools
 	@bash Tests/run_format_tests.sh
 
+# Open-unlink and the orphan list: recovery by this driver, by e2fsck and by
+# the Linux kernel, plus lists deliberately damaged the way a power cut damages
+# them. Only the Linux cross-check needs Docker; it skips itself without one.
+test-orphan: tools
+	@bash Tests/run_orphan_tests.sh
+
 # Crash consistency against the mounted driver rather than the offline core.
 # Needs the extension signed, installed and enabled; skips with a message if
 # it is not. This is the only suite that exercises FSBlockDeviceResource.
@@ -142,7 +148,7 @@ test-mount-crash:
 check-extension:
 	@bash scripts/check_extension.sh || true
 
-# Everything, unattended, one stage after another. Stages 3 and 4 need Docker.
+# Everything, unattended, one stage after another. Stages 5-7 need Docker.
 validate:
 	@bash scripts/run_full_validation.sh
 
@@ -224,8 +230,15 @@ $(BUILD)/$(APP_NAME).app/Contents/MacOS/$(APP_NAME): App/Ext4MacApp.swift
 # carrying the com.apple.developer.fskit.fsmodule entitlement.
 # See docs/SIGNING.md. Override SIGN_ID on the command line:
 #   make sign SIGN_ID="Developer ID Application: Your Name (TEAMID)"
-
-SIGN_ID ?= -
+#
+# Auto-detected when the keychain holds exactly one Developer ID Application
+# identity, because getting this wrong is expensive to notice: an ad-hoc
+# signature cannot carry the fskit.fsmodule entitlement, so FSKit drops the
+# module -- and a dropped module looks exactly like a disabled one. Falls back
+# to ad-hoc, which sign.sh warns about, when there is no single obvious choice.
+SIGN_ID ?= $(shell security find-identity -v -p codesigning 2>/dev/null | \
+             sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | \
+             sort -u | awk 'NR==1 { only = $$0 } END { if (NR == 1) print only }')
 # Team ID is baked into the entitlements at sign time. Derived from the
 # provisioning profile so there is one source of truth.
 TEAM_ID ?= $(shell security cms -D -i Extension/Ext4FS.provisionprofile 2>/dev/null | \
