@@ -69,7 +69,7 @@ ARGON2_CFLAGS := $(CFLAGS) -Wno-everything -I$(ARGON2_DIR)
 
 CORE_LIB := $(BUILD)/lib/libext4core.a
 
-.PHONY: all core clean test test-asan test-crash test-diff test-format test-crypto test-orphan test-luks test-mount-crash test-mount-luks check-extension check-signing validate tools entitlements check-submodule patch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil
+.PHONY: all core clean test test-asan test-crash test-diff test-format test-crypto test-orphan test-luks test-mount-crash test-mount-luks test-kill-recovery check-extension check-signing validate tools entitlements check-submodule patch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil
 
 all: app
 
@@ -180,6 +180,12 @@ test-luks: tools
 # macOS writes is handed back to cryptsetup and the Linux kernel to read.
 test-mount-luks:
 	@bash Tests/run_mount_luks_tests.sh
+
+# What a killed driver leaves behind, and whether the journal recovers it.
+# Passes on a disk image; EXT4_KILL_DEVICE=diskN points it at real media, which
+# it ERASES, and which is where the missing write barrier shows.
+test-kill-recovery:
+	@bash Tests/run_kill_recovery_tests.sh
 
 # Crash consistency against the mounted driver rather than the offline core.
 # Needs the extension signed, installed and enabled; skips with a message if

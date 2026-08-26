@@ -933,26 +933,34 @@ recoverable by `e2fsck`, but inconsistent. **Eject before unplugging**, which
 flushes and closes the journal cleanly, and run `e2fsck` if a volume is ever
 pulled live.
 
-One question is still open and worth settling before anything is built on top
-of this. Two mechanisms would produce the damage that was observed, and they
-have different fixes:
+### It is the medium, and that is now a controlled result
 
-* **the device reordered the writes**, because nothing issued a barrier — in
-  which case no amount of care in this driver helps, and the honest response
-  is to shrink the window;
-* **dirty metadata was still held in lwext4's block cache** and never reached
-  the medium, in which case checkpointing more aggressively fixes it outright.
+Two mechanisms could produce the damage, and they have opposite fixes: the
+device reordered the writes, or dirty metadata never left lwext4's cache. The
+second is fixable here; the first is not.
 
-The crash suites argue for the first: they cut the write stream at 303 points
-and freeze the *mounted* driver with `SIGSTOP` at 31 more, and both pass. Both
-methods preserve issue order — `SIGSTOP` freezes the process while its issued
-writes complete — so they test the second mechanism thoroughly and cannot test
-the first at all. That is consistent with a disk image passing and a USB stick
-failing, but it is not proof.
+`Tests/run_kill_recovery_tests.sh` settles it. It kills the extension outright
+in the middle of a metadata-heavy workload — directories, inodes, blocks, link
+counts and an extended attribute apiece — then lets the driver replay its own
+journal on the next mount and hands the result to `e2fsck`. That is precisely
+what happened to the stick, twice.
 
-The experiment that would settle it is to run `Tests/run_mount_crash_tests.sh`
-against a physical stick rather than an image. It needs a disk that can be
-erased.
+| target | after journal replay |
+|---|---|
+| 64 MB disk image | **5 of 5 clean** |
+| a 16 GB USB stick | **2 of 2 damaged** |
+
+Same driver, same workload, same kill, same journal code. The only variable is
+what the writes land on. The journal machinery and its recovery are correct —
+five rounds of arbitrary process death recover perfectly — and what fails is
+the medium preserving the order that recovery depends on. An image reaches
+APFS through the page cache in issue order; a USB stick has its own write
+cache and reorders freely.
+
+The suite runs on an image in `make validate`, where it proves recovery works.
+Pointed at real media with `EXT4_KILL_DEVICE=diskN` — which erases it — it
+becomes the detector for the barrier this driver does not have, and the way to
+tell whether any future fix actually worked.
 
 ## Not yet done
 - `newfs_fskit` reaches the module but never calls `startFormat`; see below

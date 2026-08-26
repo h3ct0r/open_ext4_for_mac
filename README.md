@@ -47,6 +47,7 @@ make validate
 | differential vs Linux | 36 assertions, both directions |
 | mounted driver | 23 assertions against a live FSKit mount |
 | encrypted, mounted | 35 assertions; a LUKS volume through FSKit, judged by Linux |
+| recovery after a kill | the driver killed mid-write, then made to replay its own journal |
 
 A file deleted while something still has it open goes on ext4's own **orphan
 list**, so a crash in that window is recoverable by the next mount rather than

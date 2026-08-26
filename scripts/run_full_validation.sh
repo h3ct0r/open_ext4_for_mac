@@ -120,9 +120,11 @@ if docker info >/dev/null 2>&1; then
   if pluginkit -m -p com.apple.fskit.fsmodule 2>/dev/null | grep -q "dev.h3ct0r.ext4mac.Ext4FS"; then
     stage "9. mounted driver" bash Tests/run_mount_crash_tests.sh
     stage "10. encrypted volumes, mounted" bash Tests/run_mount_luks_tests.sh
+    stage "11. recovery after a kill" bash Tests/run_kill_recovery_tests.sh
   else
     skip "9. mounted driver" "the FSKit extension is not installed"
     skip "10. encrypted volumes, mounted" "the FSKit extension is not installed"
+    skip "11. recovery after a kill" "the FSKit extension is not installed"
   fi
 else
   skip "6. LUKS containers"       "docker daemon not reachable"
@@ -130,6 +132,7 @@ else
   skip "8. differential vs Linux" "docker daemon not reachable"
   skip "9. mounted driver"        "docker daemon not reachable"
   skip "10. encrypted volumes, mounted" "docker daemon not reachable"
+  skip "11. recovery after a kill"      "docker daemon not reachable"
 fi
 
 TOTAL=$(( SECONDS - START ))
