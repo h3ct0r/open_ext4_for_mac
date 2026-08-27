@@ -117,6 +117,7 @@ final class BlockDeviceBridge {
         // this medium could be written safely is worth knowing before anyone
         // decides to write to it, and answering it read-only costs one ioctl
         // and touches nothing.
+        Self.probeMetadataFamily(resource)
         self.barrierFD = Self.findBarrierDescriptor(bsdName: resource.bsdName)
         if isWritable && barrierFD == nil {
             Ext4Log.io.error("""
@@ -179,6 +180,34 @@ final class BlockDeviceBridge {
                 """)
         }
         return nil
+    }
+
+    /// Ask the metadata I/O family one question and write down the answer.
+    ///
+    /// Log-only: nothing here changes what the driver does. It exists because
+    /// the family's unavailability is the reason this module has no write
+    /// barrier, and "still EIO" needs to be a measurement taken on the build
+    /// in front of us rather than a fact remembered from a previous one --
+    /// especially while entitlements are being changed to try to open it.
+    ///
+    /// One page at offset 0: aligned to `blockSize` and `physicalBlockSize`
+    /// alike, a length the documentation cannot object to, and a region every
+    /// volume has.
+    static func probeMetadataFamily(_ resource: FSBlockDeviceResource) {
+        let length = 4096
+        let buf = UnsafeMutableRawBufferPointer.allocate(byteCount: length,
+                                                        alignment: 4096)
+        defer { buf.deallocate() }
+
+        do {
+            try resource.metadataRead(into: buf, startingAt: 0, length: length)
+            Ext4Log.io.info("metadata family: metadataRead OK -- the write barrier is available")
+        } catch {
+            Ext4Log.io.error("""
+                metadata family: metadataRead \
+                \(error.localizedDescription, privacy: .public)
+                """)
+        }
     }
 
     deinit {

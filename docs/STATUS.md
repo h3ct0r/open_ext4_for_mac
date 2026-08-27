@@ -968,19 +968,66 @@ squarely at the medium — "this drive has no barrier" — while the ioctls
 underneath had been saying `EPERM` the whole time. Each call reports its own
 result now.
 
-So the picture is consistent with the metadata I/O family, rather than an
-alternative to it: this module is permitted to read and write the device and
-nothing else. Apple's `msdos` gets `metadataFlush`; we get `EIO`. Apple's
-modules presumably get disk ioctls; we get `EPERM`. One boundary, two
-symptoms.
+The kernel then named it. Turning on sandbox violation reporting while the
+probe runs:
 
-What is left, in ascending order of unpleasantness: find what actually
-provisions the metadata family for a third-party module, which would give the
-sanctioned barrier and make all of this unnecessary; or add a privileged
-helper that holds the device open and issues the barrier over XPC, which
-would work and would cost a root daemon plus an XPC round trip per
-transaction; or keep removable media read-only by default, which is where the
-driver already stands.
+```
+Sandbox: Ext4FS deny(1) file-ioctl path:/dev/rdiskN ioctl-command:(_IO "d" 22)
+Sandbox: Ext4FS deny(1) file-ioctl path:/dev/rdiskN ioctl-command:(_IO "d" 24)
+```
+
+`_IO('d', 22)` is `DKIOCSYNCHRONIZECACHE` exactly; `'d', 24` is
+`DKIOCGETBLOCKSIZE`. So this is not a guess about what `EPERM` implies — it is
+the **App Sandbox's `file-ioctl` rule**, refusing the barrier by name. FSKit
+hands us the descriptor and lets us read and write through it; what is denied
+is the ioctl, not the access.
+
+### The metadata family is not a sandbox denial
+
+That made the entitlement worth testing, because Apple's two modules differ in
+exactly one place. `msdos` uses the whole metadata family and carries
+`com.apple.security.exception.iokit-user-client-class` for
+`AppleLIFSUserClient`; `exfat` uses none of the family and carries no such
+exception. Otherwise their entitlements are identical to this module's. The
+family is documented as access to the Kernel Buffer Cache, and `lifs` is a
+loaded kext — a good three-point fit.
+
+It was tested and it is wrong. Signing with the third-party form,
+`com.apple.security.temporary-exception.iokit-user-client-class`, changed
+nothing: `metadataRead` still returns `EIO`, from a build verified to carry
+the entitlement. More decisively, **`metadataRead` produces no sandbox
+violation at all** — the log names every denied `file-ioctl` and says nothing
+about an `iokit-open`. Whatever refuses the metadata family, it is not the
+sandbox, so no entitlement will open it.
+
+Two separate walls, then, not one:
+
+| | what refuses it | evidence |
+|---|---|---|
+| `DKIOCSYNCHRONIZECACHE` | App Sandbox `file-ioctl` | denial logged by name and ioctl number |
+| metadata I/O family | something inside FSKit or LiveFS | `EIO` with no violation logged anywhere |
+
+The entitlement was reverted rather than left in: one that demonstrably does
+nothing has no business in a signed binary.
+
+What is left, in ascending order of unpleasantness:
+
+- ~~**Widen the sandbox.**~~ Tested, and it does not work. The denial is a
+  file rule, so the matching exception is
+  `com.apple.security.temporary-exception.files.absolute-path.read-write`.
+  Signed with `/dev/` — the only form that could cover a device node whose
+  name is not known until mount time — the denial comes back **byte for byte
+  identical**, same operation, same ioctl numbers. A file-path exception
+  grants `file-read` and `file-write`; it does not grant `file-ioctl`, and
+  there is no public entitlement that does. Reverted immediately: it was a
+  diagnostic, and shipping read-write access to every device node on the
+  machine in exchange for nothing would have been a poor trade even if it had
+  worked.
+- **A privileged helper** holding the device open and issuing the barrier over
+  XPC. No widening of the extension's sandbox, since the helper does the
+  ioctl. Costs a root daemon and an XPC round trip per transaction.
+- **Keep removable media read-only by default**, which is where the driver
+  already stands.
 
 ### Two ordering holes remain above it
 
