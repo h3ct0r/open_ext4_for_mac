@@ -86,8 +86,12 @@ note "workload: $(wc -l < "$WORKLOAD" | tr -d ' ') operations, $TOTAL writes"
 
 # Cut points spread across the whole run, not clustered at the start where
 # only the first transaction is in flight.
+# Dense on purpose. Seven points missed a real failure: transaction batching
+# corrupted recovery at one specific cut, and this suite passed it because none
+# of its cut points landed near enough. A sweep whose spacing is coarser than
+# the failures it looks for is a sweep that reports what it did not check.
 POINTS=()
-for frac in 5 15 30 45 60 75 90; do
+for frac in 3 8 14 20 26 33 40 47 54 61 68 75 82 89 95; do
   POINTS+=( $(( TOTAL * frac / 100 )) )
 done
 

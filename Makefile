@@ -104,8 +104,10 @@ $(PATCH_STAMP): $(PATCHES) | check-submodule
 	    :; \
 	  elif git -C $(LWEXT4_DIR) apply "$(CURDIR)/$$p" 2>/dev/null; then \
 	    echo "applied $$p"; \
-	  else \
+	  elif git -C $(LWEXT4_DIR) apply --check "$(CURDIR)/$$p" 2>/dev/null; then \
 	    echo "error: failed to apply $$p"; exit 1; \
+	  else \
+	    echo "note: $$p applies to a file with local edits; leaving it alone"; \
 	  fi; \
 	done
 	@touch $@
@@ -121,6 +123,12 @@ patch: $(PATCH_STAMP)
 # on rather than as a missing patch.
 #
 # So verify instead of trusting, and re-apply if anything is gone. Fourteen
+# There are three states, not two, and conflating the last two is its own trap.
+# A patch may be applied (the reverse-check succeeds), missing (the forward
+# check succeeds, so re-apply it), or neither -- which means the file has been
+# edited further, which is exactly what developing a new patch looks like. The
+# first version re-applied in that case and broke the build.
+#
 # `git apply --check` runs cost milliseconds; the confusion costs an hour.
 verify-patches: $(PATCH_STAMP)
 	@missing=""; \

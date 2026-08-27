@@ -39,8 +39,26 @@
  * a desktop volume needs far more to avoid thrashing metadata reads. */
 #define BRIDGE_BCACHE_BLOCKS 1024
 
-/* How many mutations may share one journal transaction. See txn_finish. */
-#define BRIDGE_TXN_BATCH 16
+/* How many mutations may share one journal transaction. See txn_finish.
+ *
+ * One, which is to say off, and that is not where this started. Batching is
+ * implemented, gives an eleven-fold speedup on metadata-heavy work, and
+ * corrupts volumes -- but only under write reordering, which is to say only on
+ * real hardware. A plain truncated write stream recovers cleanly at every cut
+ * point with batching on; the same cuts with the drive model reordering what
+ * was in flight do not.
+ *
+ * The likely mechanism, unconfirmed: writes that are not part of the
+ * transaction -- the filesystem superblock, and the journal's own superblock
+ * recording where the log starts -- go through ext4_block_writebytes, outside
+ * the journal entirely. Committing every mutation barriered those into place
+ * constantly. Batching widens the window in which they can be reordered
+ * against the log they describe, and replay then reads the wrong range.
+ *
+ * It is off until that is understood, because the failure is silent filesystem
+ * corruption and the reward is speed. EXT4B_TXN_BATCH turns it on for anyone
+ * measuring. */
+#define BRIDGE_TXN_BATCH 1
 
 /* ============================================================== logging == */
 
@@ -1427,6 +1445,42 @@ static void txn_abort(struct ext4_fs *fs)
  * operations touching a few dozen blocks each sits far inside the smallest
  * journal mkfs will create. */
 
+/* Is the open transaction full?
+ *
+ * The operation count is the cheap bound and it is not the real one. lwext4's
+ * jbd has no notion of a transaction being too large for the journal: it
+ * allocates journal blocks from a ring as the transaction commits, and when the
+ * ring runs out it purges one checkpointed transaction and carries on. With a
+ * transaction big enough, that wraps into blocks the same transaction is still
+ * using, and recovery then replays a log that overwrote itself. Linux avoids
+ * this by reserving credits per handle up front; there is nothing equivalent
+ * here.
+ *
+ * It is journal *size* that decides, not operation count, which is why this was
+ * so easy to miss: sixteen operations were harmless on a 256 MB volume and
+ * corrupted a 64 MB one, whose journal is the 4 MB minimum. The reorder suite
+ * ran on the larger image and passed.
+ *
+ * So the real bound is the number of blocks the transaction has dirtied
+ * against the journal's capacity. A quarter is deliberately cautious: each
+ * dirty block needs a journal block plus descriptor and commit overhead, and
+ * being wrong here corrupts filesystems rather than slowing them down.
+ */
+static bool txn_must_commit(ext4b_device *dev, struct ext4_fs *fs)
+{
+    if (dev->txn_ops >= dev->txn_batch)
+        return true;
+
+#if CONFIG_JOURNALING_ENABLE
+    if (fs->jbd_journal && fs->curr_trans) {
+        uint32_t maxlen = jbd_get32(&fs->jbd_journal->jbd_fs->sb, maxlen);
+        if (maxlen && (uint32_t)fs->curr_trans->data_cnt > maxlen / 4)
+            return true;
+    }
+#endif
+    return false;
+}
+
 /* Close a mutation.
  *
  * The transaction is no longer committed here on every call. It stays open and
@@ -1465,7 +1519,7 @@ static int txn_finish(ext4b_device *dev, struct ext4_fs *fs, int r)
     }
 
     dev->txn_ops++;
-    if (dev->txn_ops < dev->txn_batch)
+    if (!txn_must_commit(dev, fs))
         return EOK;
 
     r = txn_commit(fs);
