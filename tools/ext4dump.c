@@ -11,6 +11,7 @@
 #include "luks.h"
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -24,6 +25,7 @@
 
 /* One write held in the modelled drive's volatile cache; see below. */
 typedef struct {
+    uint64_t seq;               /* issue index; names this write in the trace */
     uint64_t off;
     size_t   len;
     uint8_t *data;
@@ -58,6 +60,7 @@ typedef struct {
     uint32_t       rng;             /* seeded; drives eviction and the crash */
     int            reorder_drop;     /* percent of the pending queue lost */
     bool           ignore_barriers;  /* a drive that lies about flushing */
+    FILE          *trace;            /* EXT4DUMP_TRACE; NULL means silent */
 
     /*
      * Progress, for the one operation slow enough to need it.
@@ -148,8 +151,31 @@ static void progress_tick(file_ctx *c, bool final)
  * and exactly what could not be tested here before.
  */
 
+/*
+ * The trace: one line per cache-model event, to wherever EXT4DUMP_TRACE
+ * points ("-" or "1" for stderr, anything else a path).
+ *
+ * What it is for: when a cut leaves a filesystem the kernel cannot recover,
+ * the damage says almost nothing about the cause. The trace says which writes
+ * landed and which were dropped, relative to which barriers -- and
+ * Tests/classify_trace.sh turns the offsets into write classes (journal
+ * superblock, log, home metadata), which is the difference between a
+ * diagnosis and a guess.
+ */
+static void trace_ev(file_ctx *c, const char *fmt, ...)
+{
+    if (!c->trace)
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(c->trace, fmt, ap);
+    va_end(ap);
+    fputc('\n', c->trace);
+}
+
 /* Grow the pending queue by one entry, taking a copy of the caller's bytes. */
-static int cache_append(file_ctx *c, uint64_t off, const void *buf, size_t len)
+static int cache_append(file_ctx *c, uint64_t seq, uint64_t off, const void *buf,
+                        size_t len)
 {
     if (c->pending_count == c->pending_cap) {
         size_t cap = c->pending_cap ? c->pending_cap * 2 : 256;
@@ -165,6 +191,7 @@ static int cache_append(file_ctx *c, uint64_t off, const void *buf, size_t len)
         return EIO;
     memcpy(copy, buf, len);
 
+    c->pending[c->pending_count].seq  = seq;
     c->pending[c->pending_count].off  = off;
     c->pending[c->pending_count].len  = len;
     c->pending[c->pending_count].data = copy;
@@ -194,6 +221,7 @@ static void cache_forget(file_ctx *c, size_t from)
 static int cache_commit(file_ctx *c)
 {
     int rc = 0;
+    trace_ev(c, "TRC BARRIER pend=%zu", c->pending_count);
     for (size_t i = 0; i < c->pending_count; i++)
         if (cache_apply(c, i) != 0)
             rc = EIO;
@@ -247,6 +275,9 @@ static int cache_evict(file_ctx *c)
         if (!evict[i])
             continue;
         if (cache_apply(c, i) != 0) { free(evict); return EIO; }
+        trace_ev(c, "TRC EVICT seq=%llu off=%llu len=%zu",
+                 (unsigned long long)c->pending[i].seq,
+                 (unsigned long long)c->pending[i].off, c->pending[i].len);
     }
 
     /* Compact, keeping the survivors in issue order. */
@@ -292,12 +323,20 @@ static void cache_crash(file_ctx *c)
     }
 
     size_t keep = n - (n * (size_t)c->reorder_drop) / 100;
-    for (size_t k = 0; k < keep; k++)
+    trace_ev(c, "TRC CRASH seed=%u pend=%zu keep=%zu",
+             c->reorder_seed, n, keep);
+    for (size_t k = 0; k < keep; k++) {
         (void)cache_apply(c, order[k]);
-
-    if (getenv("EXT4DUMP_TRACE_WRITES"))
-        fprintf(stderr, "CRASH seed=%u: %zu pending, %zu committed reordered\n",
-                c->reorder_seed, n, keep);
+        trace_ev(c, "TRC CRASH-APPLY seq=%llu off=%llu len=%zu",
+                 (unsigned long long)c->pending[order[k]].seq,
+                 (unsigned long long)c->pending[order[k]].off,
+                 c->pending[order[k]].len);
+    }
+    for (size_t k = keep; k < n; k++)
+        trace_ev(c, "TRC CRASH-DROP seq=%llu off=%llu len=%zu",
+                 (unsigned long long)c->pending[order[k]].seq,
+                 (unsigned long long)c->pending[order[k]].off,
+                 c->pending[order[k]].len);
 
     free(order);
     cache_forget(c, 0);
@@ -349,17 +388,16 @@ static int file_write(void *ctx, const void *buf, uint64_t off, size_t len)
     }
     c->written += len;
     progress_tick(c, false);
-    if (getenv("EXT4DUMP_TRACE_WRITES"))
-        fprintf(stderr, "W%-3ld off=%-10llu blk=%-8llu len=%zu\n",
-                c->writes, (unsigned long long)off,
-                (unsigned long long)(off / 4096), len);
+    trace_ev(c, "TRC W seq=%ld off=%llu len=%zu",
+             c->writes, (unsigned long long)off, len);
+    long seq = c->writes;
     c->writes++;
 
     /* Into the cache, not onto the medium. Only a barrier puts it there. */
     if (c->cache_bytes) {
         if (c->pending_bytes + len > c->cache_bytes && cache_evict(c) != 0)
             return EIO;
-        return cache_append(c, off, buf, len);
+        return cache_append(c, (uint64_t)seq, off, buf, len);
     }
 
     ssize_t n = pwrite(c->fd, buf, len, (off_t)off);
@@ -388,8 +426,10 @@ static int file_flush(void *ctx)
          * a real and depressingly common thing. Modelling one is also the
          * negative control: with barriers ignored the suite must fail, and a
          * crash-consistency test that cannot be made to fail proves nothing. */
-        if (c->ignore_barriers)
+        if (c->ignore_barriers) {
+            trace_ev(c, "TRC BARRIER-IGNORED pend=%zu", c->pending_count);
             return 0;
+        }
         return cache_commit(c);
     }
 
@@ -922,6 +962,16 @@ int main(int argc, char **argv)
     if (fail_env)
         fc.fail_after = strtol(fail_env, NULL, 10);
 
+    /* EXT4DUMP_TRACE_WRITES was the old name for the stderr form. */
+    const char *trace_env = getenv("EXT4DUMP_TRACE");
+    if (!trace_env && getenv("EXT4DUMP_TRACE_WRITES"))
+        trace_env = "-";
+    if (trace_env) {
+        fc.trace = (!strcmp(trace_env, "-") || !strcmp(trace_env, "1"))
+                 ? stderr : fopen(trace_env, "w");
+        if (!fc.trace) { perror(trace_env); return 1; }
+    }
+
     /*
      * Make this file behave like a drive with a volatile write cache.
      *
@@ -1026,6 +1076,15 @@ int main(int argc, char **argv)
         opts.block_size = (argc > 4) ? (uint32_t)strtoul(argv[4], NULL, 10) : 0;
         opts.label      = (argc > 5) ? argv[5] : NULL;
         opts.journal    = (opts.generation != 2);
+
+        /* The journal is sized from the volume by default, and the sizing is
+         * what hides a whole class of bug: a log that never wraps during a
+         * test cannot exercise what wrapping does. The reorder suite formats
+         * with EXT4DUMP_JOURNAL_BLOCKS=1024 to make a big fixture carry the
+         * minimum journal. */
+        const char *jblocks_env = getenv("EXT4DUMP_JOURNAL_BLOCKS");
+        if (jblocks_env)
+            opts.journal_blocks = (uint32_t)strtoul(jblocks_env, NULL, 10);
 
         /* A real driver takes the UUID from the platform's RNG. Here it comes
          * from the environment when set, so tests can format reproducibly. */
@@ -1245,6 +1304,8 @@ out:
     close(fd);
     if (getenv("EXT4DUMP_REPORT_WRITES"))
         fprintf(stderr, "writes=%ld\n", fc.writes);
+    if (fc.trace && fc.trace != stderr)
+        fclose(fc.trace);
     return rc;
 }
 

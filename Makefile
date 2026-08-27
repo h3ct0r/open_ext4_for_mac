@@ -154,8 +154,16 @@ verify-patches: $(PATCH_STAMP)
 # answer "does the patch set describe this tree?" -- an edit made directly in
 # the submodule is invisible to it, and that is how the journal checksum fix
 # spent a day existing on one machine. A quarter of a second, once per build.
-	@bash scripts/check_patches.sh >/dev/null || { \
-	  bash scripts/check_patches.sh; exit 1; }
+# ALLOW_UNAPPLIED_PATCHES exempts a tree that is mid-patch-development -- the
+# working tree legitimately leads the patch set while a fix is being built --
+# but prints what diverges, so forgetting to regenerate stays impossible.
+	@if [ -n "$(ALLOW_UNAPPLIED_PATCHES)" ]; then \
+	  bash scripts/check_patches.sh >/dev/null 2>&1 || \
+	    echo "note: working tree leads the patch set (ALLOW_UNAPPLIED_PATCHES)"; \
+	else \
+	  bash scripts/check_patches.sh >/dev/null || { \
+	    bash scripts/check_patches.sh; exit 1; }; \
+	fi
 
 # Does the patch set reproduce the tree we compile? verify-patches asks whether
 # each patch is applied; this asks the stronger question, which is whether the

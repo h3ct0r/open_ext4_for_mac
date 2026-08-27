@@ -80,6 +80,20 @@ EOF
 echo "generating fixtures in $DIR"
 build_image ext4_4k  ext4 256 4096
 build_image ext4_1k  ext4  64 1024
+# 64 MB at 4 KiB blocks gets mke2fs's minimum journal -- 1024 blocks, 4 MB.
+# That is the geometry where transaction batching corrupted volumes under
+# reordering (commit 69ad644) while every suite ran on ext4_4k's 16 MB journal
+# and passed: a log that never wraps cannot exercise what wrapping does. The
+# assertion below is load-bearing -- if mke2fs's sizing ever changes, the
+# reorder suite would silently stop testing the wrap path.
+build_image ext4_64m ext4  64 4096
+jblocks="$(dumpe2fs -h "$DIR/ext4_64m.img" 2>/dev/null \
+           | sed -n 's/^Total journal blocks: *//p')"
+if [ "$jblocks" != "1024" ]; then
+  echo "  ERROR: ext4_64m.img journal is $jblocks blocks, not 1024 — the"
+  echo "  wrap-path geometry is gone; force it with -J size=4 in build_image"
+  exit 1
+fi
 build_image ext3_4k  ext3 128 4096
 build_image ext2_4k  ext2 128 4096 "-O ^has_journal"
 

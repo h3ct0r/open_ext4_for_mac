@@ -1,0 +1,46 @@
+Subject: checksum the tag sequence big-endian
+
+CSUM_V3 gives every descriptor tag a checksum over the journaled block's
+contents, seeded with the journal uuid and the transaction's sequence number.
+jbd2 checksums cpu_to_be32(sequence); lwext4 checksummed the host-order value.
+
+Self-consistent -- lwext4 verifies its own tags with the same computation --
+and wrong for everyone else. The Linux kernel rejects every data block of
+every transaction while recovering a journal this code wrote:
+
+    JBD2: Invalid checksum recovering data block 1290 in journal block 711
+    JBD2: journal recovery failed
+    EXT4-fs (loop0): error loading journal
+
+which means a volume this driver left dirty could not be mounted by Linux at
+all. Nothing caught it earlier because the kernel-replay suites ran on mke2fs
+fixtures whose journals carry no checksums, and the volumes our own mkfs
+formats were only ever handed to the kernel clean.
+
+Same shape as the commit-block checksum fix before it: the journal is
+big-endian, everywhere, including inside checksum computations.
+
+With this, the kernel reports "recovery complete" on a torn volume our mkfs
+formatted and our writer left dirty.
+--- a/src/ext4_journal.c
++++ b/src/ext4_journal.c
+@@ -339,8 +339,17 @@
+ 		/* First calculate crc32c checksum against fs uuid */
+ 		checksum = ext4_crc32c(EXT4_CRC32_INIT, jbd_fs->sb.uuid,
+ 				       sizeof(jbd_fs->sb.uuid));
+-		/* Then calculate crc32c checksum against sequence no. */
+-		checksum = ext4_crc32c(checksum, &sequence,
++		/* Then calculate crc32c checksum against sequence no.
++		 *
++		 * Big-endian, like every field in the journal: jbd2 checksums
++		 * cpu_to_be32(sequence). Checksumming the host-order value made
++		 * every tag verify against lwext4's own recovery and fail
++		 * against Linux's -- "JBD2: Invalid checksum recovering data
++		 * block N", on every block of every transaction, so a journal
++		 * this driver left dirty could not be recovered by the kernel
++		 * at all. */
++		uint32_t seq_be = to_be32(sequence);
++		checksum = ext4_crc32c(checksum, &seq_be,
+ 				sizeof(uint32_t));
+ 		/* Calculate crc32c checksum against tho whole block */
+ 		checksum = ext4_crc32c(checksum, buf,
