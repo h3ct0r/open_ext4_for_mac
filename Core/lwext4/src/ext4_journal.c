@@ -339,8 +339,17 @@ static uint32_t jbd_block_csum(struct jbd_fs *jbd_fs, const void *buf,
 		/* First calculate crc32c checksum against fs uuid */
 		checksum = ext4_crc32c(EXT4_CRC32_INIT, jbd_fs->sb.uuid,
 				       sizeof(jbd_fs->sb.uuid));
-		/* Then calculate crc32c checksum against sequence no. */
-		checksum = ext4_crc32c(checksum, &sequence,
+		/* Then calculate crc32c checksum against sequence no.
+		 *
+		 * Big-endian, like every field in the journal: jbd2 checksums
+		 * cpu_to_be32(sequence). Checksumming the host-order value made
+		 * every tag verify against lwext4's own recovery and fail
+		 * against Linux's -- "JBD2: Invalid checksum recovering data
+		 * block N", on every block of every transaction, so a journal
+		 * this driver left dirty could not be recovered by the kernel
+		 * at all. */
+		uint32_t seq_be = to_be32(sequence);
+		checksum = ext4_crc32c(checksum, &seq_be,
 				sizeof(uint32_t));
 		/* Calculate crc32c checksum against tho whole block */
 		checksum = ext4_crc32c(checksum, buf,
