@@ -141,6 +141,14 @@ int ext4_block_fini(struct ext4_blockdev *bdev)
 	return bdev->bdif->close(bdev);
 }
 
+int ext4_block_barrier(struct ext4_blockdev *bdev)
+{
+	if (!bdev || !bdev->bdif || !bdev->bdif->flush)
+		return EOK;
+
+	return bdev->bdif->flush(bdev);
+}
+
 int ext4_block_flush_buf(struct ext4_blockdev *bdev, struct ext4_buf *buf)
 {
 	int r;

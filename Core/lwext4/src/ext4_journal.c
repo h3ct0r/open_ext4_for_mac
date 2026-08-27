@@ -2193,7 +2193,32 @@ static int __jbd_journal_commit_trans(struct jbd_journal *journal,
 		goto Finish;
 	}
 
+	/*
+	 * The transaction is on its way to the medium; the commit block that
+	 * vouches for it must not overtake it.
+	 *
+	 * Journal blocks carry BC_TMP and are written through as they are
+	 * released, so everything this transaction describes has been issued by
+	 * now. Issued is not committed: without this the drive is free to write
+	 * the commit block first and lose the body, and recovery then replays a
+	 * transaction whose contents never arrived.
+	 */
+	rc = ext4_block_barrier(journal->jbd_fs->bdev);
+	if (rc != EOK)
+		goto Finish;
+
 	rc = jbd_trans_write_commit_block(trans);
+	if (rc != EOK)
+		goto Finish;
+
+	/*
+	 * And the commit block must reach the medium before the filesystem is
+	 * changed to match it. Everything below this point may checkpoint --
+	 * write metadata to its home location -- and a checkpoint that lands
+	 * while the commit block has not is unrecoverable: the journal has no
+	 * record of a change the filesystem has already made.
+	 */
+	rc = ext4_block_barrier(journal->jbd_fs->bdev);
 	if (rc != EOK)
 		goto Finish;
 

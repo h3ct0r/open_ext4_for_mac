@@ -80,6 +80,20 @@ struct ext4_blockdev_iface {
 	 * @param   bdev block device.*/
 	int (*unlock)(struct ext4_blockdev *bdev);
 
+	/**@brief   Make the medium commit what it has been given, and not
+	 *          reorder across this point. Not mandatory field.
+	 *
+	 * A journal is a claim about order: the transaction reaches the medium
+	 * before the commit block that vouches for it, and the commit block
+	 * reaches it before the filesystem is changed to match. Neither is true
+	 * by default -- a drive may hold writes in volatile cache and commit
+	 * them in whatever order suits it, while reporting each one complete.
+	 *
+	 * Without this the journal is an ordering protocol with no way to ask
+	 * for ordering. Leave it NULL and jbd behaves exactly as before.
+	 * @param   bdev block device.*/
+	int (*flush)(struct ext4_blockdev *bdev);
+
 	/**@brief   Block size (bytes): physical*/
 	uint32_t ph_bsize;
 
@@ -173,6 +187,12 @@ int ext4_block_fini(struct ext4_blockdev *bdev);
  * @param   buf buffer
  * @return  standard error code*/
 int ext4_block_flush_buf(struct ext4_blockdev *bdev, struct ext4_buf *buf);
+
+/**@brief   Ask the medium to commit everything it has been given.
+ * @param   bdev block device
+ * @return  standard error code; EOK when the device offers no barrier, since
+ *          a caller that cannot have one is not failing.*/
+int ext4_block_barrier(struct ext4_blockdev *bdev);
 
 /**@brief   Flush data in buffer of given lba to disk,
  *          if that buffer exists in block cache.
