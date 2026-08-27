@@ -56,7 +56,8 @@ TARGET_FLAG := -target arm64-apple-macos$(DEPLOY_TARGET)
 LWEXT4_SRCS := $(wildcard $(LWEXT4_DIR)/src/*.c)
 LWEXT4_OBJS := $(patsubst $(LWEXT4_DIR)/src/%.c,$(BUILD)/obj/lwext4/%.o,$(LWEXT4_SRCS))
 SHIM_OBJS   := $(BUILD)/obj/shim/ext4_bridge.o \
-               $(BUILD)/obj/shim/device_barrier.o
+               $(BUILD)/obj/shim/device_barrier.o \
+               $(BUILD)/obj/shim/ext4_check.o
 
 # Block-level decryption, for ext4 inside a LUKS container. It sits below the
 # filesystem, decorating the same read/write/flush callbacks ext4b_device_create

@@ -166,10 +166,18 @@ extension Ext4FileSystem: FSManageableResourceMaintenanceOperations {
         //
         // A volume that is mounted has answered the only question this check
         // asks.
-        if volume != nil {
-            task.logMessage("the volume is already mounted, so it is mountable")
-            task.logMessage("note: this is a mountability check, not a full "
-                            + "structural check -- use e2fsck for that")
+        if let volume {
+            // Mounted is the answer to the mountability question, but it is
+            // not the only question worth asking, and until there was a
+            // structural check this returned having verified nothing at all --
+            // every volume reaching here is mounted, so the early return was
+            // the only path.
+            //
+            // Walking the tree through the *existing* handle is safe in a way
+            // that opening a second one is not: it reads, and it reads what
+            // the live mount would read.
+            task.logMessage("the volume is mounted, so it is mountable")
+            try await volume.reportStructuralCheck(to: task)
             return
         }
 

@@ -296,6 +296,47 @@ freed=$(free_blocks)
 [ "$freed" -ge "$before" ] && ok "blocks returned on delete ($after -> $freed)" \
                            || bad "blocks returned on delete" "before=$before after-delete=$freed"
 
+# ============================================================ structural check ==
+#
+# `ext4dump check` walks the tree and cross-checks what it says against itself:
+# link counts against the number of subdirectories, entries against the inodes
+# they name, cached entry types against the inode's own. It is not e2fsck --
+# nothing about allocation is visible to it -- but it is exactly the shape of
+# damage this driver has produced, so it needs to be right in both directions.
+
+echo ""
+echo "structural check"
+
+check_problems() {  # check_problems <image>
+  "$DUMP" "$1" check 2>/dev/null | sed -n 's/^problems: *//p'
+}
+
+expect_eq "a healthy volume has no structural problems" "0" "$(check_problems "$IMG")"
+
+# And it must be able to say no. A check that only ever reports success is the
+# same as no check, and this project has shipped one of those before.
+CHK="$TMP/structural.img"
+cp "$IMG" "$CHK"
+root_links=$(debugfs -R "stat <2>" "$CHK" 2>/dev/null \
+             | grep -oE 'Links: [0-9]+' | head -1 | grep -oE '[0-9]+')
+if [ -n "$root_links" ]; then
+  debugfs -w -R "sif <2> links_count $(( root_links + 3 ))" "$CHK" >/dev/null 2>&1
+  problems=$(check_problems "$CHK")
+  if [ "${problems:-0}" -ge 1 ]; then
+    ok "a wrong directory link count is detected"
+  else
+    bad "a wrong directory link count is detected" "check reported $problems"
+  fi
+
+  detail=$("$DUMP" "$CHK" check 2>/dev/null | sed -n 's/^first: *//p')
+  case "$detail" in
+    *"link count"*) ok "and the report names what is wrong" ;;
+    *)              bad "and the report names what is wrong" "got [$detail]" ;;
+  esac
+else
+  bad "could not read the root link count to corrupt it"
+fi
+
 # ================================================== immutable / append-only ==
 #
 # `chattr +i` and `chattr +a` are how a Linux user says "do not change this".

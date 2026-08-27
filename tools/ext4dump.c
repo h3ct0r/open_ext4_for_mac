@@ -869,6 +869,8 @@ int main(int argc, char **argv)
             "  extents <path>     show the logical->physical extent map\n"
             "  xattr <path>       list extended attributes\n"
             "  orphans            show the head of the orphan list\n"
+            "  check              walk the tree and cross-check what it says\n"
+            "                     (not e2fsck: no repair, no allocation data)\n"
             "  decrypt <out>      write the decrypted payload to a file\n"
             "                     (needs EXT4DUMP_LUKS_KEYFILE)\n"
             "\nwrite commands (open the image read-write):\n"
@@ -1205,6 +1207,21 @@ int main(int argc, char **argv)
         fclose(out);
         if (rc == 0)
             fprintf(stderr, "decrypted %llu bytes\n", (unsigned long long)done);
+
+    } else if (strcmp(cmd, "check") == 0) {
+        ext4b_check_result res;
+        r = ext4b_check_tree(dev, &res);
+        if (r != 0) {
+            fprintf(stderr, "check: %s\n", ext4b_strerror(r));
+            rc = 1;
+        } else {
+            printf("directories: %llu\n", (unsigned long long)res.directories);
+            printf("files:       %llu\n", (unsigned long long)res.files);
+            printf("problems:    %llu\n", (unsigned long long)res.problems);
+            if (res.problems)
+                printf("first:       %s\n", res.first_problem);
+            rc = res.problems ? 1 : 0;
+        }
 
     } else if (strcmp(cmd, "orphans") == 0) {
         uint32_t head = 0;

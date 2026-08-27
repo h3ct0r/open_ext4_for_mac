@@ -40,15 +40,94 @@ banner() {
   echo "════════════════════════════════════════════════════" | tee -a "$LOG"
 }
 
+summary() {
+  banner "summary"
+  printf '%-28s %-6s %s\n' "STAGE" "RESULT" "TIME" | tee -a "$LOG"
+  for i in "${!STAGES[@]}"; do
+    printf '%-28s %-6s %s\n' "${STAGES[$i]}" "${RESULTS[$i]}" "${DURATIONS[$i]}" | tee -a "$LOG"
+  done
+  echo | tee -a "$LOG"
+  echo "total: $(( SECONDS - START ))s" | tee -a "$LOG"
+  echo "log:   $LOG" | tee -a "$LOG"
+
+  local skipped=0 r
+  for r in "${RESULTS[@]}"; do [ "$r" = "SKIP" ] && skipped=$(( skipped + 1 )); done
+
+  if [ "$FAILED" -ne 0 ]; then
+    echo "FAILURES PRESENT" | tee -a "$LOG"
+  elif [ "$skipped" -ne 0 ]; then
+    # Say so plainly: green with something untested is not the same as green.
+    echo "ALL GREEN — but $skipped stage(s) did not run" | tee -a "$LOG"
+  else
+    echo "ALL GREEN" | tee -a "$LOG"
+  fi
+}
+
+# No stage may run forever.
+#
+# Everything here talks to a device, a container, or a mounted filesystem, and
+# each of those can stop answering rather than fail. A driver killed while it
+# holds physical media leaves the device serving no reads at all, and anything
+# waiting on it sits in uninterruptible sleep where no signal reaches it. The
+# chain would then hang with no output and no indication of which stage, which
+# is indistinguishable from a slow suite -- and stage 7 legitimately takes two
+# minutes, so "it has been quiet a while" tells you nothing.
+#
+# Generous on purpose: the longest stage today is ~130s, so 15 minutes is six
+# times the worst honest case and will only fire on something genuinely stuck.
+STAGE_TIMEOUT="${EXT4_STAGE_TIMEOUT:-900}"
+
 stage() {  # stage <name> <command...>
   local name="$1"; shift
   banner "$name"
   local start=$SECONDS
-  if "$@" 2>&1 | tee -a "$LOG"; then
-    local rc=${PIPESTATUS[0]}
-  else
-    local rc=${PIPESTATUS[0]}
-  fi
+
+  # Backgrounded so it can be given a deadline, but still writing to the
+  # terminal, because a stage that produces no output while it works is the
+  # thing being guarded against -- replacing it with a stage that produces no
+  # output at all would be a poor trade.
+  local rcfile; rcfile=$(mktemp)
+
+  # Job control, so the stage gets its own process group and the deadline can
+  # take the whole thing down. Killing just the subshell leaves the suite and
+  # its `tee` running: the first version did that, and the stage carried on
+  # printing after the summary had already declared it timed out.
+  set -m
+  ( "$@" 2>&1 | tee -a "$LOG"; echo "${PIPESTATUS[0]}" > "$rcfile" ) &
+  local pid=$! waited=0 rc=0
+  set +m
+
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$STAGE_TIMEOUT" ]; then
+      # The group, not the process. Anything still holding a wedged device
+      # will survive regardless -- uninterruptible sleep takes no signals --
+      # but everything else goes.
+      kill -9 -- "-$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      rm -f "$rcfile"
+      echo ""
+      echo "  this stage produced no result in ${STAGE_TIMEOUT}s and was stopped."
+      echo ""
+      echo "  Usually the target device has stopped answering: killing the"
+      echo "  driver while it holds physical media can leave it serving no"
+      echo "  reads, and a process waiting on that is in uninterruptible sleep"
+      echo "  where kill -9 does nothing. Unplug the device and replug it."
+      echo "  Expect its BSD name to change."
+      echo ""
+      echo "  Stopping the run: a stuck device will take the remaining stages"
+      echo "  with it, and eleven more timeouts is not a more useful answer."
+      STAGES+=("$name"); DURATIONS+=("${STAGE_TIMEOUT}s"); RESULTS+=("TIMEOUT")
+      FAILED=1
+      summary
+      exit 1
+    fi
+    sleep 2
+    waited=$(( waited + 2 ))
+  done
+
+  wait "$pid" 2>/dev/null
+  rc=$(cat "$rcfile" 2>/dev/null || echo 1)
+  rm -f "$rcfile"
   local elapsed=$(( SECONDS - start ))
   STAGES+=("$name"); DURATIONS+=("${elapsed}s")
   # 77 means the suite decided it could not run -- a missing prerequisite, not
@@ -143,26 +222,5 @@ else
   skip "11. recovery after a kill"      "docker daemon not reachable"
 fi
 
-TOTAL=$(( SECONDS - START ))
-
-banner "summary"
-printf '%-28s %-6s %s\n' "STAGE" "RESULT" "TIME" | tee -a "$LOG"
-for i in "${!STAGES[@]}"; do
-  printf '%-28s %-6s %s\n' "${STAGES[$i]}" "${RESULTS[$i]}" "${DURATIONS[$i]}" | tee -a "$LOG"
-done
-echo | tee -a "$LOG"
-echo "total: ${TOTAL}s" | tee -a "$LOG"
-echo "log:   $LOG" | tee -a "$LOG"
-SKIPPED=0
-for r in "${RESULTS[@]}"; do [ "$r" = "SKIP" ] && SKIPPED=$((SKIPPED+1)); done
-
-if [ "$FAILED" -ne 0 ]; then
-  echo "FAILURES PRESENT" | tee -a "$LOG"
-elif [ "$SKIPPED" -ne 0 ]; then
-  # Say so plainly: green with something untested is not the same as green.
-  echo "ALL GREEN — but $SKIPPED stage(s) did not run" | tee -a "$LOG"
-else
-  echo "ALL GREEN" | tee -a "$LOG"
-fi
-
+summary
 exit "$FAILED"

@@ -219,6 +219,29 @@ typedef struct {
 
 int ext4b_getattr(ext4b_device *dev, uint32_t inode, ext4b_attrs *out);
 
+/* ------------------------------------------------------------------ check -- */
+
+/* What a structural walk found. `problems` counts everything; the first one is
+ * kept in full because a report that says only "17 problems" sends the reader
+ * to e2fsck without telling them what to look for. */
+typedef struct {
+    uint64_t directories;
+    uint64_t files;
+    uint64_t problems;
+    char     first_problem[256];
+} ext4b_check_result;
+
+/* Walk the directory tree of a mounted volume and check its answers against
+ * each other: link counts against the tree, directory entries against the
+ * inodes they name, cached entry types against the inode's own.
+ *
+ * Read-only, repairs nothing, and blind to anything not reachable from the
+ * root -- blocks claimed twice, free counts that disagree with the bitmaps,
+ * and inodes with no entry at all all need the allocation metadata rather than
+ * the tree. It is nonetheless the shape of damage this driver has actually
+ * produced; see Core/shim/ext4_check.c. */
+int ext4b_check_tree(ext4b_device *dev, ext4b_check_result *out);
+
 /* -------------------------------------------------------------- directory -- */
 
 /* Look up `name` inside directory inode `dir_inode`.

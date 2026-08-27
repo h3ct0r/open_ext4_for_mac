@@ -1223,6 +1223,40 @@ Pointed at real media with `EXT4_KILL_DEVICE=diskN` — which erases it — it
 becomes the detector for the barrier this driver does not have, and the way to
 tell whether any future fix actually worked.
 
+### `startCheck` checks something now
+
+It used to verify nothing. The intent was a mountability check, and the guard
+was "if the volume is already mounted, it is mountable, so return" — but FSKit
+loads the resource *before* calling check, so every volume reaching it is
+mounted and the early return was the only path ever taken. `fsck_fskit -t ext4`
+printed a note about itself and exited 0.
+
+`ext4b_check_tree` (`Core/shim/ext4_check.c`) walks the directory tree through
+the **existing** handle — safe in a way opening a second one is not, since it
+only reads, and reads what the live mount would read — and cross-checks the
+answers against each other:
+
+| what | catches |
+|---|---|
+| a directory's link count against its subdirectory count | `Inode 2 ref count is 12, should be 13` |
+| every entry against the inode it names | `Entry '…' has deleted/unused inode 13` |
+| the entry's cached type against the inode's | `Entry '…' has an incorrect filetype` |
+| a directory reachable twice | loops, and hard-linked directories |
+
+Those are not hypothetical: every failure the kill-recovery suite reported
+against real hardware was one of them, and none of them prevents a volume from
+mounting.
+
+It is not `e2fsck` and says so on every run, including clean ones — blocks
+claimed twice, free counts that disagree with the bitmaps, and inodes with no
+directory entry at all are invisible to a tree walk, and a check that reports
+"no problems" without qualifying what it looked at invites the reader to
+conclude more than it found.
+
+Also available offline as `ext4dump check`, which is what makes it testable:
+the write suite asserts both that a healthy volume reports zero problems **and**
+that a corrupted link count is detected and named.
+
 ### Access checks answer before the operation, not after
 
 `FSVolume.AccessCheckOperations` is implemented. The driver already refused a
@@ -1353,7 +1387,6 @@ not in the driver.
   see above. Until then a drive that lies about flushing can still corrupt a
   volume, and no barrier helps
 - `metadata_csum` on volumes this driver formats: lwext4's `mkfs` strips it
-- A real structural check; `startCheck` only decides mountability
 - A notification when a locked volume appears and the agent is not running;
   today it simply does not show up
 - Reading a LUKS header from media the user does not own — untested against a

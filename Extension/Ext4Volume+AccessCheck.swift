@@ -92,3 +92,41 @@ extension Ext4Volume: FSVolume.AccessCheckOperations {
         return true
     }
 }
+
+/// The structural half of `startCheck`.
+///
+/// Kept beside the access check because both answer questions *about* the
+/// volume rather than changing it, and both must survive being asked at
+/// awkward moments.
+extension Ext4Volume {
+
+    func reportStructuralCheck(to task: FSTask) async throws {
+        guard deviceIfOpen != nil else { return }
+
+        let result = try await executor.run { [self] in
+            guard let dev = deviceIfOpen else { throw Ext4Error.invalid }
+            var r = ext4b_check_result()
+            let rc = ext4b_check_tree(dev, &r)
+            try Ext4Error.check(rc, "check")
+            return r
+        }
+
+        task.logMessage("walked \(result.directories) directories and \(result.files) files")
+
+        if result.problems == 0 {
+            task.logMessage("no structural problems found in the directory tree")
+        } else {
+            let first = withUnsafeBytes(of: result.first_problem) { raw in
+                String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
+            }
+            task.logMessage("\(result.problems) structural problem(s); first: \(first)")
+        }
+
+        // Said every time, including on a clean result. A check that reports
+        // "no problems" without qualifying what it looked at invites the
+        // reader to conclude more than it found.
+        task.logMessage("note: this walks the directory tree only. Blocks claimed "
+                        + "twice, free counts that disagree with the bitmaps, and "
+                        + "inodes with no entry at all need e2fsck.")
+    }
+}
