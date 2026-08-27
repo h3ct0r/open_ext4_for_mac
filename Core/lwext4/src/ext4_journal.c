@@ -300,7 +300,13 @@ static void jbd_commit_csum_set(struct jbd_fs *jbd_fs,
 
 	header->chksum_type = 0;
 	header->chksum_size = 0;
-	header->chksum[0] = jbd_commit_csum(jbd_fs, header);
+	/* Big-endian, like every other field in the journal. Storing it in host
+	 * order made this checksum unverifiable by anyone, including the code
+	 * immediately below: jbd_verify_commit_csum compares against to_be32()
+	 * of the same computation, so on a little-endian machine lwext4
+	 * rejected its own commit blocks -- and so did Linux, which is why the
+	 * feature could not be turned on. */
+	header->chksum[0] = to_be32(jbd_commit_csum(jbd_fs, header));
 }
 
 #if CONFIG_META_CSUM_ENABLE
