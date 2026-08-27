@@ -44,6 +44,7 @@ make validate
 | crypto primitives | 29 assertions; AES-XTS against OpenSSL, hostile JSON |
 | LUKS containers | 27 assertions; judged by real `cryptsetup` |
 | crash consistency | 303 cut points; the Linux kernel replays each journal |
+| reordered writes | the same on a medium that reorders, which is the failure an image cannot produce — and asserts that disabling barriers breaks it |
 | differential vs Linux | 36 assertions, both directions |
 | mounted driver | 23 assertions against a live FSKit mount |
 | encrypted, mounted | 35 assertions; a LUKS volume through FSKit, judged by Linux |

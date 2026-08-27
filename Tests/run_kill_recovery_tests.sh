@@ -181,9 +181,60 @@ prepare() {   # leaves the volume formatted, and DEV set
   [ -n "$DEV" ]
 }
 
-fsck_target() {
-  if [ -n "$DEVICE" ]; then sudo e2fsck -fn "/dev/$DEVICE" 2>&1
-  else e2fsck -fn "$WORK/k.img" 2>&1; fi
+# Run something with a deadline, because on real media the thing most likely to
+# go wrong is that nothing goes wrong -- it simply never returns.
+#
+# Killing the driver while it holds a physical device can leave the device not
+# answering reads at all. The next e2fsck then sits in uninterruptible wait,
+# where no signal reaches it: pkill -9 is a genuine no-op, Ctrl-C does not stop
+# the suite because its child is wedged, and only unplugging the disk clears
+# it. That happened six times in one afternoon, and each time the suite gave no
+# indication of it -- it just stopped, indistinguishable from slow work on a
+# volume that takes minutes to check.
+#
+# There is no timeout(1) on macOS, so: background, poll, and give up loudly.
+# No attempt is made to clean up. A process in that state cannot be cleaned up,
+# and pretending otherwise is how the last version wasted an afternoon.
+FSCK_TIMEOUT="${EXT4_FSCK_TIMEOUT:-300}"
+
+with_deadline() {   # with_deadline <seconds> <command...>
+  local secs="$1"; shift
+  "$@" &
+  local pid=$! waited=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$secs" ]; then
+      kill -9 "$pid" 2>/dev/null
+      return 124
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$pid"
+}
+
+wedged() {
+  note ""
+  note "  the device stopped answering after ${FSCK_TIMEOUT}s."
+  note ""
+  note "  This is not a slow check. Killing the driver while it holds physical"
+  note "  media can leave the device serving no reads at all, and a process"
+  note "  waiting on it is in uninterruptible sleep -- no signal reaches it, so"
+  note "  kill -9 does nothing. Unplug the disk and replug it; the pending I/O"
+  note "  then fails, the process becomes killable, and it usually exits on its"
+  note "  own. Expect the BSD name to change."
+  note ""
+  note "  Stopping here rather than hanging."
+}
+
+# Output goes to a file, never through a command substitution.
+#
+# $( ) blocks until every writer closes the pipe, and when the deadline fires
+# the process holding it is exactly the one that cannot be killed -- so the
+# capture would hang in place of the check, which is the same hang with extra
+# steps. A file has no such problem.
+fsck_target() {   # fsck_target <outfile>
+  if [ -n "$DEVICE" ]; then sudo e2fsck -fn "/dev/$DEVICE" > "$1" 2>&1
+  else e2fsck -fn "$WORK/k.img" > "$1" 2>&1; fi
 }
 
 # Put the volume back in a known-good state, so the next round measures its own
@@ -257,8 +308,20 @@ for round in $(seq 1 "$ROUNDS"); do
   sleep 1
 
   note "  round $round: replayed; checking with e2fsck"
-  out=$(fsck_target)
-  repair_target
+  with_deadline "$FSCK_TIMEOUT" fsck_target "$WORK/fsck.out"
+  if [ $? -eq 124 ]; then
+    bad "round $round: the check never returned"
+    wedged
+    exit 1
+  fi
+  out=$(cat "$WORK/fsck.out" 2>/dev/null)
+
+  with_deadline "$FSCK_TIMEOUT" repair_target
+  if [ $? -eq 124 ]; then
+    bad "round $round: the repair never returned"
+    wedged
+    exit 1
+  fi
   if grep -qE "^(Pass 5|.*: [0-9]+/[0-9]+ files)" <<<"$out" && ! grep -q "WARNING" <<<"$out"; then
     ok "round $round: the journal recovered the volume completely"
   else

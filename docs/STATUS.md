@@ -239,6 +239,7 @@ make test-mount-crash   # stage 7 on its own
 | format | 29 assertions; 117 size/block-size/generation combinations must be `e2fsck`-clean, and the volume must round-trip through the Linux kernel |
 | open-unlink recovery | 23 assertions; every cut point of a deferred delete recovers by *mounting*, and the orphan lists we write are cleaned up by `e2fsck` and by the Linux kernel |
 | crash consistency | 303 cut points across 14 operations; the write stream is severed at every point, the **real Linux kernel** replays the journal, and `e2fsck` must be clean |
+| reordered writes | the same, on a medium that also **reorders** what was in flight — the failure a disk image cannot otherwise produce. Asserts that disabling barriers breaks it |
 | differential vs Linux | 36 assertions; volumes round-trip between our driver and the real Linux ext4 driver in both directions, with the kernel log required to be silent |
 | mounted driver | 23 assertions against a **real mount** — the only stage that goes through FSKit |
 
@@ -252,6 +253,50 @@ The power-failure model matters: after the cut point, writes are **silently
 discarded while still reporting success**. A real power loss does not hand the
 filesystem an errno it can react to. Returning `EIO` would exercise error
 handling instead, which is a far easier test to pass.
+
+### Why a second crash suite
+
+The crash sweep above has always passed, and for a long time that was not
+evidence of anything. A disk image's writes reach the host filesystem in issue
+order and stay there, so a torn image is always a clean prefix of the write
+stream — the one state that is safe by construction. Forty-two cut points
+across two image sizes: all clean. The same driver against a USB stick:
+damaged five times out of five.
+
+`make test-reorder` closes that gap by modelling the medium instead of trusting
+it. With `EXT4DUMP_WRITE_CACHE` set, `ext4dump` behaves like a drive rather
+than a file: reads are served from the cache, only a barrier makes a write
+durable, a full cache evicts a seeded-random half **out of order**, and at the
+cut whatever is still pending is permuted and only a prefix of that permutation
+is committed. The seed is the whole reproduction recipe.
+
+Two things are asserted, and the second matters as much as the first:
+
+```
+barriers honoured   clean=28  damaged=0
+barriers ignored    clean=11  damaged=17
+```
+
+A crash-consistency test that cannot be made to fail is not evidence. This
+project has shipped one check that could only report success — it reported it
+on a volume the driver had never touched — which is why the negative control is
+part of the suite rather than a thing someone remembers to run.
+
+The knobs, following the existing `EXT4DUMP_*` idiom:
+
+| variable | meaning |
+|---|---|
+| `EXT4DUMP_WRITE_CACHE` | cache size in bytes; unset leaves behaviour exactly as before |
+| `EXT4DUMP_REORDER_SEED` | permutation used for eviction and for the crash |
+| `EXT4DUMP_REORDER_DROP` | percentage of the pending queue lost at the cut |
+| `EXT4DUMP_IGNORE_BARRIERS` | a drive that reports a cache flush and does not perform one |
+| `EXT4B_NO_JOURNAL_BARRIER` | suppress only the commit-block barriers, reproducing the driver before patch 0014 |
+
+One trap, since it invalidated a whole run before anyone noticed: counting the
+workload's writes must be done against a *copy* of the fixture. Run against the
+fixture itself it mutates it, every later clone starts with the workload's
+directories already present, the script aborts on its first `mkdir`, and the
+suite reports that a filesystem nobody touched recovered perfectly.
 
 ## Crash safety on the mounted path
 
