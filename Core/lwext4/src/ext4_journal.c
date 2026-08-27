@@ -2029,12 +2029,22 @@ jbd_journal_prepare_revoke(struct jbd_journal *journal,
 	int rc = EOK, i = 0;
 	struct ext4_block desc_block = EXT4_BLOCK_ZERO();
 	int32_t tag_tbl_size = 0;
+	int32_t tail_sz = 0;
 	uint32_t desc_iblock = 0;
 	char *blocks_entry = NULL;
 	struct jbd_revoke_rec *rec, *tmp;
 	struct jbd_revoke_header *header = NULL;
 	int32_t record_len = 4;
 	struct jbd_bhdr *bhdr = NULL;
+
+	/* The checksum tail is reserved space, not revoke records. Folding it
+	 * into `count` made every reader -- this file's recovery, e2fsck, and
+	 * the Linux kernel, all of which compute
+	 * (count - sizeof(header)) / record_len -- parse one entry past the
+	 * last real one, into bytes the writer never set: a fabricated revoke
+	 * of an arbitrary block, installed silently on every recovery. */
+	if (jbd_has_csum(&journal->jbd_fs->sb))
+		tail_sz = sizeof(struct jbd_block_tail);
 
 	if (JBD_HAS_INCOMPAT_FEATURE(&journal->jbd_fs->sb,
 				     JBD_FEATURE_INCOMPAT_64BIT))
@@ -2060,8 +2070,7 @@ again:
 			tag_tbl_size = journal->block_size -
 				sizeof(struct jbd_revoke_header);
 
-			if (jbd_has_csum(&journal->jbd_fs->sb))
-				tag_tbl_size -= sizeof(struct jbd_block_tail);
+			tag_tbl_size -= tail_sz;
 
 			if (!trans->start_iblock)
 				trans->start_iblock = desc_iblock;
@@ -2072,7 +2081,7 @@ again:
 
 		if (tag_tbl_size < record_len) {
 			jbd_set32(header, count,
-				  journal->block_size - tag_tbl_size);
+				  journal->block_size - tag_tbl_size - tail_sz);
 			jbd_meta_csum_set(journal->jbd_fs, bhdr);
 			bhdr = NULL;
 			desc_iblock = 0;
@@ -2100,7 +2109,7 @@ again:
 	if (rc == EOK && desc_iblock) {
 		if (header != NULL)
 			jbd_set32(header, count,
-				  journal->block_size - tag_tbl_size);
+				  journal->block_size - tag_tbl_size - tail_sz);
 
 		jbd_meta_csum_set(journal->jbd_fs, bhdr);
 		rc = jbd_block_set(journal->jbd_fs, &desc_block);
