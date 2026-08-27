@@ -493,8 +493,27 @@ rm -rf "$FLAGDIR" 2>/dev/null
 # through the unified buffer cache, which is entitled to hold it.
 
 note ""
-note "stage 1: operations survive the cut that follows them"
+note "stage 1: operations survive a cut once they have been synced"
 note ""
+
+# What this stage asserts changed when the driver started batching journal
+# transactions, and the change is worth stating rather than quietly editing.
+#
+# It used to snapshot the instant an operation returned and require the
+# operation to be there. That held because every mutation committed its own
+# transaction before returning -- a guarantee stronger than Linux ext4, HFS+ or
+# APFS give, none of which promise metadata is on the medium when the call
+# returns. It also cost two write barriers per operation, and four hundred
+# small files took fourteen seconds.
+#
+# Mutations now share a transaction, so an operation is durable once something
+# asks -- sync(2), or the batch filling. That is the ordinary contract, and
+# `sync` is what applications and the OS already use to get it.
+#
+# So the assertion becomes: after a sync, the operation must be on the medium.
+# Weaker, but still a real promise, and one that would break loudly if the
+# batch were never drained. Stage 1b covers the other half -- that an
+# *undrained* batch is lost cleanly rather than leaving a damaged volume.
 
 DUR="$WORK/durability"
 mkdir -p "$DUR"
@@ -506,6 +525,10 @@ durability_case() {  # durability_case <name> <setup> <operation> <check>
   [ -n "$setup" ] && eval "$setup"
   sync 2>/dev/null
   eval "$op"
+  # The promise under test: sync makes it durable. Without this the snapshot
+  # catches an operation still sitting in an open transaction, which is the
+  # expected state now rather than a fault.
+  sync 2>/dev/null
   freeze_and_snapshot "$DUR/$name.img"
   printf '%s\t%s\n' "$name" "$check" >> "$WORK/dur-manifest.txt"
 }
@@ -532,7 +555,22 @@ durability_case rmdir    'mkdir "$MNT/dur/emptydir"' \
   'rmdir "$MNT/dur/emptydir"'                        \
   '[ ! -e /mnt/t/dur/emptydir ]'
 
-note "  $(wc -l < "$WORK/dur-manifest.txt" | tr -d ' ') operations snapshotted immediately after returning"
+note "  $(wc -l < "$WORK/dur-manifest.txt" | tr -d ' ') operations snapshotted after a sync"
+
+# --- stage 1b: an undrained batch is lost cleanly, not messily ---------------
+#
+# The other half of the trade. Losing a batch is acceptable; a batch that takes
+# the filesystem with it is not, and that distinction is the whole reason
+# batching was defensible. Nothing is synced here on purpose.
+note ""
+note "stage 1b: an unsynced batch is lost cleanly"
+mkdir -p "$MNT/dur/unsynced"
+for i in 1 2 3 4 5 6 7 8; do
+  mkdir -p "$MNT/dur/unsynced/d$i" 2>/dev/null
+  printf 'x' > "$MNT/dur/unsynced/d$i/f" 2>/dev/null
+done
+freeze_and_snapshot "$DUR/unsynced.img"
+printf '%s\t%s\n' "unsynced" "true" >> "$WORK/dur-manifest.txt"
 
 # ==================================================== stage 2: crash sweep ==
 #
@@ -658,12 +696,21 @@ note ""
 
 while IFS=$'\t' read -r name _; do
   [ -z "$name" ] && continue
-  if grep -q "^DUR-OK $name\$" "$WORK/replay.log"; then
-    ok "$name survived the cut"
+  if [ "$name" = "unsynced" ]; then
+    # Only that it mounts and recovers. Whether the operations are there is
+    # not the question -- they were never synced, so either answer is correct.
+    if grep -q "^DUR-OK $name\$" "$WORK/replay.log"; then
+      ok "an unsynced batch leaves a volume the kernel recovers"
+    else
+      bad "an unsynced batch leaves a volume the kernel recovers" \
+          "Linux refused to mount the snapshot"
+    fi
+  elif grep -q "^DUR-OK $name\$" "$WORK/replay.log"; then
+    ok "$name is durable once synced"
   elif grep -q "^DUR-REFUSED $name\$" "$WORK/replay.log"; then
-    bad "$name survived the cut" "Linux refused to mount the snapshot"
+    bad "$name is durable once synced" "Linux refused to mount the snapshot"
   else
-    bad "$name survived the cut" "the operation was gone after recovery"
+    bad "$name is durable once synced" "the operation was gone after recovery"
   fi
 done < "$WORK/dur-manifest.txt"
 

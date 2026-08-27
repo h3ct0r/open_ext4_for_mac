@@ -39,6 +39,9 @@
  * a desktop volume needs far more to avoid thrashing metadata reads. */
 #define BRIDGE_BCACHE_BLOCKS 1024
 
+/* How many mutations may share one journal transaction. See txn_finish. */
+#define BRIDGE_TXN_BATCH 16
+
 /* ============================================================== logging == */
 
 static ext4b_log_fn g_log_fn;
@@ -55,6 +58,11 @@ static void bridge_log(int level, const char *msg)
     if (g_log_fn)
         g_log_fn(g_log_ctx, level, msg);
 }
+
+/* Commit any batched-but-uncommitted mutations. Defined with the transaction
+ * machinery below; declared here because sync and unmount both need it and
+ * both sit above it. */
+static int txn_drain(ext4b_device *dev);
 
 /* =============================================== concurrent core entry == */
 /*
@@ -158,6 +166,12 @@ struct ext4b_device {
     bool     read_only;
     bool     mounted;
     bool     journal_running;
+
+    /* Journal batching. `txn_ops` counts mutations accumulated in the
+     * currently open transaction; `txn_batch` is how many are allowed to
+     * accumulate before it commits. See txn_finish. */
+    uint32_t txn_ops;
+    uint32_t txn_batch;
     bool     bcache_ready;
     bool     skip_orphan_cleanup;   /* tests only; see ext4b_set_orphan_cleanup */
 };
@@ -271,6 +285,18 @@ ext4b_device *ext4b_device_create(void *ctx,
     dev->read_fn   = read_fn;
     dev->write_fn  = write_fn;
     dev->flush_fn  = flush_fn;
+    dev->txn_batch = BRIDGE_TXN_BATCH;
+    {
+        /* Tests need to vary this: a batch of 1 is the old
+         * transaction-per-operation behaviour, which is what the suites
+         * compare against. */
+        const char *env = getenv("EXT4B_TXN_BATCH");
+        if (env) {
+            unsigned long v = strtoul(env, NULL, 10);
+            if (v >= 1 && v <= 1024)
+                dev->txn_batch = (uint32_t)v;
+        }
+    }
     dev->read_only = read_only;
 
     dev->iface.open     = bd_open;
@@ -660,6 +686,11 @@ int ext4b_unmount(ext4b_device *dev)
     if (!dev || !dev->mounted)
         return EINVAL;
 
+    /* Before the journal stops. A transaction still open here is a set of
+     * mutations the caller was told had succeeded, and stopping the journal
+     * underneath it discards them. */
+    (void)txn_drain(dev);
+
     if (dev->journal_running) {
         ext4_journal_stop(BRIDGE_MOUNT_POINT);
         dev->journal_running = false;
@@ -718,6 +749,12 @@ int ext4b_sync(ext4b_device *dev)
 {
     if (!dev || !dev->mounted)
         return EINVAL;
+
+    /* Batched mutations are not on the medium until their transaction
+     * commits, and this is the call that promises they are. */
+    int dr = txn_drain(dev);
+    if (dr != EOK)
+        return dr;
 
     int r = ext4_cache_flush(BRIDGE_MOUNT_POINT);
     if (r != EOK)
@@ -1371,32 +1408,88 @@ static void txn_abort(struct ext4_fs *fs)
 #endif
 }
 
-/* Close a mutation: commit on success, abort on failure, then push the result
- * to stable storage so a crash cannot lose an acknowledged change.
+/* BRIDGE_TXN_BATCH: how many mutations may share one journal transaction.
  *
- * On a journalled volume that last step is already done. Since patch 0014, jbd
- * barriers on both sides of the commit block, so by the time the commit
- * returns the transaction is on the medium and a crash replays it -- the change
- * is durable whether or not it has reached its home location yet. Issuing a
- * third barrier here bought nothing and cost a third of every mutation: a
- * barrier is an XPC round trip to the privileged helper plus a real
- * DKIOCSYNCHRONIZE, and creating four hundred small files spent twenty seconds
- * on almost nothing else.
+ * One was the old behaviour and it is enormously expensive. Every transaction
+ * pays two write barriers -- jbd issues one either side of the commit block --
+ * and a barrier is an XPC round trip to the privileged helper plus a real
+ * DKIOCSYNCHRONIZE on the drive. Creating four hundred small files spent
+ * fourteen seconds almost entirely on that: 36 ms per file, of which the
+ * filesystem work is a rounding error.
  *
- * Without a journal there is no commit block and nothing to replay, so the
- * barrier here is the only thing making the change durable, and it stays. */
+ * Linux ext4 does not work this way and never has. A transaction stays open,
+ * accumulates hundreds of operations, and commits every few seconds or when
+ * something asks; the barriers are paid once for the batch rather than once
+ * per operation.
+ *
+ * Sixteen is deliberately modest. The bound that matters is journal space --
+ * an over-large transaction cannot be committed at all -- and sixteen
+ * operations touching a few dozen blocks each sits far inside the smallest
+ * journal mkfs will create. */
+
+/* Close a mutation.
+ *
+ * The transaction is no longer committed here on every call. It stays open and
+ * collects the next mutation, until the batch is full or something explicitly
+ * asks for durability -- ext4b_sync, or unmount. macOS calls the volume's
+ * synchronize periodically, so an idle batch does not sit uncommitted
+ * indefinitely.
+ *
+ * What this trades away is worth stating. A failed operation used to roll back
+ * completely, because it was alone in its transaction and aborting it undid
+ * exactly that operation. Batched with others, an abort would discard their
+ * work too -- so a failure with siblings commits the batch and returns the
+ * error, which can leave the failed operation's partial changes behind. That
+ * is what Linux does, and the guarantee being given up was a side effect of
+ * transaction-per-operation rather than a designed property; nothing tests it.
+ * A failure that is alone in its transaction still rolls back exactly as
+ * before, and most do: almost every error path here returns before touching
+ * anything.
+ *
+ * On a journalled volume no barrier is issued here at all. jbd already
+ * barriers either side of the commit block, so once the commit returns the
+ * transaction is on the medium and a crash replays it. Without a journal there
+ * is nothing to replay, so the barrier there is the only thing making the
+ * change durable and it stays. */
 static int txn_finish(ext4b_device *dev, struct ext4_fs *fs, int r)
 {
     if (r != EOK) {
-        txn_abort(fs);
+        if (dev->txn_ops == 0) {
+            txn_abort(fs);
+            return r;
+        }
+        /* Siblings in the batch did nothing wrong. */
+        (void)txn_commit(fs);
+        dev->txn_ops = 0;
         return r;
     }
+
+    dev->txn_ops++;
+    if (dev->txn_ops < dev->txn_batch)
+        return EOK;
+
     r = txn_commit(fs);
+    dev->txn_ops = 0;
     if (r == EOK) {
         ext4_block_cache_flush(&dev->bdev);
         if (dev->flush_fn && !dev->journal_running)
             dev->flush_fn(dev->ctx);
     }
+    return r;
+}
+
+/* Commit whatever is open, for the paths that must not defer: sync, unmount,
+ * and anything that hands the volume to somebody else. */
+static int txn_drain(ext4b_device *dev)
+{
+    struct ext4_fs *fs = bridge_fs(dev);
+    if (!fs || dev->txn_ops == 0)
+        return EOK;
+
+    int r = txn_commit(fs);
+    dev->txn_ops = 0;
+    if (r == EOK)
+        ext4_block_cache_flush(&dev->bdev);
     return r;
 }
 

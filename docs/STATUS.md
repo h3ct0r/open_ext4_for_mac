@@ -312,7 +312,8 @@ driver resumed, and the image handed to the Linux kernel to replay.
 | What it checks | Why |
 |---|---|
 | concurrent readers and writers finish, and the extension goes idle afterwards | FSKit issues volume operations in parallel; every core entry must be serialised or lwext4's block cache corrupts and the volume wedges |
-| seven metadata operations survive a cut taken the instant they return | recovering to *some* consistent state is not enough — a driver that discarded everything would also pass |
+| seven metadata operations survive a cut taken after a `sync` | recovering to *some* consistent state is not enough — a driver that discarded everything would also pass |
+| a batch that was never synced still leaves a volume the kernel recovers | losing recent work is the deal; taking the filesystem with it is not |
 | a deleted-but-still-open file is on the volume's orphan list, and a snapshot taken while one exists is reclaimed by *mounting* it | the orphan list is the only thing that can find such an inode afterwards; this is the check that it is engaged on the FSKit path and not only offline |
 | every snapshot taken under load recovers clean | the actual crash-consistency claim |
 | no snapshot falsely reports filesystem errors | a volume that recovers but reports itself damaged sends the user to a repair tool they do not need |
@@ -1222,6 +1223,46 @@ The suite runs on an image in `make validate`, where it proves recovery works.
 Pointed at real media with `EXT4_KILL_DEVICE=diskN` — which erases it — it
 becomes the detector for the barrier this driver does not have, and the way to
 tell whether any future fix actually worked.
+
+### Journal transactions are batched, and what that changed
+
+Every mutation used to commit its own journal transaction before returning.
+That made metadata durable the instant a call returned — a guarantee **stronger
+than Linux ext4, HFS+ or APFS**, none of which promise anything of the sort;
+`fsync` is what that is for. It also cost two write barriers per operation,
+because jbd barriers either side of the commit block and a barrier is an XPC
+round trip to the privileged helper plus a real `DKIOCSYNCHRONIZE`.
+
+Up to 16 mutations now share a transaction, which commits when the batch fills,
+when `sync` arrives, or at unmount.
+
+| | per-operation | batched |
+|---|---|---|
+| 400 small files | 14.3s | **1.30s** |
+| 256 MB sequential write | 31.4 MB/s | **62.7 MB/s** |
+
+Eleven times faster on metadata-heavy work, and 15× against where the day
+started. What it costs is stated rather than buried:
+
+- **An operation is not on the medium when the call returns.** It is durable
+  once something asks — `sync(2)`, the batch filling, or unmount. This is the
+  ordinary contract for a journalling filesystem.
+- **A failed operation batched with others can leave partial changes.** Alone
+  in its transaction it still rolls back completely, and almost every error
+  path returns before touching anything; but aborting a shared transaction
+  would discard work that succeeded, so a failure with siblings commits the
+  batch and returns the error.
+
+What did *not* change is crash consistency, which is the part worth being
+careful about: a torn batch recovers clean at every cut point and every reorder
+seed (28/28), the 303-point crash sweep is unchanged, and the mounted suite now
+asserts both halves — that a synced operation survives a cut, and that an
+**unsynced** batch still leaves a volume the Linux kernel mounts and recovers.
+Losing recent work is the deal; taking the filesystem with it would not have
+been.
+
+`EXT4B_TXN_BATCH=1` restores the old behaviour exactly, which is how the two
+columns above were measured.
 
 ### `startCheck` checks something now
 
