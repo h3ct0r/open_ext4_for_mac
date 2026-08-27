@@ -56,11 +56,18 @@ fi
 # grant lapses silently on the next install and the daemon goes back to being
 # denied the device.
 if [ -x "$PROGRAM" ]; then
-  if codesign -dv "$PROGRAM" 2>&1 | grep -q "TeamIdentifier=$TEAM_ID"; then
+  # Capture, then match. The piped form of this check once reported a
+  # correctly signed daemon as ad-hoc -- exactly once, unreproducibly -- and a
+  # preflight that cries wolf trains people to override it. Failing this
+  # check blocks a run (annoying, safe); it can never pass wrongly, so the
+  # hardening only needs to remove the flake.
+  sig="$(codesign -dv "$PROGRAM" 2>&1)"
+  if printf '%s\n' "$sig" | grep -q "TeamIdentifier=$TEAM_ID"; then
     ok "the daemon is signed with team $TEAM_ID"
   else
-    bad "the daemon is ad-hoc signed, so its Full Disk Access grant cannot persist" \
+    bad "the daemon is not signed with team $TEAM_ID, so its Full Disk Access grant cannot persist" \
         "make sign && sudo make install-barrier, then re-grant Full Disk Access"
+    echo "        codesign says: $(printf '%s' "$sig" | head -1)"
   fi
 fi
 
