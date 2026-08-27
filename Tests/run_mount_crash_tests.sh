@@ -447,6 +447,23 @@ else
   bad "and its content is intact" "got [$content]"
 fi
 
+# Refusing the write is not enough on its own: access(2) has to agree, or a
+# caller that asks first is told yes and fails later. `[ -w ]` answered yes on
+# an immutable file until FSVolume.AccessCheckOperations was implemented, which
+# is why Finder would offer to edit a locked file and only find out on save.
+if [ -w "$FLAGDIR/frozen.txt" ]; then
+  bad "access(2) reports an immutable file as unwritable" "[ -w ] said yes"
+else
+  ok "access(2) reports an immutable file as unwritable"
+fi
+# An append-only file is writable-in-the-append-sense, so access(2) must not
+# refuse it outright the way it refuses an immutable one.
+if [ -r "$FLAGDIR/journal.log" ]; then
+  ok "and an append-only file is still readable"
+else
+  bad "and an append-only file is still readable"
+fi
+
 if printf 'line2' >> "$FLAGDIR/journal.log" 2>/dev/null; then
   ok "an append-only file still accepts an append through the mount"
 else

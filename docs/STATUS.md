@@ -1223,6 +1223,32 @@ Pointed at real media with `EXT4_KILL_DEVICE=diskN` — which erases it — it
 becomes the detector for the barrier this driver does not have, and the way to
 tell whether any future fix actually worked.
 
+### Access checks answer before the operation, not after
+
+`FSVolume.AccessCheckOperations` is implemented. The driver already refused a
+write to an immutable file, but it refused it *at the write*, so `access(2)`
+had nothing to consult and answered yes — `[ -w frozen.txt ]` said writable on
+a `chattr +i` file, and Finder would offer to edit a locked file and discover
+otherwise only on save.
+
+Ownership is deliberately not checked. These volumes mount `noowners`, which
+macOS applies to foreign and removable media because a uid written on someone
+else's Linux box means nothing here; VFS presents every file as owned by the
+mounting user and disregards the mode bits. Re-imposing ext4's uid, gid and
+mode on top would contradict the mount options the volume is actually mounted
+with, and would lock a user out of their own disk on the strength of a number
+that happens to match a different machine's account. So the check answers only
+for what is true regardless of who is asking: the volume being read-only, and
+the two inode flags this driver enforces.
+
+One trap, and it is the same one that made the `device` accessor fallible.
+FSKit asks this **after `unmount` has closed the volume**. Throwing there does
+not merely fail the check — it fails the *unmount*, and the volume stays
+mounted. The symptom is a busy mount with nothing anywhere mentioning access,
+and it cost 24 of 24 freeze/resume cycles in the mounted suite to surface. A
+closing volume is not the place to enforce a flag: it answers yes and lets VFS
+deal with it, and the write paths refuse independently in any case.
+
 ### Kernel-offloaded I/O silently discards writes
 
 The read half of `FSVolumeKernelOffloadedIOOperations` has been written and
@@ -1334,7 +1360,6 @@ not in the driver.
   physical stick, where `/dev/diskN` may be `root:operator`
 - Two simultaneous open-unlinks are crash-protected for one of them, not both
 - LUKS detached headers, and ciphers other than `aes-xts-plain64`
-- `FSVolumeAccessCheckOperations`
 - `FSVolumePreallocateOperations` — deliberately, for now; see below
 - Kernel-offloaded I/O, for reads as well as writes: the conformance is out
   of the build entirely, so *all* I/O is byte-copy today
