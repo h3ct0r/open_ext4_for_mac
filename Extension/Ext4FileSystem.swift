@@ -12,6 +12,19 @@ import Ext4Core
 /// `FSUnaryFileSystem` means one resource presented as exactly one volume,
 /// which is what a disk partition is. FSKit calls `probeResource` to ask
 /// whether we recognise some media, then `loadResource` to actually open it.
+/// `@objc(Ext4FileSystem)` fixes the name the ObjC runtime knows this class by.
+///
+/// Without it a Swift class is registered under its mangled name --
+/// `_TtC6Ext4FS14Ext4FileSystem` -- so anything looking the class up as
+/// "Ext4FileSystem" finds nothing. That matters for `EXExtensionPrincipalClass`,
+/// which is how Apple's own FSKit modules are wired (msdos declares
+/// `msdosFileSystem` and its `startFormat` is reached; ours is not). Adding
+/// that key was tried once and recorded as deregistering the module, which is
+/// exactly what an unresolvable principal class looks like from outside.
+///
+/// The name is free and changes nothing on its own. Whether the key can then
+/// be added without FSKit dropping the module is a separate experiment.
+@objc(Ext4FileSystem)
 final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
 
     let executor = Ext4Executor()

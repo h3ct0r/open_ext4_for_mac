@@ -108,6 +108,17 @@ instead of failing — plus several of our own. See
 - Apple Silicon or Intel
 - Xcode Command Line Tools (full Xcode is **not** required)
 
+To *mount* volumes, additionally:
+
+- A **paid Apple Developer Program** membership — FSKit's
+  `com.apple.developer.fskit.fsmodule` is a restricted entitlement and needs a
+  provisioning profile to authorise it
+- To write to **removable** media, a root daemon with Full Disk Access, because
+  no barrier is otherwise reachable from the sandbox
+
+Both are covered under [Building](#building). Neither is needed to build the
+driver or to run any of the test suites.
+
 ## Building
 
 ```bash
@@ -117,16 +128,98 @@ make test       # read + write suites (needs: brew install e2fsprogs)
 make validate   # everything, including the Linux-kernel stages (needs Docker)
 ```
 
-Loading the extension additionally requires a Developer ID certificate:
+The ext4 core is deliberately decoupled from FSKit, so `make test` and
+`make validate` exercise the real filesystem code against disk images with **no
+Apple account, no signing and no mounting**. Everything below is needed only to
+*mount* volumes.
+
+### Mounting needs a paid Apple Developer account
+
+Not just a certificate. FSKit modules require the restricted entitlement
+`com.apple.developer.fskit.fsmodule`, and macOS only honours a restricted
+entitlement when an embedded **provisioning profile** authorises it. Profiles
+come from a paid Apple Developer Program membership; there is no free path, and
+nothing in this repository can supply one for you.
+
+You need two things of your own:
+
+| | |
+|---|---|
+| A Developer ID Application certificate | in your login keychain |
+| `Extension/Ext4FS.provisionprofile` | for the App ID `<TEAM>.dev.h3ct0r.ext4mac.Ext4FS`, with the FSKit capability enabled |
+
+Both are gitignored, deliberately — a provisioning profile is tied to your team
+and your certificate, and committing one would be useless to you and careless
+of us. Change `BUNDLE_ID` in the `Makefile` to your own reverse-DNS name and
+create the App ID under it.
 
 ```bash
 make sign SIGN_ID="Developer ID Application: Your Name (TEAMID)"
 make install
 ```
 
-See [docs/SIGNING.md](docs/SIGNING.md). The ext4 core is deliberately
-decoupled from FSKit, so `make test` exercises the real filesystem code
-against disk images with no Apple account, no signing and no mounting.
+Then enable it in **System Settings → General → Login Items & Extensions →
+File System Extensions**, and check with `make check-extension`.
+
+The failure mode is worth knowing in advance, because it is silent: an ad-hoc
+or wrongly-provisioned signature does not produce an error. AMFI kills the
+extension the instant it launches — no crash report, nothing in the log — and
+what you see is a module that will not mount anything, which looks exactly like
+a module that is merely disabled. `make sign` runs
+`scripts/verify_signing.sh`, which compares every claimed entitlement against
+the ones the embedded profile actually authorises, precisely because this
+failure has no other symptom. See [docs/SIGNING.md](docs/SIGNING.md).
+
+### Writing to removable media needs the barrier daemon
+
+**Removable media mounts read-only by default.** That is not caution: a
+journal is a claim about write ordering, and FSKit exposes no way for a
+third-party module to enforce it. `metadataFlush` — the only write barrier in
+the whole `FSResource` API — fails with `EIO` here, and the device-level call
+underneath it, `DKIOCSYNCHRONIZECACHE`, is denied to the sandbox by name. A USB
+stick pulled from under a live read-write mount came back structurally damaged
+five times out of five.
+
+The barrier therefore has to be issued from outside the sandbox, by a small
+root daemon that knows exactly one verb: flush this disk's cache. It never
+reads a byte, never writes one, and issues no other ioctl.
+
+```bash
+make sign                       # the daemon must carry your Developer ID
+sudo make install-barrier       # /usr/local/libexec + /Library/LaunchDaemons
+```
+
+Then grant it **Full Disk Access**, which cannot be automated and is not
+optional:
+
+> **System Settings → Privacy & Security → Full Disk Access → +**
+> press **⌘⇧G**, enter `/usr/local/libexec`, and add **`ext4barrierd`**
+
+Being root is not enough to open removable media — that is gated by TCC, and a
+daemon has no UI, so it is never prompted, only denied. Two consequences follow
+that are easy to lose an afternoon to:
+
+- The grant is tied to the binary's **code identity**, so an ad-hoc signature
+  cannot hold it across a reinstall. `install-barrier` refuses an unsigned
+  binary for that reason.
+- If you re-grant against a *rebuilt* daemon, remove the old Full Disk Access
+  entry first and add it again.
+
+Finally, allow writes and check the whole chain end to end:
+
+```bash
+Ext4Mac removable-writes on
+make preflight EXT4_KILL_DEVICE=diskNs1
+```
+
+`make preflight` refuses to let a test run start until it has **observed a live
+barrier on that device** — not merely confirmed that the pieces which should
+produce one are installed. Three consecutive five-round runs against real
+hardware once completed, reported results, and measured nothing, because the
+barrier was silently absent each time.
+
+Without the daemon the driver still works; removable media simply stays
+read-only, and disk images are unaffected either way.
 
 ## Documentation
 
