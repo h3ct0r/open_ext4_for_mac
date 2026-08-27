@@ -48,6 +48,7 @@
 #include <ext4_fs.h>
 #include <ext4_inode.h>
 #include <ext4_ialloc.h>
+#include <ext4_crc32.h>
 #include <ext4_mkfs.h>
 
 #include <inttypes.h>
@@ -751,6 +752,24 @@ static int create_journal_inode(struct ext4_fs *fs,
 		jbd_sb->nr_users = to_be32(1);
 		jbd_sb->first = to_be32(1);
 		jbd_sb->sequence = to_be32(1);
+
+		/* Checksum the journal, as mke2fs does. Without it a torn
+		 * transaction is indistinguishable from a complete one, so
+		 * recovery replays whatever is in the log over a live
+		 * filesystem. With it, replay stops at the first commit block
+		 * that does not verify: the change is lost, which is what a
+		 * crash means, rather than the volume being corrupted, which is
+		 * not. That is the only defence against a drive that reports a
+		 * cache flush and does not perform one, which no barrier can
+		 * help with.
+		 *
+		 * The checksums are seeded with the journal superblock's own
+		 * uuid, so it has to carry the filesystem's. */
+		jbd_sb->feature_incompat = to_be32(JBD_FEATURE_INCOMPAT_CSUM_V3);
+		jbd_sb->checksum_type = JBD_CRC32C_CHKSUM;
+		memcpy(jbd_sb->uuid, fs->sb.uuid, sizeof(jbd_sb->uuid));
+		jbd_sb->checksum = to_be32(ext4_crc32c(EXT4_CRC32_INIT, jbd_sb,
+						       JBD_SUPERBLOCK_SIZE));
 
 		ext4_bcache_set_dirty(blk.buf);
 		ret = ext4_block_set(fs->bdev, &blk);
