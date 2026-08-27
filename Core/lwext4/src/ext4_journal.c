@@ -1715,34 +1715,30 @@ int jbd_trans_revoke_block(struct jbd_trans *trans,
 	return EOK;
 }
 
-/**@brief  Try to add block to be revoked to a transaction.
- *         If @lba still remains in an transaction on checkpoint
- *         queue, add @lba as a revoked block to the transaction.
+/**@brief  Add a freed block to a transaction's revoke set.
+ *
+ * Unconditionally, which is what Linux does, and the condition this replaces
+ * was a hole. The old code revoked only blocks with a live block_rec -- one
+ * still tracked by an uncheckpointed transaction. But the log holds records
+ * back to wherever the on-disk tail points, which is further back than the
+ * checkpoint queue reaches: a block journaled three transactions ago,
+ * checkpointed, freed, and reused as file data is exactly the block a replay
+ * will clobber -- and it had no block_rec, so it got no revoke.
+ *
+ * A revoke for a block the log never mentions costs four bytes in a revoke
+ * block and suppresses nothing. A missing revoke for a block the log does
+ * mention rewrites history over live data. The asymmetry decides.
+ *
+ * Re-journaling a revoked block in the same transaction cancels the revoke
+ * (jbd_trans_set_block_dirty removes it from revoke_root), so free-then-
+ * reallocate-as-metadata within one transaction stays correct.
  * @param  trans transaction
  * @param  lba logical block address
  * @return standard error code*/
 int jbd_trans_try_revoke_block(struct jbd_trans *trans,
 			       ext4_fsblk_t lba)
 {
-	struct jbd_journal *journal = trans->journal;
-	struct jbd_block_rec *block_rec =
-		jbd_trans_block_rec_lookup(journal, lba);
-
-	if (block_rec) {
-		if (block_rec->trans == trans) {
-			struct jbd_buf *jbd_buf =
-				TAILQ_LAST(&block_rec->dirty_buf_queue,
-					jbd_buf_dirty);
-			/* If there are still unwritten buffers. */
-			if (TAILQ_FIRST(&block_rec->dirty_buf_queue) !=
-			    jbd_buf)
-				jbd_trans_revoke_block(trans, lba);
-
-		} else
-			jbd_trans_revoke_block(trans, lba);
-	}
-
-	return EOK;
+	return jbd_trans_revoke_block(trans, lba);
 }
 
 /**@brief  Free a transaction
