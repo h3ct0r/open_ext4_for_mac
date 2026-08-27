@@ -270,11 +270,23 @@ durable, a full cache evicts a seeded-random half **out of order**, and at the
 cut whatever is still pending is permuted and only a prefix of that permutation
 is committed. The seed is the whole reproduction recipe.
 
+The suite is a matrix now — geometries × workloads × batch sizes — because
+its worst failure was structural: every cell it had ran on a 16 MB journal
+that never wrapped during a workload, and the wrap path is where lwext4's
+ordering bugs lived (patches 0017–0020). The 64 MB fixtures carry the 4 MB
+minimum journal; the wrap-heavy workloads cycle creates and deletes so
+revokes and log laps actually happen; `--quick` runs the load-bearing cells
+in under thirty seconds for the dev loop. Every torn image is replayed by the
+Linux kernel; a trace classifier (`Tests/classify_trace.sh`, fed by
+`EXT4DUMP_TRACE`) attributes any failure to the write class that landed out
+of order — filesystem superblock, journal superblock, log, or home metadata —
+which is how the tail-advance bug was diagnosed rather than guessed at.
+
 Two things are asserted, and the second matters as much as the first:
 
 ```
-barriers honoured   clean=28  damaged=0
-barriers ignored    clean=11  damaged=17
+236 cut points, 15 cells                 every one clean
+barriers ignored (three controls)        every one damaged
 ```
 
 A crash-consistency test that cannot be made to fail is not evidence. This
@@ -1253,13 +1265,21 @@ started. What it costs is stated rather than buried:
   would discard work that succeeded, so a failure with siblings commits the
   batch and returns the error.
 
-What did *not* change is crash consistency, which is the part worth being
-careful about: a torn batch recovers clean at every cut point and every reorder
-seed (28/28), the 303-point crash sweep is unchanged, and the mounted suite now
-asserts both halves — that a synced operation survives a cut, and that an
-**unsynced** batch still leaves a volume the Linux kernel mounts and recovers.
-Losing recent work is the deal; taking the filesystem with it would not have
-been.
+Crash consistency under batching has a history worth keeping. The first
+version of this feature shipped, was caught corrupting volumes under write
+reordering the same afternoon, and was turned off. The mechanism was not
+batching itself: lwext4 wrote the journal's tail pointer on every checkpoint
+completion with no barrier, and batching merely made the log wrap inside a
+test run — which is what let anyone see it. Patches 0017–0020 fixed the
+journal's ordering protocol (recoverable-by-Linux tag checksums, parseable
+revoke counts, revoke-on-free, a lazily advanced tail written durably where
+reuse makes it matter), and batching came back on top of a journal that
+earns it: 236 torn images across geometries × workloads × batch sizes, every
+one recovered by the Linux kernel, with the negative controls still failing.
+The mounted suite asserts both halves — a synced operation survives a cut,
+and an **unsynced** batch still leaves a volume the kernel mounts and
+recovers. Losing recent work is the deal; taking the filesystem with it would
+not have been.
 
 `EXT4B_TXN_BATCH=1` restores the old behaviour exactly, which is how the two
 columns above were measured.

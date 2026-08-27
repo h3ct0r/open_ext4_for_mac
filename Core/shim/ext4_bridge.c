@@ -41,24 +41,30 @@
 
 /* How many mutations may share one journal transaction. See txn_finish.
  *
- * One, which is to say off, and that is not where this started. Batching is
- * implemented, gives an eleven-fold speedup on metadata-heavy work, and
- * corrupts volumes -- but only under write reordering, which is to say only on
- * real hardware. A plain truncated write stream recovers cleanly at every cut
- * point with batching on; the same cuts with the drive model reordering what
- * was in flight do not.
+ * Sixteen, and the history matters, because this was sixteen once before and
+ * got turned off the same afternoon for corrupting volumes under write
+ * reordering. The suspicion recorded here at the time -- writes outside the
+ * transaction reordering against the log -- was close but not the mechanism.
+ * The journal's own tail pointer was written on every checkpoint completion
+ * with no barrier anywhere near it, so it could land before its checkpoint or
+ * be lost while the log space it freed was reused. Batching did not cause
+ * that; it made the log wrap inside a test run, which is what let anyone see
+ * it.
  *
- * The likely mechanism, unconfirmed: writes that are not part of the
- * transaction -- the filesystem superblock, and the journal's own superblock
- * recording where the log starts -- go through ext4_block_writebytes, outside
- * the journal entirely. Committing every mutation barriered those into place
- * constantly. Batching widens the window in which they can be reordered
- * against the log they describe, and replay then reads the wrong range.
+ * lwext4 patches 0017-0020 close it: recoverable-by-Linux tag checksums,
+ * parseable revoke counts, revoke-on-free, and a lazily advanced tail that is
+ * written with barriers exactly where reuse makes it matter. The claim is not
+ * argued from the design; it is measured, by Tests/run_reorder_tests.sh --
+ * 236 torn images across geometries x workloads x batch {1,16,64}, every one
+ * recovered by the real Linux kernel, with the barriers-ignored negative
+ * controls still failing so the suite is known capable of saying no.
  *
- * It is off until that is understood, because the failure is silent filesystem
- * corruption and the reward is speed. EXT4B_TXN_BATCH turns it on for anyone
- * measuring. */
-#define BRIDGE_TXN_BATCH 1
+ * What batching trades is bounded and stated: an operation is durable when
+ * something asks -- sync(2), the batch filling, the journal running low, or
+ * unmount -- not when the call returns. That is the contract Linux ext4,
+ * HFS+ and APFS give. An undrained batch dies cleanly, which the mount-crash
+ * suite's stage 1b asserts. EXT4B_TXN_BATCH overrides for anyone measuring. */
+#define BRIDGE_TXN_BATCH 16
 
 /* ============================================================== logging == */
 
@@ -1473,9 +1479,28 @@ static bool txn_must_commit(ext4b_device *dev, struct ext4_fs *fs)
 
 #if CONFIG_JOURNALING_ENABLE
     if (fs->jbd_journal && fs->curr_trans) {
-        uint32_t maxlen = jbd_get32(&fs->jbd_journal->jbd_fs->sb, maxlen);
+        struct jbd_journal *jbd = fs->jbd_journal;
+        uint32_t maxlen = jbd_get32(&jbd->jbd_fs->sb, maxlen);
         if (maxlen && (uint32_t)fs->curr_trans->data_cnt > maxlen / 4)
             return true;
+
+        /* And against what the ring actually has left, not just its total
+         * size: the tail is held back by committed-but-uncheckpointed
+         * predecessors, so a modest transaction can still force the
+         * allocator to flush a checkpoint mid-commit to make room. That is
+         * safe now -- the wrap path barriers and republishes the tail --
+         * but it serializes the commit behind a checkpoint flush and two
+         * barriers at the worst possible moment. Committing early keeps the
+         * stall out of the commit path. Each dirtied block costs a log
+         * block plus tag, so half the free space is the cautious bound. */
+        uint32_t first = jbd_get32(&jbd->jbd_fs->sb, first);
+        if (maxlen > first) {
+            uint32_t ring = maxlen - first;
+            uint32_t used = (jbd->last + ring - jbd->start) % ring;
+            uint32_t free_blocks = ring - used;
+            if ((uint32_t)fs->curr_trans->data_cnt > free_blocks / 2)
+                return true;
+        }
     }
 #endif
     return false;
