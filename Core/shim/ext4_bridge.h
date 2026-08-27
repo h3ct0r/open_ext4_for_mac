@@ -452,6 +452,32 @@ typedef void (*ext4b_log_fn)(void *ctx, int level, const char *message);
 /* Route lwext4's internal diagnostics to os_log instead of stdout. */
 void ext4b_set_logger(ext4b_log_fn fn, void *ctx);
 
+/* How many times two threads have been inside lwext4 at once since this
+ * process started. lwext4 has no internal locking, so any non-zero value is a
+ * correctness bug upstream of the bridge, not a statistic. Always zero if the
+ * caller is single-threaded, as the tools are. */
+unsigned ext4b_core_collisions(void);
+
+/* Ask the medium behind `fd` to commit everything it has been given, and not
+ * to reorder across this point. Returns 0, or an errno if the descriptor
+ * supports no barrier at all. See device_barrier.c for why this takes a raw
+ * descriptor rather than going through the resource. */
+int ext4b_barrier_fd(int fd);
+
+/* What each of the three barrier calls said. Zero means that call worked. */
+typedef struct {
+    int sync_barrier;   /* DKIOCSYNCHRONIZE, DK_SYNCHRONIZE_OPTION_BARRIER */
+    int sync_cache;     /* DKIOCSYNCHRONIZECACHE */
+    int fullfsync;      /* F_FULLFSYNC */
+} ext4b_barrier_report;
+
+int ext4b_barrier_fd_verbose(int fd, ext4b_barrier_report *out);
+
+/* Whether disk ioctls reach anything through `fd` at all, which is what tells
+ * a medium that has no barrier apart from a descriptor that cannot ask for
+ * one. Returns 0 and fills in the device's block size, or an errno. */
+int ext4b_probe_disk_ioctl(int fd, uint32_t *block_size);
+
 /* Human-readable description of a bridge/errno code. */
 const char *ext4b_strerror(int err);
 

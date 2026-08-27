@@ -26,6 +26,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <stdio.h>
+#include <pthread.h>
+#include <stdatomic.h>
 
 /* One volume per extension instance (FSUnaryFileSystem), so fixed names are
  * sufficient for lwext4's global device/mount-point tables. */
@@ -51,6 +54,75 @@ static void bridge_log(int level, const char *msg)
 {
     if (g_log_fn)
         g_log_fn(g_log_ctx, level, msg);
+}
+
+/* =============================================== concurrent core entry == */
+/*
+ * lwext4 has no internal locking. Its mount-point table, block cache and
+ * journal are global mutable state, and the transaction in flight lives in a
+ * single field -- fs->curr_trans -- shared by every caller. Two threads inside
+ * it at once is not a performance problem, it is corruption: the second one's
+ * txn_begin finds the first one's transaction already open and silently joins
+ * it, and whichever finishes first commits a half-built transaction on the
+ * other's behalf.
+ *
+ * The Swift side serialises everything through Ext4Executor, so none of this
+ * should ever happen. "Should" is the problem. That discipline is a convention
+ * spread across a dozen files, held up by comments, and nothing enforces it;
+ * it has already been broken once, from the attribute path, and was found by
+ * a hang rather than by a check.
+ *
+ * So this measures it instead. Two places are watched, because they fail at
+ * different scales:
+ *
+ *   - block I/O, where two threads overlap inside a single read or write;
+ *   - transactions, where two threads need not overlap in time at all for the
+ *     second to walk into the first one's open transaction.
+ *
+ * It reports and does not block. A lock at either point would be the wrong
+ * granularity -- fine enough to serialise block accesses, too coarse to know
+ * where a transaction begins and ends -- and a detector that changes the
+ * timing it is trying to observe is worth less than one that does not.
+ */
+
+static _Atomic(uintptr_t) g_io_owner;        /* thread inside a block op */
+static _Atomic(uintptr_t) g_txn_owner;       /* thread holding fs->curr_trans */
+static _Atomic(unsigned)  g_collisions;
+
+static void report_collision(const char *what, uintptr_t me, uintptr_t owner)
+{
+    unsigned n = atomic_fetch_add(&g_collisions, 1) + 1;
+
+    /* Loud for the first few, then thinned out: once this is firing it can
+     * fire thousands of times a second, and a log that costs more than the
+     * work it describes changes the thing being measured. */
+    if (n <= 8 || n % 500 == 0) {
+        char msg[192];
+        snprintf(msg, sizeof msg,
+                 "CONCURRENT CORE ENTRY (%s): thread %p entered while %p was "
+                 "already inside lwext4 -- collision %u",
+                 what, (void *)me, (void *)owner, n);
+        bridge_log(3, msg);
+    }
+}
+
+unsigned ext4b_core_collisions(void)
+{
+    return atomic_load(&g_collisions);
+}
+
+static void io_enter(const char *what)
+{
+    uintptr_t me = (uintptr_t)pthread_self();
+    uintptr_t prev = 0;
+
+    if (!atomic_compare_exchange_strong(&g_io_owner, &prev, me) && prev != me)
+        report_collision(what, me, prev);
+}
+
+static void io_leave(void)
+{
+    atomic_store(&g_io_owner, 0);
 }
 
 const char *ext4b_strerror(int err)
@@ -105,7 +177,11 @@ static int bd_bread(struct ext4_blockdev *bdev, void *buf,
 
     uint64_t off = blk_id * (uint64_t)dev->iface.ph_bsize;
     size_t   len = (size_t)blk_cnt * dev->iface.ph_bsize;
-    return dev->read_fn(dev->ctx, buf, off, len) == 0 ? EOK : EIO;
+
+    io_enter("read");
+    int r = dev->read_fn(dev->ctx, buf, off, len) == 0 ? EOK : EIO;
+    io_leave();
+    return r;
 }
 
 static int bd_bwrite(struct ext4_blockdev *bdev, const void *buf,
@@ -121,7 +197,11 @@ static int bd_bwrite(struct ext4_blockdev *bdev, const void *buf,
 
     uint64_t off = blk_id * (uint64_t)dev->iface.ph_bsize;
     size_t   len = (size_t)blk_cnt * dev->iface.ph_bsize;
-    return dev->write_fn(dev->ctx, buf, off, len) == 0 ? EOK : EIO;
+
+    io_enter("write");
+    int r = dev->write_fn(dev->ctx, buf, off, len) == 0 ? EOK : EIO;
+    io_leave();
+    return r;
 }
 
 static int bd_open(struct ext4_blockdev *bdev)   { (void)bdev; return EOK; }
@@ -1216,6 +1296,16 @@ static int txn_begin(struct ext4_fs *fs)
         if (!trans)
             return ENOMEM;
         fs->curr_trans = trans;
+        atomic_store(&g_txn_owner, (uintptr_t)pthread_self());
+    } else if (fs->jbd_journal) {
+        /* A transaction was already open. Ours if this is a nested mutation,
+         * someone else's if the serialisation upstream has a hole -- and in
+         * that case this call is about to add its changes to a transaction
+         * another thread is going to commit. */
+        uintptr_t me = (uintptr_t)pthread_self();
+        uintptr_t owner = atomic_load(&g_txn_owner);
+        if (owner && owner != me)
+            report_collision("transaction", me, owner);
     }
 #endif
     return EOK;
@@ -1227,6 +1317,7 @@ static int txn_commit(struct ext4_fs *fs)
     if (fs->jbd_journal && fs->curr_trans) {
         int r = jbd_journal_commit_trans(fs->jbd_journal, fs->curr_trans);
         fs->curr_trans = NULL;
+        atomic_store(&g_txn_owner, 0);
         return r;
     }
 #endif
@@ -1239,6 +1330,7 @@ static void txn_abort(struct ext4_fs *fs)
     if (fs->jbd_journal && fs->curr_trans) {
         jbd_journal_free_trans(fs->jbd_journal, fs->curr_trans, true);
         fs->curr_trans = NULL;
+        atomic_store(&g_txn_owner, 0);
     }
 #endif
 }

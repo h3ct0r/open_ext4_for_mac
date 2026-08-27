@@ -925,10 +925,131 @@ here. Nothing appears in fskitd's log or the kernel's, and every probe fails
 within the same millisecond, so the call is refused before it reaches a
 device.
 
+### A barrier the API does not offer, through a descriptor it left behind
+
+`metadataFlush` is closed. The medium is not.
+
+FSKit performs the resource's I/O from inside the extension's own process, and
+to do that it has to hold the device open. It does: **`/dev/rdiskN`, fd 3, in
+our own descriptor table.** A descriptor is a capability and the sandbox check
+happened when it was opened, so `ioctl(DKIOCSYNCHRONIZE)` on it is a question
+the sandbox has no further opinion about. That is the barrier — the same call
+HFS+ and APFS use, asking the drive to commit its volatile cache and not to
+reorder across the point.
+
+`Core/shim/device_barrier.c` tries three, most specific first:
+`DKIOCSYNCHRONIZE` with `DK_SYNCHRONIZE_OPTION_BARRIER` (order, without
+waiting — what a journal actually wants), then `DKIOCSYNCHRONIZECACHE`
+(commit, and wait), then `F_FULLFSYNC` for a plain file. The descriptor is
+found by path rather than by number, since nothing documents that it is fd 3
+or that it exists at all, and a miss is reported as the correctness problem it
+is rather than passed over.
+
+The descriptor is real. The ioctls are refused:
+
+| call | result |
+|---|---|
+| `DKIOCSYNCHRONIZE` (barrier) | `EPERM` |
+| `DKIOCSYNCHRONIZECACHE` | `EPERM` |
+| `F_FULLFSYNC` | `ENOTTY` — expected; it is the file-level call, and this is a character device |
+| `DKIOCGETBLOCKSIZE` | **`EPERM`** |
+
+That last row is the one that matters. `DKIOCGETBLOCKSIZE` is a pure getter
+that every disk answers and that no device has grounds to refuse. Getting
+`EPERM` from it means **no disk ioctl reaches this descriptor at all** — so
+the barrier was never actually asked for. This is a permission boundary, not a
+property of the medium, and it reads identically on a disk image and on a USB
+stick.
+
+Diagnosing this took one wrong turn worth recording. The first version tried
+the three calls in order and returned the last one's `errno`, which is
+`F_FULLFSYNC`'s `ENOTTY`. Reported as the verdict, that pointed the diagnosis
+squarely at the medium — "this drive has no barrier" — while the ioctls
+underneath had been saying `EPERM` the whole time. Each call reports its own
+result now.
+
+So the picture is consistent with the metadata I/O family, rather than an
+alternative to it: this module is permitted to read and write the device and
+nothing else. Apple's `msdos` gets `metadataFlush`; we get `EIO`. Apple's
+modules presumably get disk ioctls; we get `EPERM`. One boundary, two
+symptoms.
+
+What is left, in ascending order of unpleasantness: find what actually
+provisions the metadata family for a third-party module, which would give the
+sanctioned barrier and make all of this unnecessary; or add a privileged
+helper that holds the device open and issues the barrier over XPC, which
+would work and would cost a root daemon plus an XPC round trip per
+transaction; or keep removable media read-only by default, which is where the
+driver already stands.
+
+### Two ordering holes remain above it
+
+A barrier is a primitive, not a fix. Two things still have to use it.
+
+**lwext4 cannot ask for one.** `struct ext4_blockdev_iface` has `open`,
+`bread`, `bwrite`, `close`, `lock`, `unlock` — and no flush. Every "flush" in
+`ext4_journal.c` writes buffers out of lwext4's own cache; none of them reaches
+the device. So the journal cannot request a barrier between writing a
+transaction and writing the commit block that vouches for it, which is the one
+place it matters most. The bridge's `flush_fn` is called at the bridge's own
+boundaries — `txn_finish`, `ext4b_sync`, unmount — so a barrier there separates
+one transaction from the next, but not a transaction from its own commit block.
+Closing that needs a patch adding the hook and calling it in
+`__jbd_journal_commit_trans`, on both sides of `jbd_trans_write_commit_block`.
+Journal blocks carry `BC_TMP` and are written through immediately on release,
+so at those two points everything before has been issued and the barrier lands
+where it should.
+
+**Cache pressure can checkpoint before commit.** `ext4_block_cache_shake`
+evicts the least-recently-used dirty buffer whenever the cache is full, with no
+regard for whether the transaction that owns it has committed. That is a
+checkpoint write issued ahead of its commit block, and no barrier can un-issue
+it — the buffers have to be pinned until their transaction commits.
+
+### What the reproducer says
+
+`ext4dump script <file>` runs many mutations inside one mount, which is the
+shape the driver has and the shape nothing else tested: every other path
+through the tool mounts, does one operation and unmounts, checkpointing the
+journal each time. So the 303-cut-point sweep, thorough as it is, has only ever
+tested a filesystem with a single transaction in flight.
+
+Cutting the write stream of a 1,200-operation script at points spread across
+its whole length:
+
+| target | after journal replay |
+|---|---|
+| 64 MB image | 31 of 31 clean |
+| 31 GB image | 11 of 11 clean |
+
+Same geometry as the stick that fails, same workload, same cut. **Volume size
+is not the variable, and the journal and its recovery are correct at this
+layer.** What that leaves is the layer `ext4dump` does not have: the mounted
+FSKit path, on physical media.
+
+### Concurrent core entry is now measured, not assumed
+
+lwext4 has no internal locking, and the transaction in flight lives in a single
+shared field — `fs->curr_trans`. A second thread entering `txn_begin` does not
+get its own transaction; it silently joins the first thread's, and whichever
+finishes first commits a half-built transaction on the other's behalf. The
+Swift side serialises everything through `Ext4Executor`, but that discipline is
+a convention spread across a dozen files held up by comments, and it has been
+broken once already — found by a hang, not by a check.
+
+The bridge now watches both scales: block I/O, where two threads overlap inside
+a single read or write, and transactions, where they need not overlap in time
+at all. It reports rather than blocks, since a detector that changes the timing
+it is trying to observe is worth less than one that does not, and the count is
+logged at every unmount. Eight concurrent writers against a mounted image
+report **no concurrent entry** — so the discipline holds on that path, and any
+future value above zero is a bug rather than a statistic.
+
 ### What this means in practice
 
-Until a barrier exists, an ext4 volume written by this driver and then
-disconnected without being ejected can come back structurally inconsistent —
+Until a barrier is confirmed working on physical media, an ext4 volume written
+by this driver and then disconnected without being ejected can come back
+structurally inconsistent —
 recoverable by `e2fsck`, but inconsistent. **Eject before unplugging**, which
 flushes and closes the journal cleanly, and run `e2fsck` if a volume is ever
 pulled live.

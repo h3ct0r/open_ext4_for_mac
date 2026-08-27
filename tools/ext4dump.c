@@ -126,11 +126,28 @@ static int file_write(void *ctx, const void *buf, uint64_t off, size_t len)
     return (n == (ssize_t)len) ? 0 : EIO;
 }
 
+/* A real write barrier, which on macOS fsync() is not.
+ *
+ * fsync(2) here only guarantees the data has left the buffer cache for the
+ * drive; the drive is free to hold it in volatile cache and commit it in
+ * whatever order suits it. F_FULLFSYNC is the call that asks the drive to
+ * commit, and it is what a journal needs between writing a transaction and
+ * writing the commit block that claims the transaction is complete.
+ *
+ * Not every device supports it -- a plain file on some filesystems returns
+ * ENOTSUP -- so fall back rather than failing the flush.
+ */
 static int file_flush(void *ctx)
 {
     file_ctx *c = ctx;
     if (c->crashed)
         return 0;           /* a flush after the cut reaches nothing */
+
+    if (fcntl(c->fd, F_FULLFSYNC) == 0)
+        return 0;
+    if (errno != ENOTSUP && errno != ENOTTY && errno != EINVAL)
+        return EIO;
+
     return fsync(c->fd) == 0 ? 0 : EIO;
 }
 
@@ -373,6 +390,220 @@ static bool is_write_cmd(const char *c)
     return false;
 }
 
+
+/* One mutating command, shaped exactly as it arrives on the command line:
+ * argv[2] is the verb, argv[3...] its arguments.
+ *
+ * Lifted out of main so that `script` can run a hundred of them inside a
+ * single mount. Every other path through this tool mounts, performs one
+ * operation and unmounts -- which checkpoints the journal and empties the
+ * cache each time. So the crash sweep, thorough as it is about cut points,
+ * has only ever tested a filesystem with a single transaction in flight. The
+ * mounted driver keeps hundreds moving through one journal at once, and that
+ * is the shape a USB stick found damage in.
+ */
+static int run_write_command(ext4b_device *dev, int argc, char **argv);
+
+/* Run a file of mutating commands inside one mount.
+ *
+ * One command per line -- the verb and its arguments, whitespace separated,
+ * exactly as they would be typed. Blank lines and lines beginning with # are
+ * skipped. There is no quoting: an argument cannot contain a space.
+ *
+ * With EXT4DUMP_FAIL_AFTER set, writes past the cut report success and reach
+ * nothing, so the script runs on to the end over a device that stopped
+ * persisting -- which is what a crash looks like from inside the filesystem.
+ */
+static int run_script(ext4b_device *dev, const char *path)
+{
+    FILE *f = (strcmp(path, "-") == 0) ? stdin : fopen(path, "r");
+    if (!f) { perror(path); return 1; }
+
+    char line[4096];
+    unsigned long lineno = 0;
+    int rc = 0;
+
+    while (fgets(line, sizeof line, f)) {
+        char *argv[16];
+        int argc = 2;                 /* argv[0] and argv[1] are never read */
+        char *save = NULL;
+
+        lineno++;
+        argv[0] = argv[1] = (char *)"";
+        for (char *tok = strtok_r(line, " \t\r\n", &save);
+             tok && argc < 16;
+             tok = strtok_r(NULL, " \t\r\n", &save))
+            argv[argc++] = tok;
+
+        if (argc == 2 || argv[2][0] == '#')
+            continue;
+
+        rc = run_write_command(dev, argc, argv);
+        if (rc != 0) {
+            fprintf(stderr, "%s:%lu: %s failed\n", path, lineno, argv[2]);
+            break;
+        }
+    }
+
+    if (f != stdin)
+        fclose(f);
+    return rc;
+}
+
+static int run_write_command(ext4b_device *dev, int argc, char **argv)
+{
+    const char *cmd = argv[2];
+    const char *name = NULL;
+    size_t name_len = 0;
+    int r = 0;
+    int rc = 0;
+
+    if (strcmp(cmd, "script") == 0) {
+        if (argc < 4) { fprintf(stderr, "script needs a file\n"); return 2; }
+        return run_script(dev, argv[3]);
+    }
+    if (strcmp(cmd, "mkdir") == 0 || strcmp(cmd, "create") == 0) {
+        if (argc < 4) { fprintf(stderr, "%s needs a path\n", cmd); rc = 2; return rc; }
+        uint32_t parent = resolve_parent(dev, argv[3], &name, &name_len);
+        if (!parent) { rc = 1; return rc; }
+        bool is_dir = (strcmp(cmd, "mkdir") == 0);
+        uint32_t mode = is_dir ? 0755 : 0644;
+        if (argc > 4) mode = (uint32_t)strtol(argv[4], NULL, 8);
+        uint32_t ino = 0;
+        r = ext4b_create(dev, parent, name, name_len,
+                         is_dir ? EXT4B_TYPE_DIR : EXT4B_TYPE_FILE,
+                         mode, (uint32_t)getuid(), (uint32_t)getgid(), &ino);
+        if (r != 0) { fprintf(stderr, "%s: %s\n", cmd, ext4b_strerror(r)); rc = 1; }
+        else printf("created inode %u\n", ino);
+
+    } else if (strcmp(cmd, "write") == 0 || strcmp(cmd, "append") == 0) {
+        if (argc < 5) { fprintf(stderr, "%s needs <path> <text>\n", cmd); rc = 2; return rc; }
+        uint32_t ino = resolve(dev, argv[3], NULL);
+        if (!ino) { rc = 1; return rc; }
+        uint64_t off = 0;
+        if (strcmp(cmd, "append") == 0) {
+            ext4b_attrs a;
+            if (ext4b_getattr(dev, ino, &a) == 0) off = a.size;
+        }
+        size_t written = 0;
+        r = ext4b_write(dev, ino, off, argv[4], strlen(argv[4]), &written);
+        if (r != 0) { fprintf(stderr, "write: %s\n", ext4b_strerror(r)); rc = 1; }
+        else printf("wrote %zu bytes at %llu\n", written, (unsigned long long)off);
+
+    } else if (strcmp(cmd, "rm") == 0) {
+        if (argc < 4) { fprintf(stderr, "rm needs a path\n"); rc = 2; return rc; }
+        uint32_t parent = resolve_parent(dev, argv[3], &name, &name_len);
+        if (!parent) { rc = 1; return rc; }
+        r = ext4b_unlink(dev, parent, name, name_len);
+        if (r != 0) { fprintf(stderr, "rm: %s\n", ext4b_strerror(r)); rc = 1; }
+
+    } else if (strcmp(cmd, "rm-open") == 0 || strcmp(cmd, "rm-cycle") == 0) {
+        /* Delete a name while pretending something still holds the file
+         * open, which is what the mounted driver does for a file with a
+         * live descriptor. The inode stays allocated and goes on the
+         * orphan list; rm-cycle then completes the release, rm-open leaves
+         * it there so a crash can be simulated mid-lifecycle. */
+        if (argc < 4) { fprintf(stderr, "%s needs a path\n", cmd); rc = 2; return rc; }
+        bool cycle = (strcmp(cmd, "rm-cycle") == 0);
+        for (int i = 3; i < argc; i++) {
+            uint32_t parent = resolve_parent(dev, argv[i], &name, &name_len);
+            if (!parent) { rc = 1; return rc; }
+            uint32_t victim = resolve(dev, argv[i], NULL);
+            bool unreferenced = false;
+            r = ext4b_unlink_ex(dev, parent, name, name_len, true, &unreferenced);
+            if (r != 0) {
+                fprintf(stderr, "%s: %s\n", cmd, ext4b_strerror(r));
+                rc = 1;
+                break;
+            }
+            printf("unlinked %s (inode %u%s)\n", argv[i], victim,
+                   unreferenced ? ", deferred" : "");
+            if (cycle && unreferenced) {
+                r = ext4b_release_inode(dev, victim);
+                if (r != 0) {
+                    fprintf(stderr, "release: %s\n", ext4b_strerror(r));
+                    rc = 1;
+                    break;
+                }
+            }
+        }
+
+    } else if (strcmp(cmd, "release") == 0) {
+        if (argc < 4) { fprintf(stderr, "release needs an inode number\n"); rc = 2; return rc; }
+        for (int i = 3; i < argc; i++) {
+            r = ext4b_release_inode(dev, (uint32_t)strtoul(argv[i], NULL, 10));
+            if (r != 0) { fprintf(stderr, "release: %s\n", ext4b_strerror(r)); rc = 1; break; }
+        }
+
+    } else if (strcmp(cmd, "mv") == 0) {
+        if (argc < 5) { fprintf(stderr, "mv needs <src> <dst>\n"); rc = 2; return rc; }
+        const char *sname, *dname; size_t slen, dlen;
+        uint32_t sp = resolve_parent(dev, argv[3], &sname, &slen);
+        uint32_t dp = resolve_parent(dev, argv[4], &dname, &dlen);
+        if (!sp || !dp) { rc = 1; return rc; }
+        r = ext4b_rename(dev, sp, sname, slen, dp, dname, dlen);
+        if (r != 0) { fprintf(stderr, "mv: %s\n", ext4b_strerror(r)); rc = 1; }
+
+    } else if (strcmp(cmd, "ln") == 0) {
+        if (argc < 5) { fprintf(stderr, "ln needs <target> <name>\n"); rc = 2; return rc; }
+        uint32_t target = resolve(dev, argv[3], NULL);
+        if (!target) { rc = 1; return rc; }
+        uint32_t parent = resolve_parent(dev, argv[4], &name, &name_len);
+        if (!parent) { rc = 1; return rc; }
+        r = ext4b_hardlink(dev, parent, name, name_len, target);
+        if (r != 0) { fprintf(stderr, "ln: %s\n", ext4b_strerror(r)); rc = 1; }
+
+    } else if (strcmp(cmd, "symlink") == 0) {
+        if (argc < 5) { fprintf(stderr, "symlink needs <target> <name>\n"); rc = 2; return rc; }
+        uint32_t parent = resolve_parent(dev, argv[4], &name, &name_len);
+        if (!parent) { rc = 1; return rc; }
+        uint32_t ino = 0;
+        r = ext4b_symlink(dev, parent, name, name_len, argv[3], strlen(argv[3]),
+                          (uint32_t)getuid(), (uint32_t)getgid(), &ino);
+        if (r != 0) { fprintf(stderr, "symlink: %s\n", ext4b_strerror(r)); rc = 1; }
+
+    } else if (strcmp(cmd, "truncate") == 0) {
+        if (argc < 5) { fprintf(stderr, "truncate needs <path> <size>\n"); rc = 2; return rc; }
+        uint32_t ino = resolve(dev, argv[3], NULL);
+        if (!ino) { rc = 1; return rc; }
+        r = ext4b_truncate(dev, ino, strtoull(argv[4], NULL, 10));
+        if (r != 0) { fprintf(stderr, "truncate: %s\n", ext4b_strerror(r)); rc = 1; }
+
+    } else if (strcmp(cmd, "chmod") == 0) {
+        if (argc < 5) { fprintf(stderr, "chmod needs <path> <mode>\n"); rc = 2; return rc; }
+        uint32_t ino = resolve(dev, argv[3], NULL);
+        if (!ino) { rc = 1; return rc; }
+        ext4b_attrs a; memset(&a, 0, sizeof(a));
+        a.mode = (uint32_t)strtol(argv[4], NULL, 8);
+        r = ext4b_setattr(dev, ino, EXT4B_SET_MODE, &a);
+        if (r != 0) { fprintf(stderr, "chmod: %s\n", ext4b_strerror(r)); rc = 1; }
+
+    } else if (strcmp(cmd, "setxattr") == 0) {
+        if (argc < 6) { fprintf(stderr, "setxattr needs <path> <name> <value>\n"); rc = 2; return rc; }
+        uint32_t ino = resolve(dev, argv[3], NULL);
+        if (!ino) { rc = 1; return rc; }
+        r = ext4b_setxattr(dev, ino, argv[4], argv[5], strlen(argv[5]));
+        if (r != 0) { fprintf(stderr, "setxattr: %s\n", ext4b_strerror(r)); rc = 1; }
+
+    } else if (strcmp(cmd, "label") == 0) {
+        if (argc < 4) { fprintf(stderr, "label needs a name\n"); rc = 2; return rc; }
+        r = ext4b_set_label(dev, argv[3]);
+        if (r != 0) { fprintf(stderr, "label: %s\n", ext4b_strerror(r)); rc = 1; }
+    } else if (strcmp(cmd, "rmxattr") == 0) {
+        if (argc < 5) { fprintf(stderr, "rmxattr needs <path> <name>\n"); rc = 2; return rc; }
+        uint32_t ino = resolve(dev, argv[3], NULL);
+        if (!ino) { rc = 1; return rc; }
+        r = ext4b_removexattr(dev, ino, argv[4]);
+        if (r != 0) { fprintf(stderr, "rmxattr: %s\n", ext4b_strerror(r)); rc = 1; }
+
+    } else {
+        fprintf(stderr, "unknown write command: %s\n", cmd);
+        rc = 2;
+    }
+
+    return rc;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 3) {
@@ -395,6 +626,8 @@ int main(int argc, char **argv)
             "  create <path> [mode]    create an empty file\n"
             "  write <path> <text>     write text at offset 0\n"
             "  append <path> <text>    append text at end of file\n"
+            "  script <file>           run one command per line, all inside\n"
+            "                          a single mount ('-' reads stdin)\n"
             "  rm <path>               remove a file or empty directory\n"
             "  rm-open <path>...       remove the name only, as if the file\n"
             "                          were still open: the inode stays\n"
@@ -700,148 +933,7 @@ int main(int argc, char **argv)
         else printf("orphan head: %u\n", head);
 
     } else if (writable) {
-        /* ---------------------------------------------------- mutations -- */
-        const char *name = NULL;
-        size_t name_len = 0;
-
-        if (strcmp(cmd, "mkdir") == 0 || strcmp(cmd, "create") == 0) {
-            if (argc < 4) { fprintf(stderr, "%s needs a path\n", cmd); rc = 2; goto unmount; }
-            uint32_t parent = resolve_parent(dev, argv[3], &name, &name_len);
-            if (!parent) { rc = 1; goto unmount; }
-            bool is_dir = (strcmp(cmd, "mkdir") == 0);
-            uint32_t mode = is_dir ? 0755 : 0644;
-            if (argc > 4) mode = (uint32_t)strtol(argv[4], NULL, 8);
-            uint32_t ino = 0;
-            r = ext4b_create(dev, parent, name, name_len,
-                             is_dir ? EXT4B_TYPE_DIR : EXT4B_TYPE_FILE,
-                             mode, (uint32_t)getuid(), (uint32_t)getgid(), &ino);
-            if (r != 0) { fprintf(stderr, "%s: %s\n", cmd, ext4b_strerror(r)); rc = 1; }
-            else printf("created inode %u\n", ino);
-
-        } else if (strcmp(cmd, "write") == 0 || strcmp(cmd, "append") == 0) {
-            if (argc < 5) { fprintf(stderr, "%s needs <path> <text>\n", cmd); rc = 2; goto unmount; }
-            uint32_t ino = resolve(dev, argv[3], NULL);
-            if (!ino) { rc = 1; goto unmount; }
-            uint64_t off = 0;
-            if (strcmp(cmd, "append") == 0) {
-                ext4b_attrs a;
-                if (ext4b_getattr(dev, ino, &a) == 0) off = a.size;
-            }
-            size_t written = 0;
-            r = ext4b_write(dev, ino, off, argv[4], strlen(argv[4]), &written);
-            if (r != 0) { fprintf(stderr, "write: %s\n", ext4b_strerror(r)); rc = 1; }
-            else printf("wrote %zu bytes at %llu\n", written, (unsigned long long)off);
-
-        } else if (strcmp(cmd, "rm") == 0) {
-            if (argc < 4) { fprintf(stderr, "rm needs a path\n"); rc = 2; goto unmount; }
-            uint32_t parent = resolve_parent(dev, argv[3], &name, &name_len);
-            if (!parent) { rc = 1; goto unmount; }
-            r = ext4b_unlink(dev, parent, name, name_len);
-            if (r != 0) { fprintf(stderr, "rm: %s\n", ext4b_strerror(r)); rc = 1; }
-
-        } else if (strcmp(cmd, "rm-open") == 0 || strcmp(cmd, "rm-cycle") == 0) {
-            /* Delete a name while pretending something still holds the file
-             * open, which is what the mounted driver does for a file with a
-             * live descriptor. The inode stays allocated and goes on the
-             * orphan list; rm-cycle then completes the release, rm-open leaves
-             * it there so a crash can be simulated mid-lifecycle. */
-            if (argc < 4) { fprintf(stderr, "%s needs a path\n", cmd); rc = 2; goto unmount; }
-            bool cycle = (strcmp(cmd, "rm-cycle") == 0);
-            for (int i = 3; i < argc; i++) {
-                uint32_t parent = resolve_parent(dev, argv[i], &name, &name_len);
-                if (!parent) { rc = 1; goto unmount; }
-                uint32_t victim = resolve(dev, argv[i], NULL);
-                bool unreferenced = false;
-                r = ext4b_unlink_ex(dev, parent, name, name_len, true, &unreferenced);
-                if (r != 0) {
-                    fprintf(stderr, "%s: %s\n", cmd, ext4b_strerror(r));
-                    rc = 1;
-                    break;
-                }
-                printf("unlinked %s (inode %u%s)\n", argv[i], victim,
-                       unreferenced ? ", deferred" : "");
-                if (cycle && unreferenced) {
-                    r = ext4b_release_inode(dev, victim);
-                    if (r != 0) {
-                        fprintf(stderr, "release: %s\n", ext4b_strerror(r));
-                        rc = 1;
-                        break;
-                    }
-                }
-            }
-
-        } else if (strcmp(cmd, "release") == 0) {
-            if (argc < 4) { fprintf(stderr, "release needs an inode number\n"); rc = 2; goto unmount; }
-            for (int i = 3; i < argc; i++) {
-                r = ext4b_release_inode(dev, (uint32_t)strtoul(argv[i], NULL, 10));
-                if (r != 0) { fprintf(stderr, "release: %s\n", ext4b_strerror(r)); rc = 1; break; }
-            }
-
-        } else if (strcmp(cmd, "mv") == 0) {
-            if (argc < 5) { fprintf(stderr, "mv needs <src> <dst>\n"); rc = 2; goto unmount; }
-            const char *sname, *dname; size_t slen, dlen;
-            uint32_t sp = resolve_parent(dev, argv[3], &sname, &slen);
-            uint32_t dp = resolve_parent(dev, argv[4], &dname, &dlen);
-            if (!sp || !dp) { rc = 1; goto unmount; }
-            r = ext4b_rename(dev, sp, sname, slen, dp, dname, dlen);
-            if (r != 0) { fprintf(stderr, "mv: %s\n", ext4b_strerror(r)); rc = 1; }
-
-        } else if (strcmp(cmd, "ln") == 0) {
-            if (argc < 5) { fprintf(stderr, "ln needs <target> <name>\n"); rc = 2; goto unmount; }
-            uint32_t target = resolve(dev, argv[3], NULL);
-            if (!target) { rc = 1; goto unmount; }
-            uint32_t parent = resolve_parent(dev, argv[4], &name, &name_len);
-            if (!parent) { rc = 1; goto unmount; }
-            r = ext4b_hardlink(dev, parent, name, name_len, target);
-            if (r != 0) { fprintf(stderr, "ln: %s\n", ext4b_strerror(r)); rc = 1; }
-
-        } else if (strcmp(cmd, "symlink") == 0) {
-            if (argc < 5) { fprintf(stderr, "symlink needs <target> <name>\n"); rc = 2; goto unmount; }
-            uint32_t parent = resolve_parent(dev, argv[4], &name, &name_len);
-            if (!parent) { rc = 1; goto unmount; }
-            uint32_t ino = 0;
-            r = ext4b_symlink(dev, parent, name, name_len, argv[3], strlen(argv[3]),
-                              (uint32_t)getuid(), (uint32_t)getgid(), &ino);
-            if (r != 0) { fprintf(stderr, "symlink: %s\n", ext4b_strerror(r)); rc = 1; }
-
-        } else if (strcmp(cmd, "truncate") == 0) {
-            if (argc < 5) { fprintf(stderr, "truncate needs <path> <size>\n"); rc = 2; goto unmount; }
-            uint32_t ino = resolve(dev, argv[3], NULL);
-            if (!ino) { rc = 1; goto unmount; }
-            r = ext4b_truncate(dev, ino, strtoull(argv[4], NULL, 10));
-            if (r != 0) { fprintf(stderr, "truncate: %s\n", ext4b_strerror(r)); rc = 1; }
-
-        } else if (strcmp(cmd, "chmod") == 0) {
-            if (argc < 5) { fprintf(stderr, "chmod needs <path> <mode>\n"); rc = 2; goto unmount; }
-            uint32_t ino = resolve(dev, argv[3], NULL);
-            if (!ino) { rc = 1; goto unmount; }
-            ext4b_attrs a; memset(&a, 0, sizeof(a));
-            a.mode = (uint32_t)strtol(argv[4], NULL, 8);
-            r = ext4b_setattr(dev, ino, EXT4B_SET_MODE, &a);
-            if (r != 0) { fprintf(stderr, "chmod: %s\n", ext4b_strerror(r)); rc = 1; }
-
-        } else if (strcmp(cmd, "setxattr") == 0) {
-            if (argc < 6) { fprintf(stderr, "setxattr needs <path> <name> <value>\n"); rc = 2; goto unmount; }
-            uint32_t ino = resolve(dev, argv[3], NULL);
-            if (!ino) { rc = 1; goto unmount; }
-            r = ext4b_setxattr(dev, ino, argv[4], argv[5], strlen(argv[5]));
-            if (r != 0) { fprintf(stderr, "setxattr: %s\n", ext4b_strerror(r)); rc = 1; }
-
-        } else if (strcmp(cmd, "label") == 0) {
-            if (argc < 4) { fprintf(stderr, "label needs a name\n"); rc = 2; goto unmount; }
-            r = ext4b_set_label(dev, argv[3]);
-            if (r != 0) { fprintf(stderr, "label: %s\n", ext4b_strerror(r)); rc = 1; }
-        } else if (strcmp(cmd, "rmxattr") == 0) {
-            if (argc < 5) { fprintf(stderr, "rmxattr needs <path> <name>\n"); rc = 2; goto unmount; }
-            uint32_t ino = resolve(dev, argv[3], NULL);
-            if (!ino) { rc = 1; goto unmount; }
-            r = ext4b_removexattr(dev, ino, argv[4]);
-            if (r != 0) { fprintf(stderr, "rmxattr: %s\n", ext4b_strerror(r)); rc = 1; }
-
-        } else {
-            fprintf(stderr, "unknown write command: %s\n", cmd);
-            rc = 2;
-        }
+        rc = run_write_command(dev, argc, argv);
 
     } else {
         fprintf(stderr, "unknown command: %s\n", cmd);

@@ -128,7 +128,25 @@ extension Ext4Volume: FSVolume.Operations {
         try? await executor.run { [self] in
             _ = ext4b_sync(try device)
         }
+        reportCoreCollisions()
         await fileSystem?.closeVolume()
+    }
+
+    /// Say out loud whether anything got into lwext4 behind the executor's back.
+    ///
+    /// lwext4 has no locking of its own, so this number is not a statistic: any
+    /// value above zero means two threads shared a block cache and, worse, a
+    /// transaction. It is reported at unmount because that is the one moment
+    /// guaranteed to happen once per session, and silence here is the result
+    /// worth having.
+    func reportCoreCollisions() {
+        let n = ext4b_core_collisions()
+        if n == 0 {
+            Ext4Log.volume.info("core serialisation held: no concurrent entry")
+        } else {
+            Ext4Log.volume.error(
+                "core serialisation BROKEN: \(n, privacy: .public) concurrent entries into lwext4")
+        }
     }
 
     func synchronize(flags: FSSyncFlags) async throws {
