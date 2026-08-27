@@ -119,7 +119,19 @@ final class BlockDeviceBridge {
         // and touches nothing.
         Self.probeMetadataFamily(resource)
         self.barrierFD = Self.findBarrierDescriptor(bsdName: resource.bsdName)
-        if isWritable && barrierFD == nil {
+
+        // Connect to the helper, but do not ask it for a barrier yet.
+        //
+        // An earlier version proved the helper worked here, at mount time, so
+        // it could report a missing barrier before anything depended on one.
+        // That is the one moment it cannot work: the device is mid-claim, the
+        // helper's open is refused, and the result was cached as "no barrier"
+        // for the life of a mount that would have had one perfectly well a
+        // second later. Connecting is cheap and proves nothing; the first
+        // commit proves it, and says so once.
+        self.barrierHelper = isWritable ? BarrierClient(bsdName: resource.bsdName) : nil
+
+        if isWritable && barrierFD == nil && barrierHelper == nil {
             Ext4Log.io.error("""
                 no write barrier for \(resource.bsdName, privacy: .public); \
                 journal ordering cannot be enforced
@@ -144,6 +156,17 @@ final class BlockDeviceBridge {
     /// with nothing enforcing order beneath it, which is a correctness
     /// problem and is reported as one.
     private let barrierFD: Int32?
+
+    /// The privileged helper, when it is reachable. This is the barrier that
+    /// actually works; `barrierFD` above is the one the sandbox refuses, kept
+    /// so that refusal is measured on every mount rather than remembered.
+    private let barrierHelper: BarrierClient?
+
+    /// Said once each, on the first commit that settles the question. Every
+    /// journal commit calls flush(), and a line per commit would bury the log
+    /// in the answer to a question asked once.
+    private var announcedBarrier = false
+    private var warnedNoBarrier = false
 
     /// Find the open descriptor for `bsdName` among this process's own.
     ///
@@ -436,6 +459,42 @@ final class BlockDeviceBridge {
                 Ext4Log.io.error("metadata flush failed: \(error.localizedDescription, privacy: .public)")
                 return EIO
             }
+        }
+
+        // The helper first: in this sandbox it is the only one of the two that
+        // can actually reach the device.
+        if let barrierHelper {
+            let rc = barrierHelper.barrier()
+            if rc == 0 {
+                // Once, on the first one that works, so the log says plainly
+                // whether this mount is ordered or only hoping to be.
+                if !announcedBarrier {
+                    announcedBarrier = true
+                    // Named, because something reads this back to decide
+                    // whether a run is worth starting, and an unqualified
+                    // "barrier active" matches any volume that happened to be
+                    // mounted recently -- including a disk image from another
+                    // test. That false pass is exactly what the check exists
+                    // to prevent.
+                    Ext4Log.io.info("""
+                        write barrier active via the privileged helper on \
+                        \(self.resource.bsdName, privacy: .public)
+                        """)
+                }
+                return 0
+            }
+            // Not EIO: refusing every operation is worse than proceeding
+            // without ordering, and the read-only-by-default policy is what
+            // stands between an unbarriered volume and a user who did not
+            // choose that. Say so loudly, once, and carry on.
+            if !warnedNoBarrier {
+                warnedNoBarrier = true
+                Ext4Log.io.error("""
+                    write barrier unavailable: \(String(cString: strerror(rc)), privacy: .public) \
+                    -- journal ordering is not enforced on this mount
+                    """)
+            }
+            return 0
         }
 
         guard let barrierFD else { return 0 }

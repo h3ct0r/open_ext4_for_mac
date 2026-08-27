@@ -1,0 +1,137 @@
+diff --git a/include/ext4_blockdev.h b/include/ext4_blockdev.h
+index 668fb05..68bf927 100644
+--- a/include/ext4_blockdev.h
++++ b/include/ext4_blockdev.h
+@@ -80,6 +80,20 @@ struct ext4_blockdev_iface {
+ 	 * @param   bdev block device.*/
+ 	int (*unlock)(struct ext4_blockdev *bdev);
+ 
++	/**@brief   Make the medium commit what it has been given, and not
++	 *          reorder across this point. Not mandatory field.
++	 *
++	 * A journal is a claim about order: the transaction reaches the medium
++	 * before the commit block that vouches for it, and the commit block
++	 * reaches it before the filesystem is changed to match. Neither is true
++	 * by default -- a drive may hold writes in volatile cache and commit
++	 * them in whatever order suits it, while reporting each one complete.
++	 *
++	 * Without this the journal is an ordering protocol with no way to ask
++	 * for ordering. Leave it NULL and jbd behaves exactly as before.
++	 * @param   bdev block device.*/
++	int (*flush)(struct ext4_blockdev *bdev);
++
+ 	/**@brief   Block size (bytes): physical*/
+ 	uint32_t ph_bsize;
+ 
+@@ -174,6 +188,12 @@ int ext4_block_fini(struct ext4_blockdev *bdev);
+  * @return  standard error code*/
+ int ext4_block_flush_buf(struct ext4_blockdev *bdev, struct ext4_buf *buf);
+ 
++/**@brief   Ask the medium to commit everything it has been given.
++ * @param   bdev block device
++ * @return  standard error code; EOK when the device offers no barrier, since
++ *          a caller that cannot have one is not failing.*/
++int ext4_block_barrier(struct ext4_blockdev *bdev);
++
+ /**@brief   Flush data in buffer of given lba to disk,
+  *          if that buffer exists in block cache.
+  * @param   bdev block device descriptor
+diff --git a/src/ext4_blockdev.c b/src/ext4_blockdev.c
+index c01093a..1955e74 100644
+--- a/src/ext4_blockdev.c
++++ b/src/ext4_blockdev.c
+@@ -141,6 +141,14 @@ int ext4_block_fini(struct ext4_blockdev *bdev)
+ 	return bdev->bdif->close(bdev);
+ }
+ 
++int ext4_block_barrier(struct ext4_blockdev *bdev)
++{
++	if (!bdev || !bdev->bdif || !bdev->bdif->flush)
++		return EOK;
++
++	return bdev->bdif->flush(bdev);
++}
++
+ int ext4_block_flush_buf(struct ext4_blockdev *bdev, struct ext4_buf *buf)
+ {
+ 	int r;
+@@ -224,6 +232,17 @@ int ext4_block_get_noread(struct ext4_blockdev *bdev, struct ext4_block *b,
+ 	if (!(lba < bdev->lg_bcnt))
+ 		return ENXIO;
+ 
++	/* Block 0 is ext4's hole marker: ext4_fs_get_inode_dblk_idx() returns
++	 * it for a logical block that has no physical block behind it, and no
++	 * real metadata ever lives there. Fetching it anyway caches a buffer
++	 * with lb_id == 0, which then trips the ext4_assert(b->lb_id) in
++	 * ext4_bcache_free() on release -- so a directory with a hole in it,
++	 * or an inode whose blocks have been freed underneath a stale lookup,
++	 * takes the whole driver down instead of returning an error.
++	 * Refusing here turns every one of those into a clean failure. */
++	if (lba == 0)
++		return ENXIO;
++
+ 	b->lb_id = lba;
+ 
+ 	/*If cache is full we have to (flush and) drop it anyway :(*/
+diff --git a/src/ext4_journal.c b/src/ext4_journal.c
+index 7874f58..1e3f434 100644
+--- a/src/ext4_journal.c
++++ b/src/ext4_journal.c
+@@ -1443,7 +1443,20 @@ int jbd_journal_stop(struct jbd_journal *journal)
+ 		return r;
+ 
+ 	journal->start = 0;
+-	journal->trans_id = 0;
++	/*
++	 * Deliberately keep trans_id rather than resetting it to 0.
++	 *
++	 * jbd_journal_start() computes the next session's first transaction id
++	 * as on-disk sequence + 1, specifically so that records still
++	 * physically present in the log from an earlier session cannot be
++	 * mistaken for current ones. Writing 0 here defeats that: every session
++	 * then starts at 1, stale records also carry 1, and a crash that
++	 * advertises a log start before the new transaction commits lets
++	 * recovery replay the previous session's records over live metadata.
++	 *
++	 * Persisting the last id used keeps sequence numbers monotonic across
++	 * mounts, which is what makes the +1 meaningful.
++	 */
+ 	jbd_journal_write_sb(journal);
+ 	return jbd_write_sb(journal->jbd_fs);
+ }
+@@ -2180,10 +2193,35 @@ static int __jbd_journal_commit_trans(struct jbd_journal *journal,
+ 		goto Finish;
+ 	}
+ 
++	/*
++	 * The transaction is on its way to the medium; the commit block that
++	 * vouches for it must not overtake it.
++	 *
++	 * Journal blocks carry BC_TMP and are written through as they are
++	 * released, so everything this transaction describes has been issued by
++	 * now. Issued is not committed: without this the drive is free to write
++	 * the commit block first and lose the body, and recovery then replays a
++	 * transaction whose contents never arrived.
++	 */
++	rc = ext4_block_barrier(journal->jbd_fs->bdev);
++	if (rc != EOK)
++		goto Finish;
++
+ 	rc = jbd_trans_write_commit_block(trans);
+ 	if (rc != EOK)
+ 		goto Finish;
+ 
++	/*
++	 * And the commit block must reach the medium before the filesystem is
++	 * changed to match it. Everything below this point may checkpoint --
++	 * write metadata to its home location -- and a checkpoint that lands
++	 * while the commit block has not is unrecoverable: the journal has no
++	 * record of a change the filesystem has already made.
++	 */
++	rc = ext4_block_barrier(journal->jbd_fs->bdev);
++	if (rc != EOK)
++		goto Finish;
++
+ 	journal->alloc_trans_id++;
+ 
+ 	/* Complete the checkpoint of buffers which are revoked. */

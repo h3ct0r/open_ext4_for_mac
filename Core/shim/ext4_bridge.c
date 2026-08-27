@@ -206,6 +206,25 @@ static int bd_bwrite(struct ext4_blockdev *bdev, const void *buf,
 
 static int bd_open(struct ext4_blockdev *bdev)   { (void)bdev; return EOK; }
 static int bd_close(struct ext4_blockdev *bdev)  { (void)bdev; return EOK; }
+/*
+ * The journal's write barrier.
+ *
+ * lwext4 calls this on both sides of the commit block (patch 0014). Everything
+ * above it in this file calls flush_fn at its own boundaries -- after an
+ * operation, at sync, at unmount -- which separates one transaction from the
+ * next but does nothing to order a transaction against its own commit block.
+ * That is the ordering that matters, and this is the only path that reaches
+ * it.
+ */
+static int bd_flush(struct ext4_blockdev *bdev)
+{
+    ext4b_device *dev = bdev->bdif->p_user;
+    if (!dev || !dev->flush_fn || dev->read_only)
+        return EOK;
+
+    return dev->flush_fn(dev->ctx) == 0 ? EOK : EIO;
+}
+
 static int bd_lock(struct ext4_blockdev *bdev)   { (void)bdev; return EOK; }
 static int bd_unlock(struct ext4_blockdev *bdev) { (void)bdev; return EOK; }
 
@@ -244,6 +263,7 @@ ext4b_device *ext4b_device_create(void *ctx,
     dev->iface.close    = bd_close;
     dev->iface.lock     = bd_lock;
     dev->iface.unlock   = bd_unlock;
+    dev->iface.flush    = bd_flush;
     dev->iface.ph_bsize = block_size;
     dev->iface.ph_bcnt  = block_count;
     dev->iface.ph_bbuf  = dev->block_buf;

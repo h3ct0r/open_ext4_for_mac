@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.h3ct0r.ext4mac.barrier</string>
+
+	<!-- Relative to the app bundle: SMAppService resolves it there, and the
+	     daemon is only ever run from inside the signed bundle so that the code
+	     requirement on both sides means something. -->
+	<key>BundleProgram</key>
+	<string>Contents/MacOS/ext4barrierd</string>
+
+	<!-- Launched by the first barrier request and kept alive after: opening a
+	     disk device is not free, and this sits on the path of every journal
+	     commit. -->
+	<key>MachServices</key>
+	<dict>
+		<key>dev.h3ct0r.ext4mac.barrier</key>
+		<true/>
+	</dict>
+
+	<key>KeepAlive</key>
+	<false/>
+
+	<key>ProcessType</key>
+	<string>Adaptive</string>
+</dict>
+</plist>

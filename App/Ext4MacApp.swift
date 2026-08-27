@@ -60,6 +60,11 @@ struct Ext4MacApp {
         case "removable-writes":
             exit(removableWrites(arguments.first))
 
+        // The privileged helper that issues the write barrier the sandbox
+        // will not let the extension issue itself.
+        case "barrier":
+            exit(Ext4Barrier.command(arguments.first))
+
         case "help", "-h", "--help":
             usage(0)
         default:
@@ -119,6 +124,8 @@ struct Ext4MacApp {
         Ext4Mac menu                watch for encrypted volumes and ask
         Ext4Mac removable-writes [on|off]
                                     allow writing to media you can unplug
+        Ext4Mac barrier [on|off]    install the helper that gives the journal
+                                    a real write barrier
 
         Or mount anything ext4 with:
           mount -F -t ext4 <disk> <mountpoint>

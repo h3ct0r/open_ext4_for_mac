@@ -21,6 +21,32 @@
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
 
+	<!-- Reach the privileged barrier helper.
+
+	     The write barrier is one ioctl, DKIOCSYNCHRONIZECACHE, and this
+	     process may not issue it. The sandbox denies it by name:
+
+	       Sandbox: Ext4FS deny(1) file-ioctl path:/dev/rdiskN
+	                ioctl-command:(_IO "d" 22)
+
+	     Nothing lifts that. A file path exception grants file-read and
+	     file-write, not file-ioctl, and the IOKit user client exception that
+	     Apple's own msdos module carries changes nothing here; both were
+	     signed and measured, and the denial came back identical. So the ioctl
+	     is issued by a LaunchDaemon instead, and this is the entitlement that
+	     lets us talk to it.
+
+	     Unlike file-ioctl, mach-lookup does have a documented exception, which
+	     is the whole reason this approach is available at all.
+
+	     Note for anyone editing the comments in this file: AMFI parses it with
+	     a stricter XML reader than plutil uses, and a double hyphen inside an
+	     XML comment is a syntax error it rejects the whole file over. -->
+	<key>com.apple.security.temporary-exception.mach-lookup.global-name</key>
+	<array>
+		<string>dev.h3ct0r.ext4mac.barrier</string>
+	</array>
+
 	<!-- Shared with the container app, so it can hand over the master key for
 	     an encrypted volume without the passphrase ever entering this
 	     sandboxed process. Already authorised by the provisioning profile,

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.h3ct0r.ext4mac.barrier</string>
+
+	<!-- An absolute path, root-owned, outside any user-writable bundle.
+	     launchd will not run a daemon whose program anyone but root can
+	     replace, and /Applications belongs to the installing user. -->
+	<key>Program</key>
+	<string>/usr/local/libexec/ext4barrierd</string>
+
+	<!-- Launched on demand by the first barrier request and left running
+	     after: opening a disk device is not free, and this sits on the path
+	     of every journal commit. -->
+	<key>MachServices</key>
+	<dict>
+		<key>dev.h3ct0r.ext4mac.barrier</key>
+		<true/>
+	</dict>
+
+	<key>KeepAlive</key>
+	<false/>
+
+	<key>ProcessType</key>
+	<string>Adaptive</string>
+</dict>
+</plist>

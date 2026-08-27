@@ -185,7 +185,17 @@ test-mount-luks:
 # What a killed driver leaves behind, and whether the journal recovers it.
 # Passes on a disk image; EXT4_KILL_DEVICE=diskN points it at real media, which
 # it ERASES, and which is where the missing write barrier shows.
-test-kill-recovery:
+# Check the switches before spending the run, not after.
+#
+# Three separate hand-granted things stand between this suite and the barrier
+# it measures, and none of them announces itself when it lapses. Three
+# consecutive five-round runs against real hardware completed, reported a
+# result, and measured nothing, because the barrier was not there and nothing
+# said so until the log was read afterwards.
+preflight:
+	@bash scripts/preflight.sh $(EXT4_KILL_DEVICE)
+
+test-kill-recovery: preflight
 	@bash Tests/run_kill_recovery_tests.sh
 
 # Crash consistency against the mounted driver rather than the offline core.
@@ -279,7 +289,40 @@ $(APPEX): $(SWIFT_SRCS) $(CORE_LIB) Extension/Info.plist
 # The container app exists only to host the extension: macOS discovers FSKit
 # modules through an installed application bundle, and the user enables it in
 # System Settings > General > Login Items & Extensions.
-app: extension $(BUILD)/$(APP_NAME).app/Contents/Info.plist $(BUILD)/$(APP_NAME).app/Contents/MacOS/$(APP_NAME)
+app: extension helper $(BUILD)/$(APP_NAME).app/Contents/Info.plist $(BUILD)/$(APP_NAME).app/Contents/MacOS/$(APP_NAME)
+
+# --- the privileged barrier helper -------------------------------------------
+# A LaunchDaemon that issues DKIOCSYNCHRONIZECACHE on request. It exists
+# because the App Sandbox denies that ioctl to the extension by name, and no
+# entitlement lifts the denial -- both the ones that looked like they should
+# were tried. See Helper/ext4barrierd.c. The container app registers it through
+# SMAppService, which is why it lives inside the bundle rather than in
+# /Library/LaunchDaemons.
+HELPER_NAME  := ext4barrierd
+HELPER_LABEL := $(BUNDLE_ID).barrier
+HELPER_BIN   := $(BUILD)/$(APP_NAME).app/Contents/MacOS/$(HELPER_NAME)
+HELPER_PLIST := $(BUILD)/$(APP_NAME).app/Contents/Library/LaunchDaemons/$(HELPER_LABEL).plist
+
+# Only the binary goes in the bundle. The daemon's plist lives in
+# Packaging/ and is installed to /Library/LaunchDaemons by install-barrier;
+# a second copy inside the bundle would only suggest SMAppService still has
+# something to do with this, and it does not.
+helper: $(HELPER_BIN)
+
+# No -g here, unlike everything else in this file. Debug info makes the linker
+# leave an ext4barrierd.dSYM *bundle* next to the executable, inside
+# Contents/MacOS -- where a bundle has no business being. codesign --deep
+# --strict passes over it happily, so nothing complains until something that
+# validates bundle layout more carefully refuses to play.
+$(HELPER_BIN): Helper/$(HELPER_NAME).c
+	@mkdir -p $(dir $@)
+	@rm -rf $@.dSYM
+	cc -target arm64-apple-macos$(DEPLOY_TARGET) -O2 -Wall \
+	    -framework Security -framework CoreFoundation $< -o $@
+
+$(HELPER_PLIST): Helper/$(HELPER_LABEL).plist
+	@mkdir -p $(dir $@)
+	@cp $< $@
 
 $(BUILD)/$(APP_NAME).app/Contents/Info.plist: App/Info.plist
 	@mkdir -p $(dir $@)
@@ -342,6 +385,62 @@ FS_BUNDLE_SRC := Packaging/ext4.fs
 # These two targets run as root and both begin with `rm -rf $(FS_BUNDLE_DEST)`;
 # a make variable that a caller can set is not something to point that at.
 override FS_BUNDLE_DEST := /Library/Filesystems/ext4.fs
+
+# --- the barrier daemon ------------------------------------------------------
+# Installed the old-fashioned way, into /Library/LaunchDaemons, and not through
+# SMAppService -- which is the modern API and does not work here.
+#
+# SMAppService registers a daemon as *disallowed* and waits for the user to
+# approve it in Login Items. That approval never lands: the toggle is inert,
+# register() returns a bare EPERM whether run as the user or as root, and each
+# attempt leaves another stuck "pending authorization" record behind in the
+# Background Task Management database.
+#
+# A daemon installed into /Library/LaunchDaemons by root is dispositioned
+# `enabled, allowed, notified` instead -- allowed by default, with the user
+# able to turn it off afterwards rather than having to turn it on first. Every
+# third-party daemon on a typical machine is there for the same reason.
+#
+# `override` so the destinations cannot be pointed somewhere else from the
+# command line: these targets run as root and remove what they find.
+override BARRIER_LABEL   := dev.h3ct0r.ext4mac.barrier
+override BARRIER_PROGRAM := /usr/local/libexec/ext4barrierd
+override BARRIER_PLIST   := /Library/LaunchDaemons/$(BARRIER_LABEL).plist
+
+install-barrier:
+	@test "$$(id -u)" = "0" || { echo "needs root: sudo make install-barrier"; exit 1; }
+	@test -x "$(HELPER_BIN)" || { echo "missing $(HELPER_BIN); run make sign"; exit 1; }
+# Refuse an ad-hoc signature, because the failure it causes is silent and slow
+# to find. TCC grants Full Disk Access against a binary's code identity; an
+# ad-hoc binary has none that survives a rebuild, so the grant silently lapses
+# the next time this is installed and the daemon goes back to being denied the
+# device -- with the driver reporting no barrier and the journal quietly
+# unordered. `make helper` alone produces exactly that, because signing happens
+# in sign.sh; this target must be fed the signed binary.
+	@codesign -dv "$(HELPER_BIN)" 2>&1 | grep -q "TeamIdentifier=$(TEAM_ID)" || { \
+	    echo "refusing: $(HELPER_BIN) is not signed with team $(TEAM_ID)"; \
+	    echo ""; \
+	    echo "  An ad-hoc binary cannot hold a Full Disk Access grant across"; \
+	    echo "  reinstalls, and without that grant the daemon is denied the"; \
+	    echo "  device and there is no write barrier."; \
+	    echo ""; \
+	    echo "      make sign && sudo make install-barrier"; \
+	    exit 1; }
+	@launchctl bootout system "$(BARRIER_PLIST)" 2>/dev/null || true
+	@install -d -o root -g wheel -m 755 /usr/local/libexec
+	@install -o root -g wheel -m 755 "$(HELPER_BIN)" "$(BARRIER_PROGRAM)"
+	@install -o root -g wheel -m 644 Packaging/$(BARRIER_LABEL).plist "$(BARRIER_PLIST)"
+	@launchctl bootstrap system "$(BARRIER_PLIST)"
+	@echo "installed $(BARRIER_PROGRAM)"
+	@echo "the journal now has a real write barrier on removable media"
+	@echo "remove with: sudo make uninstall-barrier"
+
+uninstall-barrier:
+	@test "$$(id -u)" = "0" || { echo "needs root: sudo make uninstall-barrier"; exit 1; }
+	@launchctl bootout system "$(BARRIER_PLIST)" 2>/dev/null || true
+	@rm -f "$(BARRIER_PLIST)" "$(BARRIER_PROGRAM)"
+	@echo "removed the barrier daemon"
+	@echo "without it there is no write barrier; keep removable media read-only"
 
 install-diskutil:
 	@test "$$(id -u)" = "0" || { echo "needs root: sudo make install-diskutil"; exit 1; }
