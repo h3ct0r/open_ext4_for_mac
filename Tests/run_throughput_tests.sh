@@ -63,8 +63,27 @@ else
 fi
 
 # Wall-clock around a shell command, to two decimals.
+#
+# A benchmark that discards output reports a failure as infinite speed: with
+# kernel-offloaded I/O enabled, writes silently became no-ops and this printed
+# 2844 MB/s. Every measurement below is therefore checked against the work it
+# was supposed to do, and a benchmark that cannot verify its own work is not a
+# benchmark.
 timed() { local s=$(python3 -c 'import time;print(time.time())'); "$@" >/dev/null 2>&1;
           python3 -c "import time;print(f'{time.time()-$s:.2f}')"; }
+
+# expect_size <file> <mb> -- die rather than report a number for work not done.
+expect_size() {
+  local got=$(stat -f %z "$1" 2>/dev/null || echo 0)
+  local want=$(( $2 * 1024 * 1024 ))
+  if [ "$got" -ne "$want" ]; then
+    echo "  ERROR: $1 is $got bytes, expected $want."
+    echo "         The operation did not do what was measured; the timing above"
+    echo "         is meaningless. Not reporting a rate."
+    return 1
+  fi
+  return 0
+}
 rate()  { python3 -c "print(f'{$1/$2:.1f}')" 2>/dev/null || echo "?"; }
 
 note ""
@@ -74,7 +93,9 @@ note ""
 # --- bulk write --------------------------------------------------------------
 if [ -z "$DEVICE" ]; then
   t=$(timed dd if=/dev/zero of="$MP/big.bin" bs=1m count="$SIZE_MB")
-  note "  write  ${SIZE_MB}MB sequential   ${t}s   $(rate "$SIZE_MB" "$t") MB/s"
+  if expect_size "$MP/big.bin" "$SIZE_MB"; then
+    note "  write  ${SIZE_MB}MB sequential   ${t}s   $(rate "$SIZE_MB" "$t") MB/s"
+  fi
   sync
 else
   # Real media is not reformatted by this script, so it only reads.
@@ -84,8 +105,10 @@ fi
 # --- bulk read ---------------------------------------------------------------
 if [ -f "$MP/big.bin" ]; then
   umount "$MNT" 2>/dev/null && mount -F -t ext4 "${DEV#/dev/}" "$MNT" 2>/dev/null   # cold-ish
-  t=$(timed dd if="$MP/big.bin" of=/dev/null bs=1m)
-  note "  read   ${SIZE_MB}MB sequential   ${t}s   $(rate "$SIZE_MB" "$t") MB/s"
+  if expect_size "$MP/big.bin" "$SIZE_MB"; then
+    t=$(timed dd if="$MP/big.bin" of=/dev/null bs=1m)
+    note "  read   ${SIZE_MB}MB sequential   ${t}s   $(rate "$SIZE_MB" "$t") MB/s"
+  fi
 fi
 
 # --- many small files --------------------------------------------------------

@@ -1188,6 +1188,60 @@ Pointed at real media with `EXT4_KILL_DEVICE=diskN` — which erases it — it
 becomes the detector for the barrier this driver does not have, and the way to
 tell whether any future fix actually worked.
 
+### Kernel-offloaded I/O silently discards writes
+
+The read half of `FSVolumeKernelOffloadedIOOperations` has been written and
+switched off for a long time, on the grounds that conforming makes FSKit route
+*writes* through `blockmapFile` even for files reporting
+`inhibitKernelOffloadedIO`. That was measured rather than inherited, since
+`FSSupportsKernelOffloadedIO` is already `<true/>` in the manifest and the
+experiment therefore needs no change to it — the one kind of change that has
+deregistered this module before.
+
+The claim holds, and the failure is worse than the note suggested. With the
+conformance in the build, `blockmapFile` throws `notSupported` for a write and
+FSKit turns that into **nothing at all**:
+
+```
+$ dd if=/dev/zero of=/Volumes/ext4/probe.bin bs=1m count=16
+0+0 records out
+0 bytes transferred in 0.001831 secs (0 bytes/sec)
+```
+
+No error to `dd`, no error in the log, a zero-byte file. Silent data loss, not
+a refusal. So the conformance stays out until the write blockmap exists, and
+the reason is now a measurement.
+
+It also produced a good lesson about benchmarks. The throughput suite reported
+**2844 MB/s** for that run, because it timed a `dd` that did nothing and divided
+by a duration close to zero. Every measurement in `Tests/run_throughput_tests.sh`
+now checks the work actually happened before it will print a rate: a benchmark
+that cannot verify its own work is not a benchmark.
+
+### One barrier in three was redundant
+
+Patch 0014 has jbd issue barriers on both sides of the commit block, and
+`txn_finish` issued a third afterwards. On a journalled volume that one buys
+nothing: once the commit block is on the medium the transaction is durable,
+because a crash replays it, whether or not the metadata has reached its home
+location yet. It was costing a third of every mutation — a barrier is an XPC
+round trip to the privileged helper plus a real `DKIOCSYNCHRONIZE`.
+
+| | before | after |
+|---|---|---|
+| 400 small files | 20.0s | **14.3s** |
+| 256 MB sequential write | 21.6 MB/s | **31.4 MB/s** |
+
+It stays for volumes without a journal, where there is no commit block and
+nothing to replay, so that barrier is the only thing making the change durable.
+
+The remaining cost is structural rather than wasteful: this driver opens a
+journal transaction per filesystem operation, so a file creation pays two
+barriers. Linux ext4 batches hundreds of operations into one commit every few
+seconds and pays two barriers for all of them. Batching is the next real
+performance work, and it is a change to durability semantics, not a tuning
+knob.
+
 ### Two ordering defects that turned out not to exist
 
 Both were predicted by reading the code, and the instrument above refuted both.

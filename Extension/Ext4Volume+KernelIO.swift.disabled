@@ -34,8 +34,13 @@ extension Ext4Volume: FSVolumeKernelOffloadedIOOperations {
             var extents = [ext4b_extent](repeating: ext4b_extent(), count: maxExtents)
             var produced = 0
 
+            // Fetched outside the closure: the accessor became fallible when
+            // `synchronize` was found arriving after `unmount` had already
+            // closed the volume, and withUnsafeMutableBufferPointer's closure
+            // cannot throw.
+            let dev = try device
             let rc = extents.withUnsafeMutableBufferPointer { buf -> Int32 in
-                ext4b_map_extents(device, ext4Item.inode,
+                ext4b_map_extents(dev, ext4Item.inode,
                                   UInt64(offset), UInt64(length),
                                   buf.baseAddress, maxExtents, &produced)
             }

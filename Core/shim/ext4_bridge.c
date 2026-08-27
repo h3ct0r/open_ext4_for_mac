@@ -1371,8 +1371,20 @@ static void txn_abort(struct ext4_fs *fs)
 #endif
 }
 
-/* Close a mutation: commit on success, abort on failure, then push the
- * result to stable storage so a crash cannot lose an acknowledged change. */
+/* Close a mutation: commit on success, abort on failure, then push the result
+ * to stable storage so a crash cannot lose an acknowledged change.
+ *
+ * On a journalled volume that last step is already done. Since patch 0014, jbd
+ * barriers on both sides of the commit block, so by the time the commit
+ * returns the transaction is on the medium and a crash replays it -- the change
+ * is durable whether or not it has reached its home location yet. Issuing a
+ * third barrier here bought nothing and cost a third of every mutation: a
+ * barrier is an XPC round trip to the privileged helper plus a real
+ * DKIOCSYNCHRONIZE, and creating four hundred small files spent twenty seconds
+ * on almost nothing else.
+ *
+ * Without a journal there is no commit block and nothing to replay, so the
+ * barrier here is the only thing making the change durable, and it stays. */
 static int txn_finish(ext4b_device *dev, struct ext4_fs *fs, int r)
 {
     if (r != EOK) {
@@ -1382,7 +1394,7 @@ static int txn_finish(ext4b_device *dev, struct ext4_fs *fs, int r)
     r = txn_commit(fs);
     if (r == EOK) {
         ext4_block_cache_flush(&dev->bdev);
-        if (dev->flush_fn)
+        if (dev->flush_fn && !dev->journal_running)
             dev->flush_fn(dev->ctx);
     }
     return r;
