@@ -26,8 +26,14 @@ CRYPTO_DIR := Core/crypto
 # exactly while the two still agree -- ext4b_probe() verifies that and forces
 # read-only when they diverge, so tolerating the bit here is safe.
 # Requires patches/lwext4/0001-guard-EXT_FINCOM_IGNORED.patch.
+# Overridable so that cache pressure is a dimension the tests can vary. lwext4
+# writes a dirty buffer out when the cache fills, and whether it does that
+# before or after the transaction owning it has committed is a correctness
+# question -- one that only shows up under pressure, which a large cache hides.
+BCACHE_BLOCKS ?= 1024
+
 LWEXT4_DEFS := -DCONFIG_USE_DEFAULT_CFG=1 \
-               -DCONFIG_BLOCK_DEV_CACHE_SIZE=1024 \
+               -DCONFIG_BLOCK_DEV_CACHE_SIZE=$(BCACHE_BLOCKS) \
                -DCONFIG_DEBUG_PRINTF=0 \
                -DCONFIG_DEBUG_ASSERT=1 \
                -D'EXT_FINCOM_IGNORED=(EXT4_FINCOM_RECOVER | EXT4_FINCOM_MMP | EXT4_FINCOM_BG_USE_META_CSUM)'

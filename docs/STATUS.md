@@ -1143,10 +1143,56 @@ Pointed at real media with `EXT4_KILL_DEVICE=diskN` — which erases it — it
 becomes the detector for the barrier this driver does not have, and the way to
 tell whether any future fix actually worked.
 
+### Two ordering defects that turned out not to exist
+
+Both were predicted by reading the code, and the instrument above refuted both.
+Worth recording so they are not predicted again.
+
+**`ext4_block_cache_shake` does not checkpoint before commit.** It evicts the
+least-recently-used dirty buffer whenever the cache fills, with no visible
+regard for whether the transaction owning that buffer has committed — which
+reads like a checkpoint write issued ahead of its own commit block, and no
+barrier can un-issue one. It cannot happen. `jbd_trans_set_block_dirty` calls
+`ext4_bcache_inc_ref` on every journaled buffer and holds that reference until
+the transaction commits, and `ext4_bcache_free` only inserts a buffer into the
+LRU once its reference count reaches zero. `shake` walks the LRU, so a
+journaled buffer is not reachable from it. Measured as well as argued: the
+reorder suite is clean at every cut point with the block cache cut from 1024
+entries to 8, which is as much eviction pressure as the code can be given.
+
+**Journal checksums cannot be turned on.** lwext4 implements them — commit
+block, descriptor block and per-block tags, all present in `ext4_journal.c`
+behind `jbd_has_csum` — and `mkfs` simply never sets the feature bit. Setting
+`JBD_FEATURE_INCOMPAT_CSUM_V3` at format time makes `dumpe2fs` report
+`journal_checksum_v3` and `e2fsck` pass on a fresh volume, and then:
+
+| | recovery after a reordered cut |
+|---|---|
+| without journal checksums | 15/15 clean |
+| with `csum_v3` | **0/20 clean** |
+| with `csum_v3`, replayed by Linux | **the kernel refuses to mount at all** |
+
+So the on-disk result is not a journal Linux will accept. Enabling the feature
+is a compatibility break rather than the defence in depth it looks like, and it
+stays off until lwext4's v3 tag handling is fixed and verified against the
+kernel. That is worth doing — a checksummed journal is the only defence against
+a drive that reports a cache flush and does not perform one — but it is a
+change to lwext4's journal format handling, not a one-line feature bit.
+
+Relatedly, `mkfs` strips `metadata_csum` outright
+(`info->feat_ro_compat &= ~EXT4_FRO_COM_METADATA_CSUM`, alongside `flex_bg`,
+`64bit` and others, under an upstream *"TODO: handle this features some day"*).
+Volumes this driver formats therefore carry no metadata checksums at all, while
+volumes `mke2fs` formats do — and those are read and written correctly, since
+the driver implements checksums for the mounted case. It is a gap in `format`,
+not in the driver.
+
 ## Not yet done
 - `newfs_fskit` reaches the module but never calls `startFormat`; see below
-- A write barrier on the mounted path; see above — the metadata I/O family
-  that owns `metadataFlush` fails with EIO for reasons not yet understood
+- Journal checksums, which need lwext4's `csum_v3` tag handling fixed first;
+  see above. Until then a drive that lies about flushing can still corrupt a
+  volume, and no barrier helps
+- `metadata_csum` on volumes this driver formats: lwext4's `mkfs` strips it
 - A real structural check; `startCheck` only decides mountability
 - A notification when a locked volume appears and the agent is not running;
   today it simply does not show up
