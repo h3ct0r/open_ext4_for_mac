@@ -195,11 +195,18 @@ unpatch:
 	  git -C $(LWEXT4_DIR) apply --reverse "$(CURDIR)/$$p" 2>/dev/null && echo "reverted $$p" || true; \
 	done
 
-$(BUILD)/obj/lwext4/%.o: $(LWEXT4_DIR)/src/%.c $(PATCH_STAMP)
+# The header dependency is not decoration. A struct in ext4_journal.h grew a
+# field during development; only ext4_journal.o was rebuilt, every other
+# object kept the old layout, and the result was a binary that segfaulted --
+# silently, when its output was piped -- while a test sweep read its
+# untouched images as a clean pass.
+LWEXT4_HEADERS := $(wildcard $(LWEXT4_DIR)/include/*.h $(LWEXT4_DIR)/include/misc/*.h)
+
+$(BUILD)/obj/lwext4/%.o: $(LWEXT4_DIR)/src/%.c $(LWEXT4_HEADERS) $(PATCH_STAMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(LWEXT4_CFLAGS) -c $< -o $@
 
-$(BUILD)/obj/shim/%.o: $(SHIM_DIR)/%.c $(SHIM_DIR)/ext4_bridge.h $(PATCH_STAMP)
+$(BUILD)/obj/shim/%.o: $(SHIM_DIR)/%.c $(SHIM_DIR)/ext4_bridge.h $(LWEXT4_HEADERS) $(PATCH_STAMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(SHIM_CFLAGS) -c $< -o $@
 

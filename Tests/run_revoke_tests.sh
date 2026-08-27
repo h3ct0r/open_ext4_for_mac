@@ -128,6 +128,30 @@ mke2fs -q -t ext4 -b 4096 -L REVOKE2 "$IMG2"
 "$DUMP" "$IMG2" script "$WL" >/dev/null 2>&1
 scan "$IMG2" "mke2fs format (no journal checksums)"
 
+# --- freed data blocks must be revoked too ---------------------------------
+# Data blocks are never journaled, so the naive rule "revoke what you
+# journaled" emits nothing for them -- but a *metadata* block from an earlier,
+# already-checkpointed transaction freed and reused as data is exactly what a
+# replay from a lagging tail will clobber. The rule has to be "revoke what you
+# free". This workload frees only file data blocks; before the rule changed it
+# produced zero revoke blocks.
+WL2="$WORK/workload-data.txt"
+{
+  echo "mkdir /d2"
+  for i in $(seq 1 40); do
+    echo "create /d2/f$i"
+    echo "write /d2/f$i data-payload-that-occupies-a-block-of-its-own-so-freeing-it-matters"
+  done
+  for i in $(seq 1 40); do
+    echo "rm /d2/f$i"
+  done
+} > "$WL2"
+IMG3="$WORK/datafree.img"
+dd if=/dev/zero of="$IMG3" bs=1m count=64 2>/dev/null
+"$DUMP" "$IMG3" format 4 4096 REVOKE3 >/dev/null 2>&1
+"$DUMP" "$IMG3" script "$WL2" >/dev/null 2>&1
+scan "$IMG3" "our format, data-block frees"
+
 echo ""
 echo "─────────────────────────────────"
 echo "passed: $PASS   failed: $FAIL"
