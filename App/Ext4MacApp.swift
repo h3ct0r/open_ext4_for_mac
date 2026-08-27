@@ -55,11 +55,55 @@ struct Ext4MacApp {
             guard let device = arguments.first else { usage(1) }
             exit(Ext4Mount.command(device))
 
+        // Writing to media that can be unplugged. Off by default; see
+        // RemovableWritePolicy for why.
+        case "removable-writes":
+            exit(removableWrites(arguments.first))
+
         case "help", "-h", "--help":
             usage(0)
         default:
             FileHandle.standardError.write("Ext4Mac: unknown command '\(command)'\n".data(using: .utf8)!)
             usage(1)
+        }
+    }
+
+    /// Report or change whether removable media may be written.
+    static func removableWrites(_ argument: String?) -> Int32 {
+        let directory = RemovableWritePolicy.directoryFromOutside()
+        switch argument {
+        case nil, "status":
+            let on = RemovableWritePolicy.isEnabled(in: directory)
+            print("writing to removable media: \(on ? "ALLOWED" : "off")")
+            if !on {
+                print("")
+                print("Removable volumes mount read-only. FSKit exposes no write")
+                print("barrier that works here, so a volume unplugged while mounted")
+                print("can come back inconsistent -- measured, not theoretical.")
+                print("Reading is unaffected.")
+                print("")
+                print("    Ext4Mac removable-writes on     accept that risk")
+            } else {
+                print("")
+                print("Eject before unplugging. A volume pulled while mounted can")
+                print("come back needing e2fsck.")
+            }
+            return 0
+        case "on", "off":
+            let enable = argument == "on"
+            do {
+                try RemovableWritePolicy.set(enable, in: directory)
+            } catch {
+                FileHandle.standardError.write("Ext4Mac: \(error)\n".data(using: .utf8)!)
+                return 1
+            }
+            print(enable ? "removable media may now be mounted read-write"
+                         : "removable media will mount read-only")
+            print("takes effect on the next mount")
+            return 0
+        default:
+            FileHandle.standardError.write("Ext4Mac: expected on, off or status\n".data(using: .utf8)!)
+            return 1
         }
     }
 
@@ -73,6 +117,8 @@ struct Ext4MacApp {
         Ext4Mac list                which volumes are unlocked
         Ext4Mac mount /dev/diskN    mount a volume whose key is stored
         Ext4Mac menu                watch for encrypted volumes and ask
+        Ext4Mac removable-writes [on|off]
+                                    allow writing to media you can unplug
 
         Or mount anything ext4 with:
           mount -F -t ext4 <disk> <mountpoint>

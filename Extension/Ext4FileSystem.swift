@@ -153,7 +153,32 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         // do not implement, or when its checksum seed no longer matches its
         // UUID. A dirty journal is replayed before the volume is written.
         //
-        let mediaWritable = device.isWritable
+        //
+        // Removable media is read-only unless somebody has said otherwise.
+        //
+        // Not caution for its own sake: there is no write barrier available
+        // here (see BlockDeviceBridge.Mode), so lwext4 issues journal barriers
+        // that nothing carries out. A stick pulled from under a live mount
+        // came back with ext4's own recovery reporting a corrupt transaction
+        // and discarding every later one. A disk image never does, which is
+        // why the interconnect matters rather than the removable flag alone.
+        //
+        // Reading is untouched. Nothing is written, so nothing can be
+        // reordered, and the common case -- looking at a Linux disk on a Mac
+        // -- keeps working exactly as before.
+        //
+        let traits = MediaTraits.read(bsdName: device.bsdName)
+        var inhibitedForRemovableMedia = false
+        if let traits, traits.isPhysicallyDetachable {
+            let allowed = RemovableWritePolicy.directoryFromInsideTheSandbox()
+                .map { RemovableWritePolicy.isEnabled(in: $0) } ?? false
+            inhibitedForRemovableMedia = !allowed
+            Ext4Log.info("\(device.bsdName) is removable (\(traits.interconnect)); "
+                         + (allowed ? "writes allowed by the marker file"
+                                    : "mounting read-only, no write barrier is available"))
+        }
+
+        let mediaWritable = device.isWritable && !inhibitedForRemovableMedia
         let readOnly = !mediaWritable
 
         guard let bridge = BlockDeviceBridge(resource: device, forceReadOnly: readOnly),

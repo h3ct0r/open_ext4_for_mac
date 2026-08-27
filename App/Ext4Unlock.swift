@@ -118,11 +118,30 @@ enum Ext4Unlock {
     static func headerSource(devicePath: String) -> String? {
         if access(devicePath, R_OK) == 0 { return devicePath }
 
+        let directory = LUKSKeyStore.directoryFromOutside()
         let bsd = devicePath.hasPrefix("/dev/") ? String(devicePath.dropFirst(5)) : devicePath
-        guard let uuid = Ext4Mount.volumeUUID(bsdName: bsd) else { return nil }
-        let exported = LUKSKeyStore.headerURL(uuid: uuid,
-                                              in: LUKSKeyStore.directoryFromOutside())
-        return FileManager.default.isReadableFile(atPath: exported.path) ? exported.path : nil
+
+        // Ask DiskArbitration which container this is. That works whenever the
+        // volume is one macOS has routed to us.
+        if let uuid = Ext4Mount.volumeUUID(bsdName: bsd) {
+            let exported = LUKSKeyStore.headerURL(uuid: uuid, in: directory)
+            if FileManager.default.isReadableFile(atPath: exported.path) {
+                return exported.path
+            }
+        }
+
+        // It does not always know. A partition typed Linux LUKS is reported as
+        // having no filesystem at all and no volume UUID, because the module
+        // never claimed it -- FSKit does not offer us that partition type. The
+        // header is still sitting there, exported by the probe that ran when
+        // the mount was attempted by name, so fall back to it when there is
+        // exactly one and therefore no ambiguity about which volume it is.
+        let headers = ((try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [])
+            .filter { $0.hasSuffix(".header") }
+        if headers.count == 1 {
+            return directory.appendingPathComponent(headers[0]).path
+        }
+        return nil
     }
 
     // MARK: - The two steps, usable from anywhere

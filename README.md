@@ -78,22 +78,28 @@ instead of failing — plus several of our own. See
 [docs/STATUS.md](docs/STATUS.md) and
 [patches/lwext4/README.md](patches/lwext4/README.md).
 
-> **Still young, and one limitation is serious.** FSKit exposes no write
+> **Removable media mounts read-only by default.** FSKit exposes no write
 > barrier that works here — `metadataFlush` is the only one it has, and that
-> whole I/O family fails with `EIO` for reasons not yet understood. lwext4
-> issues its journal barriers faithfully and nothing enforces them.
+> whole I/O family fails with `EIO` for reasons not yet understood — so lwext4
+> issues journal barriers that nothing carries out.
 >
-> A real USB stick showed what that costs: pulled out from under a live mount,
-> it came back with directory entries whose parent link counts had never
-> landed — half a transaction, which a journal exists to make impossible. No
-> file content was lost and `e2fsck` repaired it, but the volume was
-> inconsistent. Disk images never show this; they reach APFS through the page
-> cache in issue order, while a USB stick reorders freely.
+> That is measured, not theoretical. Kill the driver mid-write and let it
+> replay its own journal: a disk image recovers cleanly **five times out of
+> five**, a USB stick is damaged **five times out of five**. Same driver, same
+> workload. An image reaches APFS through the page cache in issue order; a
+> stick has its own write cache and reorders freely. On one occasion ext4's own
+> recovery said so directly — *"Journal transaction 8 was corrupt, replay was
+> aborted"*, a commit block that outran its own data.
 >
-> **Eject before unplugging** and you are fine — that flushes and closes the
-> journal. Pull a volume live and run `e2fsck` on it. `mount -o ro` is honoured
-> properly if you only want to look. Details in
-> [docs/STATUS.md](docs/STATUS.md). Keep a backup.
+> So reading a Linux disk on a Mac works as it always did, and writing to one
+> requires saying so:
+>
+> ```bash
+> Ext4Mac removable-writes on
+> ```
+>
+> **Eject before unplugging** if you do. Disk images and internal disks are
+> unaffected. Details in [docs/STATUS.md](docs/STATUS.md). Keep a backup.
 
 ## Requirements
 

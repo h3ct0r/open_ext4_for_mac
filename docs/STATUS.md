@@ -948,10 +948,23 @@ what happened to the stick, twice.
 | target | after journal replay |
 |---|---|
 | 64 MB disk image | **5 of 5 clean** |
-| a 16 GB USB stick | **2 of 2 damaged** |
+| 31 GB USB stick | **5 of 5 damaged** |
+
+Each round is independent: the volume is repaired with `e2fsck -fy` between
+rounds and each round's directory carries the run's PID, so damage is always
+attributable to the round that caused it. An earlier version checked with
+`-fn`, which repairs nothing, and every round after the first re-reported the
+first one's wreckage — one data point wearing five results. Worth knowing when
+reading any suite that checks without repairing.
 
 Same driver, same workload, same kill, same journal code. The only variable is
-what the writes land on. The journal machinery and its recovery are correct —
+what the writes land on, and the failure is deterministic rather than a race —
+five rounds, five failures, on demand.
+
+The damage takes more than one shape. Usually a round's directory entry exists
+while the inode it names was never written; once it was *multiply-claimed
+blocks in two inodes*, which is block-allocation metadata landing out of order
+rather than inode writes. Different surfaces of the same cause. The journal machinery and its recovery are correct —
 five rounds of arbitrary process death recover perfectly — and what fails is
 the medium preserving the order that recovery depends on. An image reaches
 APFS through the page cache in issue order; a USB stick has its own write

@@ -16,7 +16,10 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <time.h>
 #include <sys/stat.h>
+#include <sys/disk.h>   /* DKIOCGETBLOCKCOUNT */
+#include <sys/ioctl.h>
 #include <inttypes.h>
 
 typedef struct {
@@ -33,7 +36,67 @@ typedef struct {
     long fail_after;
     long writes;
     bool crashed;
+
+    /*
+     * Progress, for the one operation slow enough to need it.
+     *
+     * Formatting a 16 GB volume writes about 260 MB of inode tables, bitmaps
+     * and journal. On an SSD that is under a second and nobody notices; on a
+     * USB stick it is minutes of silence, which is indistinguishable from a
+     * hang -- and was mistaken for one.
+     *
+     * `progress_total` is an estimate, not a measurement: ext4's defaults put
+     * one inode per 16 KiB at 256 bytes each, so the inode tables alone come
+     * to about a sixty-fourth of the volume, and the rest is journal and
+     * bitmaps. Close enough to be useful, so the bar is capped at 99% until
+     * the format actually returns rather than pretending otherwise.
+     */
+    uint64_t written;
+    uint64_t progress_total;
+    time_t   progress_started;
+    time_t   progress_last;
 } file_ctx;
+
+/* Draw the bar, or print a line if this is not a terminal -- a suite capturing
+ * output wants milestones, not carriage returns. */
+static void progress_tick(file_ctx *c, bool final)
+{
+    if (!c->progress_total)
+        return;
+
+    time_t now = time(NULL);
+    if (!final && now == c->progress_last)
+        return;                     /* at most once a second */
+    c->progress_last = now;
+
+    double frac = (double)c->written / (double)c->progress_total;
+    if (frac > 0.99) frac = 0.99;
+    if (final) frac = 1.0;
+
+    unsigned long elapsed = (unsigned long)(now - c->progress_started);
+    double mb = (double)c->written / (1024.0 * 1024.0);
+    double rate = elapsed ? mb / (double)elapsed : 0.0;
+
+    if (isatty(STDERR_FILENO)) {
+        int width = 32, filled = (int)(frac * width);
+        fprintf(stderr, "\r  formatting [");
+        for (int i = 0; i < width; i++) fputc(i < filled ? '=' : ' ', stderr);
+        fprintf(stderr, "] %3d%%  %.0f MB", (int)(frac * 100), mb);
+        if (rate > 0) fprintf(stderr, "  %.1f MB/s", rate);
+        fputs("   ", stderr);
+        if (final) fputc('\n', stderr);
+        fflush(stderr);
+    } else if (final) {
+        fprintf(stderr, "  formatting: %.0f MB in %lus\n", mb, elapsed);
+    } else {
+        static int last_decile = -1;
+        int decile = (int)(frac * 10);
+        if (decile != last_decile) {
+            last_decile = decile;
+            fprintf(stderr, "  formatting: %d%%  %.0f MB\n", (int)(frac * 100), mb);
+        }
+    }
+}
 
 static int file_read(void *ctx, void *buf, uint64_t off, size_t len)
 {
@@ -51,6 +114,8 @@ static int file_write(void *ctx, const void *buf, uint64_t off, size_t len)
         c->writes++;
         return 0;           /* pretend it landed; the bytes are lost */
     }
+    c->written += len;
+    progress_tick(c, false);
     if (getenv("EXT4DUMP_TRACE_WRITES"))
         fprintf(stderr, "W%-3ld off=%-10llu blk=%-8llu len=%zu\n",
                 c->writes, (unsigned long long)off,
@@ -381,7 +446,31 @@ int main(int argc, char **argv)
      * That is the point -- it means the whole existing suite can be pointed at
      * encrypted volumes without any of the suites knowing.
      */
+    /*
+     * How big is it?
+     *
+     * fstat() answers for a file and reports zero for a device node, where the
+     * size lives behind an ioctl instead. Without this, pointing any of these
+     * commands at a real disk silently operates on a zero-length volume --
+     * which is what a `format` of a USB stick did: it reported nothing and
+     * changed nothing.
+     */
     uint64_t dev_bytes = (uint64_t)st.st_size;
+    if (dev_bytes == 0 && (S_ISBLK(st.st_mode) || S_ISCHR(st.st_mode))) {
+        uint32_t sector = 0;
+        uint64_t sectors = 0;
+        if (ioctl(fd, DKIOCGETBLOCKSIZE, &sector) == 0 &&
+            ioctl(fd, DKIOCGETBLOCKCOUNT, &sectors) == 0) {
+            dev_bytes = sectors * (uint64_t)sector;
+        } else {
+            perror("DKIOCGETBLOCKCOUNT");
+            return 1;
+        }
+    }
+    if (dev_bytes == 0) {
+        fprintf(stderr, "%s: zero-length device or image\n", argv[1]);
+        return 1;
+    }
     /* Both declared before the first `goto out`, so the cleanup path never
      * sees an indeterminate pointer or an uninitialised status. */
     ext4b_device *dev = NULL;
@@ -412,6 +501,10 @@ int main(int argc, char **argv)
     }
 
     if (strcmp(cmd, "format") == 0) {
+        /* Only this command is slow enough to be worth a bar. See file_ctx. */
+        fc.progress_total = dev_bytes / 62;
+        fc.progress_started = fc.progress_last = time(NULL);
+
         ext4b_format_options opts;
         memset(&opts, 0, sizeof(opts));
         opts.generation = (argc > 3) ? atoi(argv[3]) : 4;
@@ -441,6 +534,7 @@ int main(int argc, char **argv)
         }
 
         int r = ext4b_format(dev, &opts);
+        progress_tick(&fc, true);
         if (r != 0) {
             fprintf(stderr, "format failed: %s\n", ext4b_strerror(r));
             rc = 1;

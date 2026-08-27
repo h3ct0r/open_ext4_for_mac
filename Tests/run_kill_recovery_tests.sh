@@ -43,19 +43,76 @@ ok()   { PASS=$((PASS+1)); note "  ok    $1"; }
 bad()  { FAIL=$((FAIL+1)); note "  FAIL  $1"; [ $# -gt 1 ] && note "        $2"; return 0; }
 
 DEV=""
+MOUNTED_AT=""
 cleanup() {
-  umount "$MNT" 2>/dev/null
+  unmount_target
   [ -n "$DEV" ] && [ -z "$DEVICE" ] && hdiutil detach "$DEV" -force >/dev/null 2>&1
   return 0
 }
 trap cleanup EXIT
+
+# --------------------------------------------------------- target handling --
+#
+# A disk image and a physical disk are reached completely differently, and
+# discovering that cost a run. An image's device node belongs to whoever
+# attached it, so `mount -F` works and ext4dump can format it directly. A
+# physical disk's node is root:operator: `mount -F` gets "Permission denied"
+# from the probe, and only diskutil -- which is privileged -- can mount it.
+# Formatting goes through the *buffered* node under sudo, because the raw
+# character device only accepts aligned transfers and ext4dump does not
+# promise them.
+
+mount_target() {
+  if [ -n "$DEVICE" ]; then
+    diskutil mount "$DEVICE" >/dev/null 2>&1 || return 1
+    MOUNTED_AT=$(mount | sed -n "s|^/dev/$DEVICE on \(.*\) (ext4.*|\1|p" | head -1)
+    [ -n "$MOUNTED_AT" ]
+  else
+    MOUNTED_AT="$MNT"
+    mount -F -t ext4 "${DEV#/dev/}" "$MNT" 2>/dev/null
+  fi
+}
+
+unmount_target() {
+  if [ -n "$DEVICE" ]; then
+    diskutil unmount "$DEVICE" >/dev/null 2>&1 || \
+      diskutil unmount force "$DEVICE" >/dev/null 2>&1
+  else
+    umount "$MNT" 2>/dev/null
+  fi
+  MOUNTED_AT=""
+  return 0
+}
+
+# Killing the driver under a *physical* mount leaves the device claimed by a
+# mount whose extension no longer exists. The volume cannot be remounted, and
+# -- worse -- the next process to open the device for writing blocks in
+# uninterruptible I/O forever, which no signal clears and only unplugging the
+# disk resolves. A disk image never showed this: `hdiutil detach -force` tears
+# the whole thing down.
+#
+# So after every kill the disk is force-unmounted and given time for FSKit to
+# let go before anything touches the device again.
+release_device() {
+  [ -z "$DEVICE" ] && return 0
+  local whole="${DEVICE%s[0-9]*}"
+  diskutil unmountDisk force "$whole" >/dev/null 2>&1
+  # Wait for the extension to be gone rather than guessing at a delay.
+  local waited=0
+  while pgrep -f "$EXT_PATTERN" >/dev/null 2>&1 && [ "$waited" -lt 10 ]; do
+    sleep 1; waited=$((waited + 1))
+  done
+  sleep 2
+  return 0
+}
 
 if ! bash "$ROOT/scripts/check_extension.sh" >/dev/null 2>&1; then
   echo "the FSKit extension is not enabled; see scripts/check_extension.sh"
   echo "SKIPPED"; exit 77
 fi
 
-rm -rf "$WORK"; mkdir -p "$WORK" "$MNT"; : > "$REPORT"
+umount "$MNT" 2>/dev/null
+rm -rf "$WORK" 2>/dev/null; mkdir -p "$WORK" "$MNT"; : > "$REPORT"
 
 note "########## RECOVERY AFTER THE DRIVER IS KILLED ##########"
 note ""
@@ -67,11 +124,53 @@ fi
 note ""
 
 # --------------------------------------------------------------- one round --
+FORMATTED=0
+
 prepare() {   # leaves the volume formatted, and DEV set
   if [ -n "$DEVICE" ]; then
     DEV="/dev/$DEVICE"
-    # Formatting a physical device needs the raw node, which needs privilege.
-    sudo "$ROOT/build/bin/ext4dump" "/dev/r$DEVICE" format 4 >/dev/null 2>&1
+    unmount_target
+
+    # Format once, not once per round.
+    #
+    # A 16 GB ext4 volume means roughly 260 MB of inode tables and journal to
+    # write. On an SSD that is under a second; on a USB stick it is minutes,
+    # with nothing on screen while it happens, which is indistinguishable from
+    # a hang -- and five of them is most of the run. After a successful
+    # recovery the volume is reusable, so each round works in its own
+    # directory instead.
+    if [ "$FORMATTED" -eq 0 ]; then
+      # Already a working ext4 volume? Then there is nothing to prove by
+      # rewriting 260 MB of metadata, and on a stick that is minutes.
+      #
+      # "Working" has to mean it mounts read-write, not that it probes USABLE.
+      # A volume left behind by an interrupted format probes perfectly well --
+      # the superblock is written early and is entirely sane -- while the
+      # journal it advertises was never written, so every read-write mount
+      # fails with EIO. Trusting the probe here cost a five-round run.
+      local reusable=0
+      if [ -z "${EXT4_KILL_FORCE_FORMAT:-}" ] && mount_target; then
+        reusable=1
+        unmount_target
+      fi
+      if [ "$reusable" -eq 1 ]; then
+        note "  /dev/$DEVICE already holds a working ext4 volume; not reformatting"
+      else
+        note "  formatting /dev/$DEVICE (~260 MB of metadata; slow on a stick)"
+        # Streamed, not captured. An earlier version wrapped this in $( ),
+        # which swallowed the progress output entirely and made the slowest
+        # step in the suite look like a hang for the second time.
+        sudo "$ROOT/build/bin/ext4dump" "/dev/$DEVICE" format 4 2>&1 | tee -a "$REPORT"
+        if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+          note "        format failed"
+          return 1
+        fi
+        sudo "$ROOT/build/bin/ext4dump" "/dev/$DEVICE" label KILLTEST >/dev/null 2>&1
+        note "  formatted"
+      fi
+      diskutil list "$DEVICE" >/dev/null 2>&1
+      FORMATTED=1
+    fi
   else
     rm -f "$WORK/k.img"
     dd if=/dev/zero of="$WORK/k.img" bs=1m count="$IMAGE_MB" 2>/dev/null
@@ -87,6 +186,19 @@ fsck_target() {
   else e2fsck -fn "$WORK/k.img" 2>&1; fi
 }
 
+# Put the volume back in a known-good state, so the next round measures its own
+# kill and not the last one's wreckage.
+#
+# Without this every round after a failure re-reports the first round's damage
+# -- identical text, same inode numbers, same directory -- and five rounds look
+# like five independent results when there is only one. That is exactly what
+# the first run against real hardware produced.
+repair_target() {
+  if [ -n "$DEVICE" ]; then sudo e2fsck -fy "/dev/$DEVICE" >/dev/null 2>&1
+  else e2fsck -fy "$WORK/k.img" >/dev/null 2>&1; fi
+  return 0
+}
+
 detach_target() {
   [ -z "$DEVICE" ] && [ -n "$DEV" ] && hdiutil detach "$DEV" -force >/dev/null 2>&1
   DEV=""
@@ -95,15 +207,21 @@ detach_target() {
 
 for round in $(seq 1 "$ROUNDS"); do
   prepare || { bad "round $round: could not prepare the volume"; continue; }
-  mount -F -t ext4 "${DEV#/dev/}" "$MNT" 2>/dev/null || {
-    bad "round $round: did not mount"; detach_target; continue; }
+  if ! mount_target; then
+    bad "round $round: did not mount" \
+        "$(diskutil mount "$DEVICE" 2>&1 | head -1)"
+    detach_target; continue
+  fi
 
   # A workload that touches every kind of metadata: directory entries, inode
-  # allocation, block allocation, link counts, and an xattr apiece.
+  # allocation, block allocation, link counts, and an xattr apiece. The
+  # directory name carries the run's PID as well as the round, so damage
+  # reported by e2fsck can never be confused with an earlier run's.
+  ROUND_DIR="k$$-r$round"
   ( for i in $(seq 1 300); do
-      mkdir -p "$MNT/d$i/inner" 2>/dev/null
-      echo x > "$MNT/d$i/f" 2>/dev/null
-      xattr -w user.k v "$MNT/d$i/f" 2>/dev/null
+      mkdir -p "$MOUNTED_AT/$ROUND_DIR/d$i/inner" 2>/dev/null
+      echo x > "$MOUNTED_AT/$ROUND_DIR/d$i/f" 2>/dev/null
+      xattr -w user.k v "$MOUNTED_AT/$ROUND_DIR/d$i/f" 2>/dev/null
     done ) >/dev/null 2>&1 &
   WORKLOAD=$!
 
@@ -113,7 +231,8 @@ for round in $(seq 1 "$ROUNDS"); do
   sleep 2
   kill "$WORKLOAD" 2>/dev/null; wait "$WORKLOAD" 2>/dev/null
 
-  umount "$MNT" 2>/dev/null
+  unmount_target
+  release_device
   if [ -z "$DEVICE" ]; then hdiutil detach "$DEV" -force >/dev/null 2>&1; DEV=""; fi
 
   # Recovery is what is being tested, so let the driver do it: mounting
@@ -121,14 +240,25 @@ for round in $(seq 1 "$ROUNDS"); do
   if [ -n "$DEVICE" ]; then DEV="/dev/$DEVICE"
   else DEV=$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount "$WORK/k.img" \
              2>/dev/null | head -1 | awk '{print $1}'); fi
-  mount -F -t ext4 "${DEV#/dev/}" "$MNT" 2>/dev/null || {
-    bad "round $round: did not mount after the kill"; detach_target; continue; }
+  note "  round $round: driver killed; waiting for the device to be released"
+  mounted=0
+  for attempt in 1 2 3 4 5; do
+    mount_target && { mounted=1; break; }
+    sleep 3
+  done
+  if [ "$mounted" -eq 0 ]; then
+    bad "round $round: did not mount after the kill -- recovery could not run" \
+        "$(diskutil mount "$DEVICE" 2>&1 | head -1)"
+    release_device; detach_target; continue
+  fi
   sleep 1
-  umount "$MNT" 2>/dev/null
+  unmount_target
   detach_target
   sleep 1
 
+  note "  round $round: replayed; checking with e2fsck"
   out=$(fsck_target)
+  repair_target
   if grep -qE "^(Pass 5|.*: [0-9]+/[0-9]+ files)" <<<"$out" && ! grep -q "WARNING" <<<"$out"; then
     ok "round $round: the journal recovered the volume completely"
   else
