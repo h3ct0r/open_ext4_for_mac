@@ -77,7 +77,7 @@ ARGON2_CFLAGS := $(CFLAGS) -Wno-everything -I$(ARGON2_DIR)
 
 CORE_LIB := $(BUILD)/lib/libext4core.a
 
-.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-crypto test-orphan test-luks test-mount-crash test-mount-luks test-kill-recovery check-extension check-signing validate tools entitlements check-submodule patch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil
+.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-crypto test-orphan test-luks test-mount-crash test-mount-luks test-kill-recovery check-extension check-signing validate tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil
 
 all: app
 
@@ -106,8 +106,17 @@ $(PATCH_STAMP): $(PATCHES) | check-submodule
 	    echo "applied $$p"; \
 	  elif git -C $(LWEXT4_DIR) apply --check "$(CURDIR)/$$p" 2>/dev/null; then \
 	    echo "error: failed to apply $$p"; exit 1; \
+	  elif [ -n "$(ALLOW_UNAPPLIED_PATCHES)" ]; then \
+	    echo "note: $$p neither applies nor is applied; ALLOW_UNAPPLIED_PATCHES is set"; \
 	  else \
-	    echo "note: $$p applies to a file with local edits; leaving it alone"; \
+	    echo "error: $$p neither applies nor is already applied."; \
+	    echo "  The file it touches has diverged. This branch used to print a"; \
+	    echo "  note and carry on, which is how a build without a write barrier"; \
+	    echo "  was produced and shipped -- 0014 had picked up hunks belonging to"; \
+	    echo "  0005 and 0008, failed as a whole, and said so in a line nobody"; \
+	    echo "  reads. Run scripts/check_patches.sh to see the divergence."; \
+	    echo "  Set ALLOW_UNAPPLIED_PATCHES=1 while developing a new patch."; \
+	    exit 1; \
 	  fi; \
 	done
 	@touch $@
@@ -141,6 +150,37 @@ verify-patches: $(PATCH_STAMP)
 	  rm -f $(PATCH_STAMP); \
 	  $(MAKE) --no-print-directory $(PATCH_STAMP); \
 	fi
+# The per-patch check above answers "is each patch still applied?". It cannot
+# answer "does the patch set describe this tree?" -- an edit made directly in
+# the submodule is invisible to it, and that is how the journal checksum fix
+# spent a day existing on one machine. A quarter of a second, once per build.
+	@bash scripts/check_patches.sh >/dev/null || { \
+	  bash scripts/check_patches.sh; exit 1; }
+
+# Does the patch set reproduce the tree we compile? verify-patches asks whether
+# each patch is applied; this asks the stronger question, which is whether the
+# working tree contains anything the patches do not.
+check-patches:
+	@bash scripts/check_patches.sh
+
+# Put the submodule back to pinned-plus-patches, whatever state it is in.
+#
+# `git checkout -- src/foo.c` inside the submodule reverts to the *pinned*
+# commit, silently discarding every patch that touches that file -- the trap
+# the comment above describes, which is easy to spring while trying to undo
+# something unrelated. The repair is deterministic and check-patches proves it,
+# but only if you know what it is.
+#
+# Destructive by design: it discards uncommitted edits in Core/lwext4. Run
+# `make check-patches` first if there might be work there worth keeping.
+repatch: check-submodule
+	@pinned=$$(git ls-tree HEAD Core/lwext4 | awk '{print $$3}'); \
+	git -C $(LWEXT4_DIR) reset -q --hard $$pinned; \
+	for p in $(PATCHES); do \
+	  git -C $(LWEXT4_DIR) apply "$(CURDIR)/$$p" || { echo "failed: $$p"; exit 1; }; \
+	done; \
+	rm -f $(PATCH_STAMP); \
+	bash scripts/check_patches.sh
 
 unpatch:
 	@for p in $(PATCHES); do \

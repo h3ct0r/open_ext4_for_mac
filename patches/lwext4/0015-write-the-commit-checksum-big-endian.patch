@@ -1,0 +1,41 @@
+Subject: write the journal commit checksum big-endian
+
+lwext4 implements commit-block checksums and cannot verify its own:
+
+    set:    header->chksum[0] =          jbd_commit_csum(jbd_fs, header);
+    verify: header->chksum[0] == to_be32(jbd_commit_csum(jbd_fs, header));
+
+On a little-endian machine those never agree, so every commit block lwext4
+writes fails lwext4's own check -- and Linux's, which requires big-endian for
+every field in the journal, as does every other field lwext4 writes through
+to_be32(). That is why JBD_FEATURE_INCOMPAT_CSUM_V3 could not be turned on: it
+looked like the feature was unimplemented, and it was a missing byte swap.
+
+With this, dumpe2fs reports journal_checksum_v3, e2fsck is clean, and the Linux
+kernel mounts and recovers a journal written by this driver.
+
+It is worth having beyond tidiness. A checksummed journal is the only defence
+against firmware that reports a cache flush and does not perform one, which no
+barrier can help with: recovery stops at the first commit block that does not
+verify, losing that change -- which is what a crash means -- instead of
+replaying a half-written transaction over a live filesystem. Cost is not
+measurable: the same workload runs in 10.74s with checksums and 11.03s without.
+diff --git a/src/ext4_journal.c b/src/ext4_journal.c
+index 1e3f434..9e68d83 100644
+--- a/src/ext4_journal.c
++++ b/src/ext4_journal.c
+@@ -300,7 +300,13 @@ static void jbd_commit_csum_set(struct jbd_fs *jbd_fs,
+ 
+ 	header->chksum_type = 0;
+ 	header->chksum_size = 0;
+-	header->chksum[0] = jbd_commit_csum(jbd_fs, header);
++	/* Big-endian, like every other field in the journal. Storing it in host
++	 * order made this checksum unverifiable by anyone, including the code
++	 * immediately below: jbd_verify_commit_csum compares against to_be32()
++	 * of the same computation, so on a little-endian machine lwext4
++	 * rejected its own commit blocks -- and so did Linux, which is why the
++	 * feature could not be turned on. */
++	header->chksum[0] = to_be32(jbd_commit_csum(jbd_fs, header));
+ }
+ 
+ #if CONFIG_META_CSUM_ENABLE

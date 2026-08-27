@@ -175,6 +175,12 @@ if [ "$BUILD_RC" -ne 0 ] || [ ! -x "$ROOT/build/bin/ext4dump" ]; then
   exit 1
 fi
 
+# Before anything is measured: does the tree we just built match the tree
+# someone else would get? Every suite below runs against Core/lwext4 as it sits
+# on this disk, and says nothing about whether the patch files reproduce it. A
+# green run of a tree that only exists here is the most expensive kind of pass.
+stage "0. patches reproduce lwext4" bash scripts/check_patches.sh
+
 stage "1. read suite"  bash Tests/run_tests.sh
 stage "2. write suite" bash Tests/run_write_tests.sh
 

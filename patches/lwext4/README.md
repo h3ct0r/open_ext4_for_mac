@@ -3,6 +3,27 @@
 Applied automatically by the build (`make patch`, and as a prerequisite of every
 object file). Idempotent — a clean checkout builds with a plain `make`.
 
+**These files are the only copy of our changes to lwext4.** The submodule is
+pinned at an upstream commit; anything edited into its working tree and not
+written down here exists on one machine and nowhere else. `make check-patches`
+replays the whole set onto the pinned commit in a temporary directory and
+diffs the result against `Core/lwext4`, so that cannot go unnoticed again — it
+had happened twice by the time it was checked, and both times the build was
+green.
+
+Two rules follow from `git apply` being all-or-nothing:
+
+* **A patch may not disturb another patch's context.** Adding a line in the
+  middle of a hunk an earlier patch already touched means that earlier patch
+  can no longer be checked on its own, and the build's per-patch "is this still
+  applied?" test starts failing on a tree that is perfectly correct. 0016 put
+  an `#include` between two lines of 0010's context and did exactly this.
+* **Regenerate a patch against the patches before it, not against the working
+  tree.** 0014 was first produced as a whole-tree diff, so it carried hunks
+  belonging to 0005 and 0008. Applied in order those hunks were already
+  present, the patch failed as a unit, and the build skipped it with a note —
+  a clone got a driver with no write barrier and no visible error.
+
 | Patch | What it does |
 |---|---|
 | `0001-guard-EXT_FINCOM_IGNORED` | Lets the build extend the INCOMPAT bits lwext4 tolerates, so we can accept `metadata_csum_seed` (which modern `mke2fs` enables by default) after the bridge has verified the seed still matches the UUID. |
@@ -19,8 +40,10 @@ object file). Idempotent — a clean checkout builds with a plain `make`.
 | `0012-honour-the-stored-metadata-checksum-seed` | **Bug fix, corruption.** Every metadata checksum was seeded with `crc32c(~0, uuid)`. ext4 stores the seed explicitly in `s_checksum_seed` when `metadata_csum_seed` is set — which `mke2fs` enables by default — precisely so that `tune2fs -U` can change a volume's UUID without rewriting every checksum on it. The two agree until somebody does that, and then *every* checksum lwext4 writes is wrong: `e2fsck` reports nine invalid group descriptor and inode checksums after a single `mkdir`. The bridge used to force such volumes read-only to avoid it; they are now writable. |
 | `0013-an-inode-with-no-xattr-header-is-not-an-io-error` | **Bug fix.** `ext4_xattr_ibody_find_entry()` reported `EIO` for an inode whose in-inode attribute area carried no header — the ordinary state of almost every file — because `ext4_xattr_is_ibody_valid()` folds "absent" together with "malformed". Absence is now "not found"; corruption still returns `EIO`. The set path had been *relying* on that error to know when to lay a header down, so it now asks directly; without that it dereferences NULL on the first attribute written to a bare inode. |
 | `0014-give-the-journal-a-write-barrier` | **Bug fix, corruption.** `struct ext4_blockdev_iface` had no way to ask the medium to commit, so jbd wrote a transaction and the commit block that vouches for it with nothing between them, and checkpointed with nothing between that and the commit. A drive is free to reorder all three. On a disk image this never shows — writes reach APFS through the page cache in issue order — while a USB stick pulled from under a live mount came back inconsistent five times out of five. Adds an optional `flush` to the interface and calls it on both sides of `jbd_trans_write_commit_block`. A NULL `flush` leaves jbd behaving exactly as before. |
+| `0015-write-the-commit-checksum-big-endian` | **Bug fix.** lwext4 wrote the journal commit block's checksum in host byte order and verified it against `to_be32()` of the same computation, so on a little-endian machine it rejected every commit block it had written — as does Linux, which requires big-endian throughout the journal. That is why journal checksums looked unimplemented; it was one missing byte swap. |
+| `0016-turn-journal-checksums-on-at-format-time` | **Conformance and defence in depth.** `mkfs` wrote a bare JBD superblock: no feature bits, no checksum type, no uuid, so the journal it laid down was the 1998 format. Sets `JBD_FEATURE_INCOMPAT_CSUM_V3` with crc32c, as `mke2fs` has by default for years, and copies the filesystem uuid into the journal superblock — the checksums are seeded from it, so without that every one computes against zeroes and Linux rejects the journal. A checksummed journal is the only defence against firmware that reports a cache flush without performing one, which no barrier can help with: recovery stops at the first commit block that does not verify, losing that change, instead of replaying a half-written transaction over a live filesystem. |
 
-Everything except 0001, 0003 and 0010 is a genuine upstream defect and worth
+Everything except 0001, 0003, 0010 and 0016 is a genuine upstream defect and worth
 sending upstream. 0002 and 0004 were found by running the write suite under
 `-fsanitize=address,undefined` (`make test-asan`); 0005 by the crash-consistency
 sweep; 0006 by reading the superblock state of volumes snapshotted out from
