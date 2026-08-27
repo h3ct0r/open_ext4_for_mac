@@ -574,9 +574,44 @@ Formatting *through* Disk Utility is untested, because it ends up in
 
 Instrumentation (`FSTask.logMessage` as the first statement of `startFormat`)
 never prints, while Apple's exfat module's own messages do — so the call never
-arrives. The remaining theory is that the Swift overlay's
-`UnaryFileSystemExtension.configuration` does not wire maintenance operations;
-its `swiftinterface` never mentions them. Unconfirmed.
+arrives.
+
+The Swift overlay is the remaining explanation, and it is now better supported.
+`UnaryFileSystemExtension` constrains its associated type only to
+`FSUnaryFileSystem, FSUnaryFileSystemOperations`, and the word *maintenance*
+appears nowhere in FSKit's `swiftinterface` at all. Apple's own modules are
+wired the other way: `msdos` declares
+
+```
+EXExtensionPrincipalClass => msdosFileSystem
+```
+
+implements `startFormatWithTask:options:error:`, and `newfs_fskit -t msdos`
+duly works.
+
+Adding that key here deregisters the module. One good explanation for that was
+eliminated in the process: a Swift class is registered with the ObjC runtime
+under its mangled name — this one was `_TtC6Ext4FS14Ext4FileSystem` — so a
+principal class named `Ext4FileSystem` resolved to nothing, and an
+unresolvable principal class is indistinguishable from a module that will not
+register. `@objc(Ext4FileSystem)` fixes the name, and was verified to: the
+class now appears under it. The module still deregisters.
+
+So the name was never the problem, and what is left is structural. This
+extension is a Swift `@main UnaryFileSystemExtension`, which is
+ExtensionFoundation's entry-point mechanism; `EXExtensionPrincipalClass` is the
+other, mutually exclusive one. Declaring both appears to make the manifest
+incoherent.
+
+Four things have now been ruled out — missing selectors, missing conformance,
+an unregistered conformance, and an unresolvable class name — and reaching
+`startFormat` most likely means giving up the Swift entry point and rebuilding
+the extension around an ObjC principal class. That is a large change with a
+real chance of not working, and **every attempt costs the System Settings
+approval**, which no script can restore.
+
+`@objc(Ext4FileSystem)` was kept anyway. It costs nothing and pins a name that
+was otherwise incidental.
 
 The same core path is fully covered offline: `ext4dump format` builds volumes
 across 117 geometries, all `e2fsck`-clean.
