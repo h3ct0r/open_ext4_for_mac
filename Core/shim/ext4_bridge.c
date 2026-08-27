@@ -222,6 +222,22 @@ static int bd_flush(struct ext4_blockdev *bdev)
     if (!dev || !dev->flush_fn || dev->read_only)
         return EOK;
 
+    /*
+     * Tests only: pretend the journal never asked.
+     *
+     * This is how the reorder suite establishes that the barriers patch 0014
+     * places around the commit block are load-bearing, rather than assuming
+     * it. With this set, the bridge still flushes at its own boundaries --
+     * txn_finish, sync, unmount -- exactly as it did before that patch, so a
+     * run with it on reproduces the driver as it was. If the suite passes
+     * either way, the patch is decoration.
+     */
+    static int suppressed = -1;
+    if (suppressed < 0)
+        suppressed = getenv("EXT4B_NO_JOURNAL_BARRIER") != NULL;
+    if (suppressed)
+        return EOK;
+
     return dev->flush_fn(dev->ctx) == 0 ? EOK : EIO;
 }
 

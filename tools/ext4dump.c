@@ -22,6 +22,13 @@
 #include <sys/ioctl.h>
 #include <inttypes.h>
 
+/* One write held in the modelled drive's volatile cache; see below. */
+typedef struct {
+    uint64_t off;
+    size_t   len;
+    uint8_t *data;
+} pending_write;
+
 typedef struct {
     int fd;
     /*
@@ -36,6 +43,21 @@ typedef struct {
     long fail_after;
     long writes;
     bool crashed;
+
+    /*
+     * The volatile write cache. Off unless EXT4DUMP_WRITE_CACHE is set, in
+     * which case this file behaves like a drive rather than like a file: see
+     * the model above.
+     */
+    pending_write *pending;
+    size_t         pending_count;
+    size_t         pending_cap;
+    size_t         pending_bytes;
+    size_t         cache_bytes;      /* 0 disables the model entirely */
+    uint32_t       reorder_seed;
+    uint32_t       rng;             /* seeded; drives eviction and the crash */
+    int            reorder_drop;     /* percent of the pending queue lost */
+    bool           ignore_barriers;  /* a drive that lies about flushing */
 
     /*
      * Progress, for the one operation slow enough to need it.
@@ -98,11 +120,216 @@ static void progress_tick(file_ctx *c, bool final)
     }
 }
 
+/* ======================================================= volatile cache == */
+/*
+ * A drive with a write cache, modelled honestly.
+ *
+ * This exists because a disk image cannot fail the test that matters. An
+ * image's writes reach the host filesystem in issue order and stay there, so
+ * every crash-consistency sweep over one passes trivially -- not because the
+ * filesystem is correct, but because the medium is incapable of the failure.
+ * A USB stick is capable of it, and duly produced a damaged volume five times
+ * out of five where an image produced none in forty-two. Chasing that with
+ * real hardware cost a day: device names change between replugs, the target
+ * degrades as it is abused, and each run takes minutes and destroys its own
+ * evidence.
+ *
+ * So the medium is modelled instead. A real drive does three things this file
+ * did not:
+ *
+ *   - it serves reads from cache, so the filesystem sees its own writes
+ *     whether or not they have reached the platter;
+ *   - it commits to media in whatever order suits it;
+ *   - on power loss it keeps an arbitrary subset of what it was holding.
+ *
+ * The only thing that makes a write durable is a barrier. Everything issued
+ * since the last one is a pool that may land in any order, or not at all --
+ * which is exactly the property a journal is supposed to be robust against,
+ * and exactly what could not be tested here before.
+ */
+
+/* Grow the pending queue by one entry, taking a copy of the caller's bytes. */
+static int cache_append(file_ctx *c, uint64_t off, const void *buf, size_t len)
+{
+    if (c->pending_count == c->pending_cap) {
+        size_t cap = c->pending_cap ? c->pending_cap * 2 : 256;
+        pending_write *p = realloc(c->pending, cap * sizeof *p);
+        if (!p)
+            return EIO;
+        c->pending = p;
+        c->pending_cap = cap;
+    }
+
+    uint8_t *copy = malloc(len);
+    if (!copy)
+        return EIO;
+    memcpy(copy, buf, len);
+
+    c->pending[c->pending_count].off  = off;
+    c->pending[c->pending_count].len  = len;
+    c->pending[c->pending_count].data = copy;
+    c->pending_count++;
+    c->pending_bytes += len;
+    return 0;
+}
+
+static int cache_apply(file_ctx *c, size_t i)
+{
+    ssize_t n = pwrite(c->fd, c->pending[i].data, c->pending[i].len,
+                       (off_t)c->pending[i].off);
+    return (n == (ssize_t)c->pending[i].len) ? 0 : EIO;
+}
+
+static void cache_forget(file_ctx *c, size_t from)
+{
+    for (size_t i = from; i < c->pending_count; i++)
+        free(c->pending[i].data);
+    if (from == 0) {
+        c->pending_count = 0;
+        c->pending_bytes = 0;
+    }
+}
+
+/* The barrier: everything issued so far reaches the medium, in order. */
+static int cache_commit(file_ctx *c)
+{
+    int rc = 0;
+    for (size_t i = 0; i < c->pending_count; i++)
+        if (cache_apply(c, i) != 0)
+            rc = EIO;
+    cache_forget(c, 0);
+    return rc;
+}
+
+/*
+ * A cache is finite. When it fills, some of it is written out to make room.
+ *
+ * *Which* part, and in what order, is the drive's business and not the
+ * filesystem's -- and that matters more than it looks. An earlier version of
+ * this evicted the oldest entries in issue order, which is a tidy thing to do
+ * and completely defeats the model: the medium then always holds a prefix of
+ * the issue stream, which is exactly the state that is safe by construction.
+ * With barriers disabled the suite still passed, because nothing had ever
+ * actually been reordered.
+ *
+ * So eviction picks its victims by the same seeded permutation the crash uses.
+ * Reordering happens throughout the run, not only at the end.
+ */
+static uint32_t cache_rand(file_ctx *c)
+{
+    c->rng = c->rng * 1103515245u + 12345u;
+    return c->rng >> 16;
+}
+
+static int cache_evict(file_ctx *c)
+{
+    size_t n = c->pending_count;
+    if (n == 0)
+        return 0;
+
+    size_t want = n / 2;
+    if (want == 0)
+        want = n;
+
+    /* Mark a seeded-random half for eviction, then apply the marked ones in
+     * the order they were marked -- not the order they were issued. */
+    bool *evict = calloc(n, sizeof *evict);
+    if (!evict)
+        return EIO;
+
+    size_t marked = 0;
+    while (marked < want) {
+        size_t i = (size_t)(cache_rand(c) % n);
+        if (!evict[i]) { evict[i] = true; marked++; }
+    }
+
+    for (size_t i = 0; i < n; i++) {
+        if (!evict[i])
+            continue;
+        if (cache_apply(c, i) != 0) { free(evict); return EIO; }
+    }
+
+    /* Compact, keeping the survivors in issue order. */
+    size_t w = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (evict[i]) {
+            c->pending_bytes -= c->pending[i].len;
+            free(c->pending[i].data);
+        } else {
+            c->pending[w++] = c->pending[i];
+        }
+    }
+    c->pending_count = w;
+    free(evict);
+    return 0;
+}
+
+/*
+ * Power loss.
+ *
+ * The drive was holding a queue and had its own opinion about the order to
+ * commit it in. It got partway through that order and then stopped. So:
+ * permute what is pending, apply a prefix of the permutation, discard the
+ * rest.
+ *
+ * The permutation is seeded, and the seed is the whole reproduction recipe --
+ * a failure found at seed 7 is a failure anyone can look at again.
+ */
+static void cache_crash(file_ctx *c)
+{
+    size_t n = c->pending_count;
+    if (n == 0)
+        return;
+
+    size_t *order = malloc(n * sizeof *order);
+    if (!order) { cache_forget(c, 0); return; }
+    for (size_t i = 0; i < n; i++)
+        order[i] = i;
+
+    for (size_t i = n; i > 1; i--) {
+        size_t j = (size_t)(cache_rand(c) % i);
+        size_t t = order[i - 1]; order[i - 1] = order[j]; order[j] = t;
+    }
+
+    size_t keep = n - (n * (size_t)c->reorder_drop) / 100;
+    for (size_t k = 0; k < keep; k++)
+        (void)cache_apply(c, order[k]);
+
+    if (getenv("EXT4DUMP_TRACE_WRITES"))
+        fprintf(stderr, "CRASH seed=%u: %zu pending, %zu committed reordered\n",
+                c->reorder_seed, n, keep);
+
+    free(order);
+    cache_forget(c, 0);
+}
+
+/* A read is served from the cache first: newest write to a range wins. */
+static void cache_overlay(file_ctx *c, void *buf, uint64_t off, size_t len)
+{
+    uint8_t *out = buf;
+    for (size_t i = 0; i < c->pending_count; i++) {
+        uint64_t ps = c->pending[i].off;
+        uint64_t pe = ps + c->pending[i].len;
+        uint64_t rs = off, re = off + len;
+        if (pe <= rs || ps >= re)
+            continue;
+
+        uint64_t s = ps > rs ? ps : rs;
+        uint64_t e = pe < re ? pe : re;
+        memcpy(out + (s - rs), c->pending[i].data + (s - ps), (size_t)(e - s));
+    }
+}
+
 static int file_read(void *ctx, void *buf, uint64_t off, size_t len)
 {
     file_ctx *c = ctx;
     ssize_t n = pread(c->fd, buf, len, (off_t)off);
-    return (n == (ssize_t)len) ? 0 : EIO;
+    if (n != (ssize_t)len)
+        return EIO;
+
+    if (c->cache_bytes)
+        cache_overlay(c, buf, off, len);
+    return 0;
 }
 
 static int file_write(void *ctx, const void *buf, uint64_t off, size_t len)
@@ -110,7 +337,13 @@ static int file_write(void *ctx, const void *buf, uint64_t off, size_t len)
     file_ctx *c = ctx;
 
     if (c->fail_after >= 0 && c->writes >= c->fail_after) {
-        c->crashed = true;
+        /* The instant of power loss, once. Whatever the drive was holding is
+         * committed in its own order, partially, and the rest is gone. */
+        if (!c->crashed) {
+            c->crashed = true;
+            if (c->cache_bytes)
+                cache_crash(c);
+        }
         c->writes++;
         return 0;           /* pretend it landed; the bytes are lost */
     }
@@ -121,6 +354,13 @@ static int file_write(void *ctx, const void *buf, uint64_t off, size_t len)
                 c->writes, (unsigned long long)off,
                 (unsigned long long)(off / 4096), len);
     c->writes++;
+
+    /* Into the cache, not onto the medium. Only a barrier puts it there. */
+    if (c->cache_bytes) {
+        if (c->pending_bytes + len > c->cache_bytes && cache_evict(c) != 0)
+            return EIO;
+        return cache_append(c, off, buf, len);
+    }
 
     ssize_t n = pwrite(c->fd, buf, len, (off_t)off);
     return (n == (ssize_t)len) ? 0 : EIO;
@@ -142,6 +382,16 @@ static int file_flush(void *ctx)
     file_ctx *c = ctx;
     if (c->crashed)
         return 0;           /* a flush after the cut reaches nothing */
+
+    if (c->cache_bytes) {
+        /* A drive that reports cache-flush support and does not honour it is
+         * a real and depressingly common thing. Modelling one is also the
+         * negative control: with barriers ignored the suite must fail, and a
+         * crash-consistency test that cannot be made to fail proves nothing. */
+        if (c->ignore_barriers)
+            return 0;
+        return cache_commit(c);
+    }
 
     if (fcntl(c->fd, F_FULLFSYNC) == 0)
         return 0;
@@ -669,6 +919,36 @@ int main(int argc, char **argv)
     const char *fail_env = getenv("EXT4DUMP_FAIL_AFTER");
     if (fail_env)
         fc.fail_after = strtol(fail_env, NULL, 10);
+
+    /*
+     * Make this file behave like a drive with a volatile write cache.
+     *
+     * Unset, everything below is inert and writes go straight to the file as
+     * they always have. Set, only a barrier makes a write durable and a cut
+     * loses a reordered subset of whatever was in flight -- which is the
+     * failure a disk image cannot otherwise produce, and the one that matters.
+     */
+    const char *cache_env = getenv("EXT4DUMP_WRITE_CACHE");
+    if (cache_env) {
+        fc.cache_bytes = (size_t)strtoull(cache_env, NULL, 10);
+        fc.reorder_drop = 50;          /* half the queue never lands */
+        fc.reorder_seed = 1;
+        fc.rng = 1;
+
+        const char *seed_env = getenv("EXT4DUMP_REORDER_SEED");
+        if (seed_env)
+            fc.reorder_seed = (uint32_t)strtoul(seed_env, NULL, 10);
+        fc.rng = fc.reorder_seed ? fc.reorder_seed : 1u;
+
+        const char *drop_env = getenv("EXT4DUMP_REORDER_DROP");
+        if (drop_env) {
+            fc.reorder_drop = (int)strtol(drop_env, NULL, 10);
+            if (fc.reorder_drop < 0)   fc.reorder_drop = 0;
+            if (fc.reorder_drop > 100) fc.reorder_drop = 100;
+        }
+
+        fc.ignore_barriers = getenv("EXT4DUMP_IGNORE_BARRIERS") != NULL;
+    }
 
     /*
      * Optional LUKS layer.

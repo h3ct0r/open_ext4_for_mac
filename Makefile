@@ -155,6 +155,9 @@ test: tools
 	@echo
 	@bash Tests/run_write_tests.sh
 
+test-reorder: tools
+	@bash Tests/run_reorder_tests.sh
+
 test-crash: tools
 	@bash Tests/run_crash_tests.sh
 

@@ -7,6 +7,7 @@
 #   4. open-unlink         — the orphan list, and recovery from a torn one
 #   5. crypto + LUKS       — AES-XTS against OpenSSL, ext4 inside a container
 #   6. crash consistency   — cut the write stream everywhere, replay, verify
+#   7b. reordered writes   — and reorder what was in flight, as a drive does
 #   7. differential        — cross-check against the real Linux ext4 driver
 #   8. mounted driver      — the same crash testing against a real mount
 #   9. encrypted, mounted  — a LUKS volume through FSKit, verified by Linux
@@ -112,6 +113,12 @@ stage "5. crypto primitives" "$ROOT/build/bin/cryptotest"
 if docker info >/dev/null 2>&1; then
   stage "6. LUKS containers" bash Tests/run_luks_tests.sh
   stage "7. crash consistency" bash Tests/run_crash_tests.sh
+
+  # Stage 7 cuts the write stream; this one also *reorders* what was in
+  # flight. That is the difference between a disk image and a drive, and it
+  # is the only stage here that can fail when the journal has no barrier --
+  # which is why it also asserts that disabling barriers breaks it.
+  stage "7b. reordered writes" bash Tests/run_reorder_tests.sh
   stage "8. differential vs Linux" bash Tests/run_diff_tests.sh
 
   # Stages 1-8 all drive the core directly through a plain file. Only this one
@@ -129,6 +136,7 @@ if docker info >/dev/null 2>&1; then
 else
   skip "6. LUKS containers"       "docker daemon not reachable"
   skip "7. crash consistency"     "docker daemon not reachable"
+  skip "7b. reordered writes"     "docker daemon not reachable"
   skip "8. differential vs Linux" "docker daemon not reachable"
   skip "9. mounted driver"        "docker daemon not reachable"
   skip "10. encrypted volumes, mounted" "docker daemon not reachable"
