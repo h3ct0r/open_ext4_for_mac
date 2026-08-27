@@ -97,6 +97,13 @@ struct jbd_trans {
 struct jbd_journal {
 	uint32_t first;
 	uint32_t start;
+	/* The tail as the *medium* knows it. `start` advances in memory with
+	 * every checkpoint; the superblock is written lazily. Recovery reads
+	 * the superblock, so the log must never allocate over this position:
+	 * a head that laps the published tail leaves recovery starting at a
+	 * block that no longer holds what the superblock promises, and it
+	 * stops there having replayed nothing. */
+	uint32_t published_start;
 	uint32_t last;
 	uint32_t trans_id;
 	uint32_t alloc_trans_id;

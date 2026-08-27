@@ -1246,6 +1246,10 @@ int jbd_recover(struct jbd_fs *jbd_fs)
 
 	r = jbd_iterate_log(jbd_fs, &info, ACTION_RECOVER);
 	if (r == EOK) {
+		/* The replay writes were issued; the superblock below says
+		 * they are not needed again. Make the first true before
+		 * stating the second. */
+		(void)ext4_block_barrier(jbd_fs->bdev);
 		/* If we successfully replay the journal,
 		 * clear EXT4_FINCOM_RECOVER flag on the
 		 * ext4 superblock, and set the start of
@@ -1312,6 +1316,7 @@ int jbd_journal_start(struct jbd_fs *jbd_fs,
 	RB_INIT(&journal->block_rec_root);
 	journal->jbd_fs = jbd_fs;
 	jbd_journal_write_sb(journal);
+	journal->published_start = journal->start;
 	r = jbd_write_sb(jbd_fs);
 	if (r != EOK)
 		return r;
@@ -1385,6 +1390,7 @@ jbd_journal_purge_cp_trans(struct jbd_journal *journal,
 			   bool once)
 {
 	struct jbd_trans *trans;
+	bool flushed = false;
 	while ((trans = TAILQ_FIRST(&journal->cp_queue))) {
 		if (!trans->data_cnt) {
 			TAILQ_REMOVE(&journal->cp_queue,
@@ -1417,12 +1423,23 @@ jbd_journal_purge_cp_trans(struct jbd_journal *journal,
 					trans->trans_id;
 				jbd_journal_write_sb(journal);
 				break;
-			} else
+			} else {
 				jbd_journal_flush_trans(trans);
+				flushed = true;
+			}
 		}
 		if (once)
 			break;
 	}
+	/* The flush above *issued* home-location writes; make them durable
+	 * before any caller acts on the tail they moved. The wrap path is
+	 * about to reuse the freed log range, and jbd_journal_stop is about
+	 * to write a superblock that says no replay is needed -- both are
+	 * lies until these writes are on the medium. Best-effort by
+	 * necessity: this path is void, and a device that fails its barrier
+	 * will fail the very next write loudly enough. */
+	if (flushed)
+		(void)ext4_block_barrier(journal->jbd_fs->bdev);
 }
 
 /**@brief  Stop accessing the journal.
@@ -1494,6 +1511,36 @@ static uint32_t jbd_journal_alloc_block(struct jbd_journal *journal,
 	if (journal->last == journal->start) {
 		jbd_journal_purge_cp_trans(journal, true, true);
 		ext4_assert(journal->last != journal->start);
+		/* The purge checkpointed a transaction, barriered the
+		 * checkpoint, and moved the tail past it -- in memory. The
+		 * blocks it freed are what this allocator hands out next, so
+		 * the new tail must be on the medium before one byte of that
+		 * range is rewritten: a crash that keeps the reused log
+		 * blocks but loses the tail advance leaves recovery starting
+		 * from a stale tail into records that no longer exist, and
+		 * it stops there having replayed nothing. That was measured,
+		 * not imagined -- the trace of the failing cut shows exactly
+		 * the journal superblock dropped while reused log space
+		 * landed. */
+		jbd_write_sb(journal->jbd_fs);
+		(void)ext4_block_barrier(journal->jbd_fs->bdev);
+		journal->published_start = journal->start;
+	}
+
+	/* The other way the head reaches the tail: `start` kept pace in
+	 * memory -- checkpoints complete promptly, so the branch above never
+	 * fires -- while the superblock on the medium still names a position
+	 * this allocation is about to overwrite. Publish before that happens.
+	 * Once per lap of the ring, so the cost disappears into the workload;
+	 * skipping it disables recovery outright, and was measured doing so:
+	 * a torn image whose superblock said "start at 361, sequence 607"
+	 * while block 361 held sequence 936 replays nothing at all. */
+	if (journal->last == journal->published_start &&
+	    journal->last != journal->start) {
+		(void)ext4_block_barrier(journal->jbd_fs->bdev);
+		jbd_write_sb(journal->jbd_fs);
+		(void)ext4_block_barrier(journal->jbd_fs->bdev);
+		journal->published_start = journal->start;
 	}
 
 	return start_block;
@@ -2178,8 +2225,17 @@ static void jbd_trans_end_write(struct ext4_bcache *bc __unused,
 			jbd_journal_free_trans(journal, trans, false);
 
 			jbd_journal_purge_cp_trans(journal, false, false);
+			/* Stage the tail move; do not write it. The home
+			 * writes this completion is reporting were merely
+			 * issued -- on a device with a volatile cache that is
+			 * not durable, and a tail advance that reaches the
+			 * medium while the checkpoint it vouches for does not
+			 * leaves the change in neither the log nor its home.
+			 * A tail that lags is only replayed further back,
+			 * which is idempotent redo; a tail that leads is
+			 * corruption. The disk write happens where reuse
+			 * makes it necessary: the wrap path, and stop. */
 			jbd_journal_write_sb(journal);
-			jbd_write_sb(journal->jbd_fs);
 		}
 	}
 }
@@ -2284,8 +2340,8 @@ static int __jbd_journal_commit_trans(struct jbd_journal *journal,
 			journal->start = trans->start_iblock;
 			wrap(&journal->jbd_fs->sb, journal->start);
 			journal->trans_id = trans->trans_id;
+			/* Staged, not written -- see jbd_trans_end_write. */
 			jbd_journal_write_sb(journal);
-			jbd_write_sb(journal->jbd_fs);
 			TAILQ_INSERT_TAIL(&journal->cp_queue, trans,
 					trans_node);
 			jbd_journal_cp_trans(journal, trans);
