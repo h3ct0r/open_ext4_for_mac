@@ -1332,13 +1332,15 @@ static void jbd_trans_end_write(struct ext4_bcache *bc __unused,
 
 /*
  * This routine is only suitable to committed transactions. */
-static void jbd_journal_flush_trans(struct jbd_trans *trans)
+static int jbd_journal_flush_trans(struct jbd_trans *trans)
 {
 	struct jbd_buf *jbd_buf, *tmp;
 	struct jbd_journal *journal = trans->journal;
 	struct ext4_fs *fs = journal->jbd_fs->inode_ref.fs;
+	int rc = EOK;
 	void *tmp_data = ext4_malloc(journal->block_size);
-	ext4_assert(tmp_data);
+	if (!tmp_data)
+		return ENOMEM;
 
 	TAILQ_FOREACH_SAFE(jbd_buf, &trans->buf_queue, buf_node,
 			tmp) {
@@ -1354,7 +1356,23 @@ static void jbd_journal_flush_trans(struct jbd_trans *trans)
 			r = jbd_block_get(journal->jbd_fs,
 						&jbd_block,
 						jbd_buf->jbd_lba);
-			ext4_assert(r == EOK);
+			/* Asserting here aborted the whole driver when the
+			 * medium disappeared under a live mount -- unmount
+			 * flushes checkpoints, the reads hit a device that is
+			 * gone, and SIGABRT took the process down mid-
+			 * teardown (measured: a USB stick pulled during a
+			 * write flood). Failure is an answer, not an
+			 * invariant violation: stop flushing and leave the
+			 * transaction on the checkpoint queue. The staged
+			 * tail has not moved past it, so the superblock still
+			 * says the log covers it, and the next mount replays
+			 * it -- which is exactly what recovery is for, and
+			 * what happened when the pulled stick came back
+			 * clean. */
+			if (r != EOK) {
+				rc = r;
+				break;
+			}
 			memcpy(tmp_data, jbd_block.data,
 					journal->block_size);
 			ext4_block_set(fs->bdev, &jbd_block);
@@ -1369,6 +1387,7 @@ static void jbd_journal_flush_trans(struct jbd_trans *trans)
 	}
 
 	ext4_free(tmp_data);
+	return rc;
 }
 
 static void
@@ -1424,7 +1443,15 @@ jbd_journal_purge_cp_trans(struct jbd_journal *journal,
 				jbd_journal_write_sb(journal);
 				break;
 			} else {
-				jbd_journal_flush_trans(trans);
+				/* A flush that cannot read its own log --
+				 * the medium is gone or failing -- must not
+				 * be retried forever: the transaction never
+				 * completes, so this loop would spin on it.
+				 * Stop purging. The staged tail still covers
+				 * everything unflushed, so the next mount
+				 * replays it. */
+				if (jbd_journal_flush_trans(trans) != EOK)
+					break;
 				flushed = true;
 			}
 		}
