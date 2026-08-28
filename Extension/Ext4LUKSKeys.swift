@@ -57,6 +57,12 @@ enum Ext4LUKSKeys {
 
         if let key = keychainKey(uuid: uuid) {
             Ext4Log.info("master key for \(uuid) came from the keychain")
+            // The keychain is authoritative now; any plaintext file left from
+            // an older run is stale and superfluous. Remove it so a master key
+            // does not sit on disk in the clear once the keychain holds it.
+            if let directory = LUKSKeyStore.directoryFromInsideTheSandbox() {
+                LUKSKeyStore.forget(uuid: uuid, in: directory)
+            }
             return .found(key)
         }
 
@@ -85,22 +91,37 @@ enum Ext4LUKSKeys {
         }
     }
 
-    /// Remember a derived key for next time.
+    /// Remember a derived key for next time -- in the keychain, and delete the
+    /// plaintext `.pass`/`.key` that were on disk.
     ///
-    /// Deliberately in the container and not the keychain, even though this
-    /// process is entitled to write there. **The extension never creates
-    /// keychain items; it only reads them.** Ownership has to sit in one
-    /// place, and it belongs with the app -- which is what the user reaches
-    /// for when they want a volume to stop being unlocked. A key cached
-    /// somewhere the app cannot delete is a key nothing can forget.
+    /// The old doctrine was "the extension never creates keychain items", to
+    /// keep ownership with the app. Its real goal -- that the app's Forget
+    /// always works -- survives: the app deletes by UUID through the identical
+    /// keychain query, whoever wrote the item. What it bought at the cost of a
+    /// plaintext master key persisting on disk was not worth it. So cache to
+    /// the keychain, and only fall back to a `.key` file when the keychain
+    /// write fails (an unattended box, or an odd keychain state) -- logged, so
+    /// the fallback is never silent.
     ///
-    /// Best effort: failing to cache is not a reason to fail a mount that has
-    /// already succeeded.
+    /// Best effort throughout: failing to cache is not a reason to fail a mount
+    /// that has already succeeded.
     private static func cache(masterKey: [UInt8], uuid: String, in directory: URL) {
         do {
-            try LUKSKeyStore.write(masterKey: masterKey, uuid: uuid, in: directory)
+            try LUKSKeychain.store(masterKey: masterKey, uuid: uuid,
+                                   label: "LUKS \(uuid)")
+            // Single-use passphrase, and no lingering plaintext key: the
+            // keychain holds it now.
+            LUKSKeyStore.forget(uuid: uuid, in: directory)
         } catch {
-            Ext4Log.info("could not cache the master key: \(error)")
+            Ext4Log.info("could not cache the master key in the keychain "
+                         + "(\(error)); falling back to a file")
+            do {
+                try LUKSKeyStore.write(masterKey: masterKey, uuid: uuid, in: directory)
+                // The derivation is done; the passphrase file was single-use.
+                LUKSKeyStore.removePassphrase(uuid: uuid, in: directory)
+            } catch {
+                Ext4Log.info("could not cache the master key: \(error)")
+            }
         }
     }
 
@@ -174,6 +195,12 @@ extension Ext4LUKSKeys {
         bridge.close()
         guard bridge.openThroughLUKS(info: luks, masterKey: key) else {
             throw Ext4Error.ioError
+        }
+        // The volume is open; the exported header has done its job. Delete it
+        // so a copy does not outlive the disk it came from.
+        if let uuid = uuidString(luks),
+           let directory = LUKSKeyStore.directoryFromInsideTheSandbox() {
+            LUKSKeyStore.removeHeader(uuid: uuid, in: directory)
         }
         Ext4Log.info("unlocked LUKS\(luks.version) container, \(luks.sector_size)B sectors")
         return true

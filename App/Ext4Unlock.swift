@@ -180,7 +180,23 @@ enum Ext4Unlock {
     /// cannot -- claiming the keychain group needs a provisioning profile for
     /// this app's bundle ID, and a binary signed without one simply fails the
     /// call rather than being killed for it.
+    /// Preferred entry point: the passphrase never leaves a wipe-on-deinit
+    /// buffer, so there is no copy-on-write alias to leak it (see SecureBytes).
+    static func store(passphrase: SecureBytes, devicePath: String) -> Result<(Container, Stored), UnlockFailure> {
+        passphrase.withUnsafeBytes { raw in
+            store(passphrase: raw, devicePath: devicePath)
+        }
+    }
+
+    static func store(passphrase: UnsafeBufferPointer<UInt8>, devicePath: String) -> Result<(Container, Stored), UnlockFailure> {
+        storeCore(passphrase: passphrase, devicePath: devicePath)
+    }
+
     static func store(passphrase: [UInt8], devicePath: String) -> Result<(Container, Stored), UnlockFailure> {
+        passphrase.withUnsafeBufferPointer { storeCore(passphrase: $0, devicePath: devicePath) }
+    }
+
+    private static func storeCore(passphrase: UnsafeBufferPointer<UInt8>, devicePath: String) -> Result<(Container, Stored), UnlockFailure> {
         guard let source = headerSource(devicePath: devicePath),
               let device = RawDevice(path: source) else {
             return .failure(UnlockFailure("cannot read a LUKS header for \(devicePath)"))
@@ -193,12 +209,10 @@ enum Ext4Unlock {
 
         var key = [UInt8](repeating: 0, count: Int(LUKS_MAX_MASTER_KEY))
         var length = 0
-        let status = passphrase.withUnsafeBufferPointer { pass in
-            key.withUnsafeMutableBufferPointer { out in
-                luks_unlock(device.context, rawDeviceRead, &info,
-                            pass.baseAddress, pass.count,
-                            out.baseAddress, &length)
-            }
+        let status = key.withUnsafeMutableBufferPointer { out in
+            luks_unlock(device.context, rawDeviceRead, &info,
+                        passphrase.baseAddress, passphrase.count,
+                        out.baseAddress, &length)
         }
         defer { zero(&key) }
         guard status == LUKS_OK, length > 0 else {
@@ -232,7 +246,9 @@ enum Ext4Unlock {
 
     /// Whether a key is already waiting for this container.
     static func isUnlocked(uuid: String) -> Bool {
-        if (try? LUKSKeychain.masterKey(uuid: uuid)) != nil { return true }
+        // Existence only -- do not pull the master key into memory to answer a
+        // boolean that runs on every menu rebuild.
+        if LUKSKeychain.hasKey(uuid: uuid) { return true }
         return LUKSKeyStore.material(uuid: uuid,
                                      in: LUKSKeyStore.directoryFromOutside()) != nil
     }

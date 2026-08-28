@@ -217,18 +217,18 @@ int main(void)
         const char *big = "{\"offset\":\"16777216\",\"n\":4096}";
         int n = json_parse(big, strlen(big), toks, 256);
         uint64_t v = 0;
-        if (n > 0 && json_get_u64(big, toks, json_object_get(big, toks, n, 0, "offset"), &v) && v == 16777216)
+        if (n > 0 && json_get_u64(big, toks, n, json_object_get(big, toks, n, 0, "offset"), &v) && v == 16777216)
             ok("a number stored as a string is read");
         else
             bad("a number stored as a string is read", NULL);
-        if (n > 0 && json_get_u64(big, toks, json_object_get(big, toks, n, 0, "n"), &v) && v == 4096)
+        if (n > 0 && json_get_u64(big, toks, n, json_object_get(big, toks, n, 0, "n"), &v) && v == 4096)
             ok("a plain number is read");
         else
             bad("a plain number is read", NULL);
 
         const char *ovf = "{\"n\":\"99999999999999999999\"}";
         n = json_parse(ovf, strlen(ovf), toks, 256);
-        if (n > 0 && !json_get_u64(ovf, toks, json_object_get(ovf, toks, n, 0, "n"), &v))
+        if (n > 0 && !json_get_u64(ovf, toks, n, json_object_get(ovf, toks, n, 0, "n"), &v))
             ok("a number too large for 64 bits is refused, not wrapped");
         else
             bad("a number too large for 64 bits is refused, not wrapped", NULL);
@@ -240,6 +240,24 @@ int main(void)
             ok("a nested key is not mistaken for one of its parent's");
         else
             bad("a nested key is not mistaken for one of its parent's", NULL);
+
+        /* Out-of-range indices must be refused, not dereferenced: the
+         * accessors now bound idx above by count as well as below by zero. An
+         * index at or past count would read a token off the end of the array. */
+        const char *doc = "{\"k\":\"12345\"}";
+        n = json_parse(doc, strlen(doc), toks, 256);
+        uint64_t sink = 0;
+        char cbuf[16];
+        bool oob_refused =
+            n > 0 &&
+            !json_get_u64(doc, toks, n, n, &sink) &&
+            !json_get_u64(doc, toks, n, n + 5, &sink) &&
+            !json_equals(doc, toks, n, n, "k") &&
+            !json_copy(doc, toks, n, n, cbuf, sizeof(cbuf));
+        if (oob_refused)
+            ok("an out-of-range token index is refused, not read past the end");
+        else
+            bad("an out-of-range token index is refused", NULL);
     }
 
     printf("\nbase64\n\n");

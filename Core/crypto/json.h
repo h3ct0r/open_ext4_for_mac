@@ -56,12 +56,13 @@ int json_parse(const char *js, size_t len, json_tok *tokens, unsigned max);
 int json_object_get(const char *js, const json_tok *t, int count,
                     int obj, const char *key);
 
-/// True when the string or primitive at `idx` equals `s`.
-bool json_equals(const char *js, const json_tok *t, int idx, const char *s);
+/// True when the string or primitive at `idx` equals `s`. `count` bounds the
+/// token array so an out-of-range index is refused, not dereferenced.
+bool json_equals(const char *js, const json_tok *t, int count, int idx, const char *s);
 
 /// Copy the token's text out, always NUL-terminated. Returns false if it does
-/// not fit, rather than truncating silently.
-bool json_copy(const char *js, const json_tok *t, int idx,
+/// not fit, rather than truncating silently. `count` bounds the token array.
+bool json_copy(const char *js, const json_tok *t, int count, int idx,
                char *out, size_t out_len);
 
 /// Read an unsigned integer.
@@ -70,7 +71,7 @@ bool json_copy(const char *js, const json_tok *t, int idx,
 /// JSON *strings*, because JSON numbers are doubles by specification. So both
 /// forms are accepted here; refusing the string form would fail on every real
 /// header.
-bool json_get_u64(const char *js, const json_tok *t, int idx, uint64_t *out);
+bool json_get_u64(const char *js, const json_tok *t, int count, int idx, uint64_t *out);
 
 /// How many key/value pairs the object at `obj` has.
 int json_object_count(const json_tok *t, int count, int obj);

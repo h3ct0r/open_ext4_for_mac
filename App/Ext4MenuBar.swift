@@ -202,20 +202,20 @@ final class Ext4MenuBar: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        var passphrase = [UInt8](field.stringValue.utf8)
+        // SecureBytes, not [UInt8]: a value-type array shared into the Task
+        // below would leave an un-wiped copy-on-write buffer behind. This one
+        // buffer is passed by reference and zeroed once, in its deinit, after
+        // the Task is done with it.
+        let passphrase = SecureBytes(utf8: field.stringValue)
         field.stringValue = ""
-        defer { Ext4Unlock.zero(&passphrase) }
         guard !passphrase.isEmpty else { return }
 
         // Deriving takes seconds and a gigabyte, so it does not belong on the
         // main thread with the menu frozen behind it.
         let device = "/dev/\(volume.bsdName)"
         let progress = beginProgress("Deriving the key for \(volume.displayName)…")
-        let carried = passphrase
         Task.detached(priority: .userInitiated) {
-            var copy = carried
-            let result = Ext4Unlock.store(passphrase: copy, devicePath: device)
-            Ext4Unlock.zero(&copy)
+            let result = Ext4Unlock.store(passphrase: passphrase, devicePath: device)
             await MainActor.run {
                 progress.close()
                 switch result {

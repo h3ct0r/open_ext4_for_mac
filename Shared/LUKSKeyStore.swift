@@ -130,6 +130,19 @@ public enum LUKSKeyStore {
                 at: directory.appendingPathComponent("\(uuid).\(suffix)"))
         }
     }
+
+    /// Remove just the passphrase file -- it is single-use, consumed by the
+    /// one derivation it feeds.
+    public static func removePassphrase(uuid: String, in directory: URL) {
+        try? FileManager.default.removeItem(
+            at: directory.appendingPathComponent("\(uuid).pass"))
+    }
+
+    /// Remove just the exported header -- done as soon as the volume unlocks,
+    /// so a copy does not outlive the disk it describes.
+    public static func removeHeader(uuid: String, in directory: URL) {
+        try? FileManager.default.removeItem(at: headerURL(uuid: uuid, in: directory))
+    }
 }
 
 private extension FileManager {

@@ -25,6 +25,18 @@
 #define LUKS_MAGIC_LEN      6
 static const uint8_t LUKS_MAGIC[LUKS_MAGIC_LEN] = { 'L','U','K','S', 0xba, 0xbe };
 
+/*
+ * A ceiling on PBKDF2 iteration counts read from the header. The count is an
+ * attacker-controlled field on media we did not create; without a bound,
+ * 0xFFFFFFFF iterations of HMAC-SHA512 is hours of CPU per slot, times eight
+ * slots -- a denial of service delivered by a crafted header. 100 million is
+ * ~25x a paranoid real-world setting (cryptsetup tunes to a time, typically a
+ * few million iterations), so it accepts every genuine volume and refuses only
+ * the absurd. An over-count is treated as corruption, not clamped: a real
+ * header never approaches it.
+ */
+#define LUKS_MAX_PBKDF2_ITER 100000000u
+
 #define L1_VERSION          6
 #define L1_CIPHER_NAME      8
 #define L1_CIPHER_MODE      40
@@ -68,8 +80,6 @@ static void copy_field(char *dst, size_t dst_len, const uint8_t *src, size_t n)
     size_t len = n < dst_len - 1 ? n : dst_len - 1;
     memcpy(dst, src, len);
     dst[len] = 0;
-    for (size_t i = 0; i < len; i++)
-        if (dst[i] == 0) break;
 }
 
 const char *luks_strstatus(luks_status s)
@@ -393,9 +403,9 @@ static luks_status probe_luks2(void *ctx, ext4b_read_fn read_fn, luks_info *out)
     }
 
     int type = json_object_get(hdr.json, toks, n, seg, "type");
-    if (!json_equals(hdr.json, toks, type, "crypt")) {
+    if (!json_equals(hdr.json, toks, n, type, "crypt")) {
         char got[32] = "?";
-        json_copy(hdr.json, toks, type, got, sizeof(got));
+        json_copy(hdr.json, toks, n, type, got, sizeof(got));
         snprintf(out->unsupported, sizeof(out->unsupported),
                  "segment type \"%s\" (only \"crypt\" is implemented)", got);
         status = LUKS_UNSUPPORTED;
@@ -404,15 +414,15 @@ static luks_status probe_luks2(void *ctx, ext4b_read_fn read_fn, luks_info *out)
 
     uint64_t offset = 0, sector = 512, tweak = 0;
     char enc[64] = {0};
-    if (!json_get_u64(hdr.json, toks, json_object_get(hdr.json, toks, n, seg, "offset"), &offset) ||
-        !json_copy(hdr.json, toks, json_object_get(hdr.json, toks, n, seg, "encryption"), enc, sizeof(enc))) {
+    if (!json_get_u64(hdr.json, toks, n, json_object_get(hdr.json, toks, n, seg, "offset"), &offset) ||
+        !json_copy(hdr.json, toks, n, json_object_get(hdr.json, toks, n, seg, "encryption"), enc, sizeof(enc))) {
         snprintf(out->unsupported, sizeof(out->unsupported),
                  "the LUKS2 data segment is missing its offset or cipher");
         goto done;
     }
     /* sector_size and iv_tweak are optional; the defaults are the common case. */
-    json_get_u64(hdr.json, toks, json_object_get(hdr.json, toks, n, seg, "sector_size"), &sector);
-    json_get_u64(hdr.json, toks, json_object_get(hdr.json, toks, n, seg, "iv_tweak"), &tweak);
+    json_get_u64(hdr.json, toks, n, json_object_get(hdr.json, toks, n, seg, "sector_size"), &sector);
+    json_get_u64(hdr.json, toks, n, json_object_get(hdr.json, toks, n, seg, "iv_tweak"), &tweak);
 
     if (tweak != 0) {
         snprintf(out->unsupported, sizeof(out->unsupported),
@@ -442,9 +452,18 @@ static luks_status probe_luks2(void *ctx, ext4b_read_fn read_fn, luks_info *out)
     int ks       = (ks_key >= 0) ? json_skip(toks, n, ks_key) : -1;
     uint64_t key_size = 0;
     if (ks < 0 ||
-        !json_get_u64(hdr.json, toks, json_object_get(hdr.json, toks, n, ks, "key_size"), &key_size)) {
+        !json_get_u64(hdr.json, toks, n, json_object_get(hdr.json, toks, n, ks, "key_size"), &key_size)) {
         snprintf(out->unsupported, sizeof(out->unsupported),
                  "the LUKS2 metadata declares no usable key slot");
+        goto done;
+    }
+    /* Bound before the 32-bit cast: 0x100000020 would truncate to 32 and sail
+     * through supported_cipher's key-length check while meaning something else
+     * entirely. */
+    if (key_size == 0 || key_size > LUKS_MAX_MASTER_KEY) {
+        snprintf(out->unsupported, sizeof(out->unsupported),
+                 "master key length %llu out of range",
+                 (unsigned long long)key_size);
         goto done;
     }
 
@@ -508,11 +527,14 @@ static bool digest_matches(const uint8_t *hdr, crypto_hash hash,
     uint8_t want[L1_DIGEST_LEN];
     memcpy(want, hdr + L1_MK_DIGEST, L1_DIGEST_LEN);
 
+    uint32_t iter = rd32be(hdr + L1_MK_DIGEST_ITER);
+    if (iter == 0 || iter > LUKS_MAX_PBKDF2_ITER)
+        return false;
+
     uint8_t got[L1_DIGEST_LEN];
     if (crypto_pbkdf2(hash, mk, mk_len,
                       hdr + L1_MK_DIGEST_SALT, L1_SALT_LEN,
-                      rd32be(hdr + L1_MK_DIGEST_ITER),
-                      got, sizeof(got)) != 0)
+                      iter, got, sizeof(got)) != 0)
         return false;
 
     /* Constant time: this runs once per slot and leaks nothing worth having,
@@ -530,6 +552,8 @@ static luks_status try_slot(void *ctx, ext4b_read_fn read_fn,
                             uint8_t *master_key)
 {
     if (slot->stripes == 0 || slot->stripes > 8192)
+        return LUKS_CORRUPT;
+    if (slot->iterations == 0 || slot->iterations > LUKS_MAX_PBKDF2_ITER)
         return LUKS_CORRUPT;
 
     const size_t key_bytes = info->key_bytes;
@@ -582,7 +606,9 @@ static luks_status try_slot(void *ctx, ext4b_read_fn read_fn,
 
 out:
     if (status != LUKS_OK)
-        memset_s(master_key, LUKS_MAX_MASTER_KEY, 0, key_bytes);
+        /* The whole buffer, not just key_bytes: on failure the caller must be
+         * left nothing, and the LUKS2 path already wipes the full width. */
+        memset_s(master_key, LUKS_MAX_MASTER_KEY, 0, LUKS_MAX_MASTER_KEY);
     memset_s(derived, sizeof(derived), 0, sizeof(derived));
     memset_s(material, material_len, 0, material_len);
     free(material);
@@ -609,9 +635,9 @@ static int derive_slot_key(const char *js, const json_tok *t, int n, int kdf,
         return EINVAL;
 
     char type[32] = {0}, salt_b64[512] = {0};
-    if (!json_copy(js, t, json_object_get(js, t, n, kdf, "type"), type, sizeof(type)))
+    if (!json_copy(js, t, n, json_object_get(js, t, n, kdf, "type"), type, sizeof(type)))
         return EINVAL;
-    if (!json_copy(js, t, json_object_get(js, t, n, kdf, "salt"), salt_b64, sizeof(salt_b64)))
+    if (!json_copy(js, t, n, json_object_get(js, t, n, kdf, "salt"), salt_b64, sizeof(salt_b64)))
         return EINVAL;
 
     uint8_t salt[256];
@@ -624,9 +650,9 @@ static int derive_slot_key(const char *js, const json_tok *t, int n, int kdf,
     if (strcmp(type, "pbkdf2") == 0) {
         char hname[32] = {0};
         uint64_t iterations = 0;
-        if (json_copy(js, t, json_object_get(js, t, n, kdf, "hash"), hname, sizeof(hname)) &&
-            json_get_u64(js, t, json_object_get(js, t, n, kdf, "iterations"), &iterations) &&
-            iterations > 0 && iterations <= UINT32_MAX) {
+        if (json_copy(js, t, n, json_object_get(js, t, n, kdf, "hash"), hname, sizeof(hname)) &&
+            json_get_u64(js, t, n, json_object_get(js, t, n, kdf, "iterations"), &iterations) &&
+            iterations > 0 && iterations <= LUKS_MAX_PBKDF2_ITER) {
             rc = crypto_pbkdf2(crypto_hash_by_name(hname), pass, pass_len,
                                salt, (size_t)salt_len, (uint32_t)iterations,
                                out, out_len);
@@ -635,9 +661,9 @@ static int derive_slot_key(const char *js, const json_tok *t, int n, int kdf,
         }
     } else if (strcmp(type, "argon2i") == 0 || strcmp(type, "argon2id") == 0) {
         uint64_t time = 0, memory = 0, cpus = 1;
-        json_get_u64(js, t, json_object_get(js, t, n, kdf, "time"), &time);
-        json_get_u64(js, t, json_object_get(js, t, n, kdf, "memory"), &memory);
-        json_get_u64(js, t, json_object_get(js, t, n, kdf, "cpus"), &cpus);
+        json_get_u64(js, t, n, json_object_get(js, t, n, kdf, "time"), &time);
+        json_get_u64(js, t, n, json_object_get(js, t, n, kdf, "memory"), &memory);
+        json_get_u64(js, t, n, json_object_get(js, t, n, kdf, "cpus"), &cpus);
 
         /* Bounds before allocating: `memory` is attacker-controlled and is in
          * KiB, so an unchecked value is a request to allocate terabytes. 4 GiB
@@ -645,6 +671,14 @@ static int derive_slot_key(const char *js, const json_tok *t, int n, int kdf,
         if (time == 0 || time > 1024 ||
             memory < 8 || memory > (4ull << 20) ||
             cpus == 0 || cpus > 64)
+            return EINVAL;
+
+        /* Individually bounded is not enough: 1024 passes over 4 GiB is a
+         * multi-hour, 4 GB-resident derivation from header data alone. Cap the
+         * product (time x memory, in KiB-passes) so the two cannot be
+         * multiplied into a denial of service. 128 Mi is ~30x cryptsetup's
+         * default and still finishes in seconds. */
+        if ((uint64_t)time * memory > (128ull << 20))
             return EINVAL;
 
         argon2_type at = (strcmp(type, "argon2id") == 0) ? Argon2_id : Argon2_i;
@@ -682,7 +716,7 @@ static bool luks2_digest_ok(const char *js, const json_tok *t, int n,
             int el = json_array_get(js, t, n, slots, e);
             if (el < 0)
                 break;
-            if (json_equals(js, t, el, slot_id)) { covers = true; break; }
+            if (json_equals(js, t, n, el, slot_id)) { covers = true; break; }
         }
         if (!covers)
             continue;
@@ -690,14 +724,14 @@ static bool luks2_digest_ok(const char *js, const json_tok *t, int n,
         char type[32] = {0}, hname[32] = {0};
         char salt_b64[512] = {0}, dig_b64[512] = {0};
         uint64_t iterations = 0;
-        if (!json_copy(js, t, json_object_get(js, t, n, d, "type"), type, sizeof(type)) ||
+        if (!json_copy(js, t, n, json_object_get(js, t, n, d, "type"), type, sizeof(type)) ||
             strcmp(type, "pbkdf2") != 0)
             continue;
-        if (!json_copy(js, t, json_object_get(js, t, n, d, "hash"), hname, sizeof(hname)) ||
-            !json_copy(js, t, json_object_get(js, t, n, d, "salt"), salt_b64, sizeof(salt_b64)) ||
-            !json_copy(js, t, json_object_get(js, t, n, d, "digest"), dig_b64, sizeof(dig_b64)) ||
-            !json_get_u64(js, t, json_object_get(js, t, n, d, "iterations"), &iterations) ||
-            iterations == 0 || iterations > UINT32_MAX)
+        if (!json_copy(js, t, n, json_object_get(js, t, n, d, "hash"), hname, sizeof(hname)) ||
+            !json_copy(js, t, n, json_object_get(js, t, n, d, "salt"), salt_b64, sizeof(salt_b64)) ||
+            !json_copy(js, t, n, json_object_get(js, t, n, d, "digest"), dig_b64, sizeof(dig_b64)) ||
+            !json_get_u64(js, t, n, json_object_get(js, t, n, d, "iterations"), &iterations) ||
+            iterations == 0 || iterations > LUKS_MAX_PBKDF2_ITER)
             continue;
 
         uint8_t salt[256], want[128], got[128];
@@ -706,16 +740,19 @@ static bool luks2_digest_ok(const char *js, const json_tok *t, int n,
         if (salt_len <= 0 || want_len <= 0)
             continue;
 
-        if (crypto_pbkdf2(crypto_hash_by_name(hname), mk, mk_len,
-                          salt, (size_t)salt_len, (uint32_t)iterations,
-                          got, (size_t)want_len) != 0)
-            continue;
+        int prc = crypto_pbkdf2(crypto_hash_by_name(hname), mk, mk_len,
+                                salt, (size_t)salt_len, (uint32_t)iterations,
+                                got, (size_t)want_len);
 
-        uint8_t diff = 0;
-        for (int j = 0; j < want_len; j++)
+        uint8_t diff = (uint8_t)(prc != 0);   /* a failed derive never matches */
+        for (int j = 0; j < want_len && prc == 0; j++)
             diff |= (uint8_t)(want[j] ^ got[j]);
+
+        /* got is derived from the master key -- zero it on every path out of
+         * this iteration, not only the matching one; the old code left it on
+         * the stack whenever the derive failed. */
         memset_s(got, sizeof(got), 0, sizeof(got));
-        if (diff == 0)
+        if (prc == 0 && diff == 0)
             return true;
     }
     return false;
@@ -728,31 +765,31 @@ static luks_status try_luks2_slot(void *ctx, ext4b_read_fn read_fn,
                                   uint8_t *master_key, size_t *mk_len)
 {
     char type[32] = {0};
-    if (!json_copy(js, t, json_object_get(js, t, n, ks, "type"), type, sizeof(type)) ||
+    if (!json_copy(js, t, n, json_object_get(js, t, n, ks, "type"), type, sizeof(type)) ||
         strcmp(type, "luks2") != 0)
         return LUKS_BAD_PASSPHRASE;   /* a slot we do not handle is not an error */
 
     uint64_t key_size = 0;
-    if (!json_get_u64(js, t, json_object_get(js, t, n, ks, "key_size"), &key_size) ||
+    if (!json_get_u64(js, t, n, json_object_get(js, t, n, ks, "key_size"), &key_size) ||
         key_size == 0 || key_size > LUKS_MAX_MASTER_KEY)
         return LUKS_CORRUPT;
 
     int af = json_object_get(js, t, n, ks, "af");
     uint64_t stripes = 0;
     char af_hash[32] = {0};
-    if (!json_get_u64(js, t, json_object_get(js, t, n, af, "stripes"), &stripes) ||
-        !json_copy(js, t, json_object_get(js, t, n, af, "hash"), af_hash, sizeof(af_hash)) ||
+    if (!json_get_u64(js, t, n, json_object_get(js, t, n, af, "stripes"), &stripes) ||
+        !json_copy(js, t, n, json_object_get(js, t, n, af, "hash"), af_hash, sizeof(af_hash)) ||
         stripes == 0 || stripes > 8192)
         return LUKS_CORRUPT;
 
     int area = json_object_get(js, t, n, ks, "area");
     uint64_t area_off = 0, area_size = 0, area_key_size = key_size;
     char area_enc[64] = {0};
-    if (!json_get_u64(js, t, json_object_get(js, t, n, area, "offset"), &area_off) ||
-        !json_get_u64(js, t, json_object_get(js, t, n, area, "size"), &area_size) ||
-        !json_copy(js, t, json_object_get(js, t, n, area, "encryption"), area_enc, sizeof(area_enc)))
+    if (!json_get_u64(js, t, n, json_object_get(js, t, n, area, "offset"), &area_off) ||
+        !json_get_u64(js, t, n, json_object_get(js, t, n, area, "size"), &area_size) ||
+        !json_copy(js, t, n, json_object_get(js, t, n, area, "encryption"), area_enc, sizeof(area_enc)))
         return LUKS_CORRUPT;
-    json_get_u64(js, t, json_object_get(js, t, n, area, "key_size"), &area_key_size);
+    json_get_u64(js, t, n, json_object_get(js, t, n, area, "key_size"), &area_key_size);
 
     /* The key material is stored with the same construction as the data, so
      * the same allow-list applies. */
@@ -844,7 +881,7 @@ static luks_status unlock_luks2(void *ctx, ext4b_read_fn read_fn,
     for (int i = 0; i < slots; i++) {
         int key = json_object_key_at(toks, n, keyslots, i);
         char slot_id[24] = {0};
-        if (!json_copy(hdr.json, toks, key, slot_id, sizeof(slot_id)))
+        if (!json_copy(hdr.json, toks, n, key, slot_id, sizeof(slot_id)))
             continue;
 
         int ks = json_skip(toks, n, key);

@@ -150,9 +150,9 @@ int json_skip(const json_tok *t, int count, int idx)
     return i;
 }
 
-bool json_equals(const char *js, const json_tok *t, int idx, const char *s)
+bool json_equals(const char *js, const json_tok *t, int count, int idx, const char *s)
 {
-    if (idx < 0 || !s)
+    if (idx < 0 || idx >= count || !s)
         return false;
     size_t n = (size_t)(t[idx].end - t[idx].start);
     return strlen(s) == n && strncmp(js + t[idx].start, s, n) == 0;
@@ -179,7 +179,7 @@ int json_object_get(const char *js, const json_tok *t, int count,
         int v = json_skip(t, count, k);
         if (v >= count || t[v].start >= limit)
             break;
-        if (t[k].type == JSON_STRING && json_equals(js, t, k, key))
+        if (t[k].type == JSON_STRING && json_equals(js, t, count, k, key))
             return v;
         i = json_skip(t, count, v);
     }
@@ -218,10 +218,10 @@ int json_object_count(const json_tok *t, int count, int obj)
     return members;
 }
 
-bool json_copy(const char *js, const json_tok *t, int idx,
+bool json_copy(const char *js, const json_tok *t, int count, int idx,
                char *out, size_t out_len)
 {
-    if (idx < 0 || !out || out_len == 0)
+    if (idx < 0 || idx >= count || !out || out_len == 0)
         return false;
     size_t n = (size_t)(t[idx].end - t[idx].start);
     if (n >= out_len)
@@ -231,9 +231,9 @@ bool json_copy(const char *js, const json_tok *t, int idx,
     return true;
 }
 
-bool json_get_u64(const char *js, const json_tok *t, int idx, uint64_t *out)
+bool json_get_u64(const char *js, const json_tok *t, int count, int idx, uint64_t *out)
 {
-    if (idx < 0 || !out)
+    if (idx < 0 || idx >= count || !out)
         return false;
     if (t[idx].type != JSON_PRIMITIVE && t[idx].type != JSON_STRING)
         return false;

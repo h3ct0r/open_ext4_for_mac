@@ -60,6 +60,18 @@ public enum LUKSKeychain {
         ]
     }
 
+    /// Whether a key is stored for this container, without fetching it. Asks
+    /// for attributes only (kSecReturnAttributes), so the master key never
+    /// leaves the keychain into a heap array just to answer a yes/no -- which
+    /// is what a plain masterKey() call did on every menu rebuild.
+    public static func hasKey(uuid: String) -> Bool {
+        var query = base(uuid: uuid)
+        query[kSecReturnAttributes as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        return SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess
+    }
+
     /// The master key stored for a container, if there is one.
     ///
     /// The caller owns the bytes and should zero them when done.
