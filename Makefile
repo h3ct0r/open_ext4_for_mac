@@ -95,7 +95,7 @@ ARGON2_CFLAGS := $(CFLAGS) -Wno-everything -I$(ARGON2_DIR)
 CORE_LIB      := $(BUILD)/lib/$(CONFIG)/libext4core.a
 CORE_TEST_LIB := $(BUILD)/lib/$(CONFIG)/libext4core-test.a
 
-.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-reorder test-crypto test-orphan test-luks test-mount-crash test-mount-luks test-kill-recovery check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil helper install-barrier uninstall-barrier preflight prepare-device
+.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-reorder test-crypto test-orphan test-luks test-mount-crash test-mount-luks test-kill-recovery check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil helper install-barrier uninstall-barrier preflight prepare-device dmg notarize staple
 
 all: app
 
@@ -512,6 +512,37 @@ check-ship-surface: $(CORE_LIB) $(CORE_TEST_LIB)
 
 sign: app entitlements check-ship-surface
 	@SIGN_KEYCHAIN="$(SIGN_KEYCHAIN)" bash scripts/sign.sh "$(BUILD)/$(APP_NAME).app" "$(SIGN_ID)"
+
+# ------------------------------------------------------------- distribution --
+# The version drives the DMG's filename. One place, read from the app's plist
+# so it cannot drift from what the bundle reports.
+VERSION := $(shell plutil -extract CFBundleShortVersionString raw App/Info.plist 2>/dev/null || echo 0.0.0)
+DMG     := $(BUILD)/$(APP_NAME)-$(VERSION).dmg
+
+# Build the distributable disk image from the signed app. Notarize it before
+# handing it to anyone: an unnotarized Developer ID app is refused by Gatekeeper
+# on first launch.
+dmg: sign
+	@bash scripts/make_dmg.sh "$(BUILD)/$(APP_NAME).app" "$(DMG)"
+	@echo "next: make notarize NOTARY_PROFILE=<your-stored-profile>"
+
+# Submit the DMG to Apple's notary service and wait for the verdict. Credentials
+# come from a keychain profile you create once with
+#   xcrun notarytool store-credentials <name> --apple-id <email> --team-id $(TEAM_ID)
+# so no password ever appears here. On success, staple the ticket into the DMG.
+notarize:
+	@test -n "$(NOTARY_PROFILE)" || { \
+	  echo "set NOTARY_PROFILE=<name> (see 'make notarize' comment for setup)"; exit 1; }
+	@test -f "$(DMG)" || { echo "no $(DMG); run 'make dmg' first"; exit 1; }
+	xcrun notarytool submit "$(DMG)" --keychain-profile "$(NOTARY_PROFILE)" --wait
+	xcrun stapler staple "$(DMG)"
+	@echo "stapled $(DMG); verifying it passes Gatekeeper:"
+	@spctl -a -vvv -t open --context context:primary-signature "$(DMG)" 2>&1 | head -3 || true
+
+# Just the staple, for a DMG already notarized in a previous submission.
+staple:
+	@test -f "$(DMG)" || { echo "no $(DMG)"; exit 1; }
+	xcrun stapler staple "$(DMG)"
 
 # Expand the entitlements template with the team ID from the profile.
 entitlements:
