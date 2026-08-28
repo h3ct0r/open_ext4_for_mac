@@ -1193,6 +1193,14 @@ static int ext4_ext_correct_indexes(struct ext4_inode_ref *inode_ref,
 static inline bool ext4_ext_can_prepend(struct ext4_extent *ex1,
 					struct ext4_extent *ex2)
 {
+	/* Merging a written extent into an unwritten one (or the reverse)
+	 * would hand the merged run whichever state ex1 happens to carry --
+	 * data silently reinterpreted as zeros, or preallocated garbage
+	 * exposed as data. Adjacency was the only test here until unwritten
+	 * extents gained a writer. */
+	if (ext4_ext_is_unwritten(ex1) != ext4_ext_is_unwritten(ex2))
+		return 0;
+
 	if (ext4_ext_pblock(ex2) + ext4_ext_get_actual_len(ex2) !=
 	    ext4_ext_pblock(ex1))
 		return 0;
@@ -1221,6 +1229,10 @@ static inline bool ext4_ext_can_prepend(struct ext4_extent *ex1,
 static inline bool ext4_ext_can_append(struct ext4_extent *ex1,
 				       struct ext4_extent *ex2)
 {
+	/* Same state test as can_prepend, same reason. */
+	if (ext4_ext_is_unwritten(ex1) != ext4_ext_is_unwritten(ex2))
+		return 0;
+
 	if (ext4_ext_pblock(ex1) + ext4_ext_get_actual_len(ex1) !=
 	    ext4_ext_pblock(ex2))
 		return 0;
@@ -1968,19 +1980,28 @@ static int ext4_ext_zero_unwritten_range(struct ext4_inode_ref *inode_ref,
 	int err = EOK;
 	uint32_t i;
 	uint32_t block_size = ext4_sb_get_block_size(&inode_ref->fs->sb);
-	for (i = 0; i < blocks_count; i++) {
-		struct ext4_block bh = EXT4_BLOCK_ZERO();
-		err = ext4_trans_block_get_noread(inode_ref->fs->bdev, &bh,
-						  block + i);
-		if (err != EOK)
-			break;
+	void *zeros = ext4_calloc(1, block_size);
+	if (!zeros)
+		return ENOMEM;
 
-		memset(bh.data, 0, block_size);
-		ext4_trans_set_block_dirty(bh.buf);
-		err = ext4_block_set(inode_ref->fs->bdev, &bh);
+	/* Straight to the medium, not through the cache -- for coherence, not
+	 * speed. The file write this conversion serves also writes its data
+	 * directly (ext4_block_writebytes); the old version left the zeroed
+	 * blocks dirty in the block cache, where a later cache flush would
+	 * have written them out AFTER the caller's data and replaced it with
+	 * zeros. Zeroing on the medium first and dropping any cached copy
+	 * gives the caller a clean base its direct write can land on. It also
+	 * keeps data blocks out of the journal, where the transaction-dirty
+	 * path would have put them. */
+	for (i = 0; i < blocks_count; i++) {
+		err = ext4_blocks_set_direct(inode_ref->fs->bdev, zeros,
+					     block + i, 1);
 		if (err != EOK)
 			break;
 	}
+	ext4_bcache_invalidate_lba(inode_ref->fs->bdev->bc, block,
+				   blocks_count);
+	ext4_free(zeros);
 	return err;
 }
 
@@ -2136,4 +2157,136 @@ out2:
 
 	return err;
 }
+
+/* Preallocate: back [iblock, iblock+count) with UNWRITTEN extents.
+ *
+ * The one origin of unwritten extents in this tree. Everything downstream
+ * already existed, unreachable, before this: reads treat unwritten as a hole,
+ * ext4_extent_get_blocks converts in place on write -- zeroing what the write
+ * does not cover, splitting when it covers part of an extent -- truncate
+ * masks the state bit out of lengths, and the merge predicates now refuse to
+ * merge across the written/unwritten boundary.
+ *
+ * Allocation is block-at-a-time and relies on the merge in insert_leaf to
+ * coalesce runs; ranges already backed by an extent (either state) are
+ * skipped, so preallocating over existing data is harmless. *allocated
+ * reports only blocks newly allocated here.
+ */
+int ext4_extent_preallocate(struct ext4_inode_ref *inode_ref,
+			    ext4_lblk_t iblock, uint32_t count,
+			    uint32_t *allocated)
+{
+	int err = EOK;
+	uint32_t done = 0;
+
+	if (allocated)
+		*allocated = 0;
+
+	while (done < count) {
+		struct ext4_extent_path *path = NULL;
+		struct ext4_extent *ex;
+		struct ext4_extent newex;
+		ext4_lblk_t at = iblock + done;
+		int32_t depth;
+
+		err = ext4_find_extent(inode_ref, at, &path, 0);
+		if (err != EOK)
+			return err;
+
+		depth = ext_depth(inode_ref->inode);
+		ex = path[depth].extent;
+		if (ex) {
+			ext4_lblk_t ee_block = to_le32(ex->first_block);
+			uint16_t ee_len = ext4_ext_get_actual_len(ex);
+			if (IN_RANGE(at, ee_block, ee_len)) {
+				/* Already backed; skip to its end. */
+				done += ee_len - (at - ee_block);
+				goto next;
+			}
+		}
+
+		{
+			ext4_lblk_t gap_end =
+				ext4_ext_next_allocated_block(path);
+			ext4_fsblk_t goal =
+				ext4_ext_find_goal(inode_ref, path, at);
+			uint32_t want = 1;
+			ext4_fsblk_t block =
+				ext4_new_meta_blocks(inode_ref, goal, 0,
+						     &want, &err);
+			(void)gap_end;
+			if (!block)
+				goto fail;
+
+			newex.first_block = to_le32(at);
+			ext4_ext_store_pblock(&newex, block);
+			newex.block_count = to_le16(want);
+			ext4_ext_mark_unwritten(&newex);
+			err = ext4_ext_insert_extent(inode_ref, &path,
+						     &newex, 0);
+			if (err != EOK) {
+				ext4_ext_free_blocks(inode_ref, block, want,
+						     0);
+				goto fail;
+			}
+			done += want;
+			if (allocated)
+				*allocated += want;
+		}
+next:
+		ext4_ext_drop_refs(inode_ref, path, 0);
+		ext4_free(path);
+		continue;
+fail:
+		ext4_ext_drop_refs(inode_ref, path, 0);
+		ext4_free(path);
+		return err;
+	}
+	return EOK;
+}
+
+/* What backs one logical block: a physical block, a run length within its
+ * extent, and whether that extent is unwritten. fblock 0 with unwritten
+ * false is a genuine hole (run = the gap up to the next extent). A read-only
+ * question the mapping API cannot answer -- ext4_fs_get_inode_dblk_idx folds
+ * holes and unwritten extents into the same 0. */
+int ext4_extent_probe(struct ext4_inode_ref *inode_ref, ext4_lblk_t iblock,
+		      ext4_fsblk_t *fblock, uint32_t *run_len,
+		      bool *unwritten)
+{
+	struct ext4_extent_path *path = NULL;
+	struct ext4_extent *ex;
+	int32_t depth;
+	int err;
+
+	*fblock = 0;
+	*run_len = 0;
+	*unwritten = false;
+
+	err = ext4_find_extent(inode_ref, iblock, &path, 0);
+	if (err != EOK)
+		return err;
+
+	depth = ext_depth(inode_ref->inode);
+	ex = path[depth].extent;
+	if (ex) {
+		ext4_lblk_t ee_block = to_le32(ex->first_block);
+		uint16_t ee_len = ext4_ext_get_actual_len(ex);
+		if (IN_RANGE(iblock, ee_block, ee_len)) {
+			*fblock = ext4_ext_pblock(ex) + (iblock - ee_block);
+			*run_len = ee_len - (iblock - ee_block);
+			*unwritten = ext4_ext_is_unwritten(ex) != 0;
+			goto out;
+		}
+	}
+	{
+		ext4_lblk_t next = ext4_ext_next_allocated_block(path);
+		*run_len = (next == EXT_MAX_BLOCKS) ? 0 : (next - iblock);
+	}
+out:
+	ext4_ext_drop_refs(inode_ref, path, 0);
+	ext4_free(path);
+	return EOK;
+}
+
 #endif

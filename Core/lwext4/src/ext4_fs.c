@@ -1194,9 +1194,15 @@ int ext4_fs_truncate_inode(struct ext4_inode_ref *inode_ref, uint64_t new_size)
 	if (!ext4_inode_can_truncate(sb, inode_ref->inode))
 		return EINVAL;
 
-	/* If sizes are equal, nothing has to be done. */
+	/* If sizes are equal, nothing has to be done -- unless blocks live past
+	 * the size, which is exactly what preallocation leaves. i_size and
+	 * i_blocks are independent in ext4; deciding by size alone made
+	 * truncate(0) of a zero-length preallocated file a no-op, and every
+	 * unlink truncates to 0 first, so those blocks leaked on delete. */
 	uint64_t old_size = ext4_inode_get_size(sb, inode_ref->inode);
-	if (old_size == new_size)
+	if (old_size == new_size &&
+	    (new_size != 0 ||
+	     ext4_inode_get_blocks_count(sb, inode_ref->inode) == 0))
 		return EOK;
 
 	/* It's not supported to make the larger file by truncate operation */
@@ -1236,8 +1242,16 @@ int ext4_fs_truncate_inode(struct ext4_inode_ref *inode_ref, uint64_t new_size)
 	if ((ext4_sb_feature_incom(sb, EXT4_FINCOM_EXTENTS)) &&
 	    (ext4_inode_has_flag(inode_ref->inode, EXT4_INODE_FLAG_EXTENTS))) {
 
-		/* Extents require special operation */
-		if (diff_blocks_cnt) {
+		/* Extents require special operation.
+		 *
+		 * The sweep runs to EXT_MAX_BLOCKS, not to old_size's block:
+		 * preallocated extents live past EOF, and the diff test alone
+		 * would skip the sweep whenever the *size* did not shrink
+		 * across a block boundary while unwritten blocks still hung
+		 * beyond it. */
+		if (diff_blocks_cnt ||
+		    (new_size == 0 &&
+		     ext4_inode_get_blocks_count(sb, inode_ref->inode))) {
 			r = ext4_extent_remove_space(inode_ref, new_blocks_cnt,
 						     EXT_MAX_BLOCKS);
 			if (r != EOK)

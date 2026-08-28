@@ -60,6 +60,30 @@ int ext4_extent_get_blocks(struct ext4_inode_ref *inode_ref, ext4_lblk_t iblock,
  * @param inode_ref   I-node to release blocks from
  * @param iblock_from First logical block to release
  * @return Error code */
+/**@brief   Back a logical range with UNWRITTEN extents: allocated, excluded
+ *          from reads (they see zeros), converted to written on first write.
+ *          Ranges already backed by any extent are skipped.
+ * @param   inode_ref inode
+ * @param   iblock first logical block
+ * @param   count logical block count
+ * @param   allocated out: blocks newly allocated (may be NULL)
+ * @return  standard error code*/
+int ext4_extent_preallocate(struct ext4_inode_ref *inode_ref,
+			    ext4_lblk_t iblock, uint32_t count,
+			    uint32_t *allocated);
+
+/**@brief   Report what backs one logical block, distinguishing a hole from
+ *          an unwritten extent -- which the mapping API folds together.
+ * @param   inode_ref inode
+ * @param   iblock logical block
+ * @param   fblock out: physical block, 0 for a hole
+ * @param   run_len out: blocks remaining in this extent (or gap; 0 = EOF gap)
+ * @param   unwritten out: the extent is unwritten
+ * @return  standard error code*/
+int ext4_extent_probe(struct ext4_inode_ref *inode_ref, ext4_lblk_t iblock,
+		      ext4_fsblk_t *fblock, uint32_t *run_len,
+		      bool *unwritten);
+
 int ext4_extent_remove_space(struct ext4_inode_ref *inode_ref, ext4_lblk_t from,
 			     ext4_lblk_t to);
 
