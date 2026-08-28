@@ -6,6 +6,7 @@
 import Foundation
 import FSKit
 import Ext4Core
+import os
 
 /// Connects the C core's block-I/O callbacks to an `FSBlockDeviceResource`.
 ///
@@ -120,15 +121,15 @@ final class BlockDeviceBridge {
         Self.probeMetadataFamily(resource)
         self.barrierFD = Self.findBarrierDescriptor(bsdName: resource.bsdName)
 
-        // Connect to the helper, but do not ask it for a barrier yet.
+        // Connect to the helper now; let the first commit be what exercises it.
         //
-        // An earlier version proved the helper worked here, at mount time, so
-        // it could report a missing barrier before anything depended on one.
-        // That is the one moment it cannot work: the device is mid-claim, the
-        // helper's open is refused, and the result was cached as "no barrier"
-        // for the life of a mount that would have had one perfectly well a
-        // second later. Connecting is cheap and proves nothing; the first
-        // commit proves it, and says so once.
+        // This is a design choice, not a limitation: loadResource has already
+        // asked this same helper for a real barrier on this same device a
+        // moment earlier, to decide read-write vs read-only on removable media,
+        // and that probe works (hardware-verified: "write barrier confirmed").
+        // So the bridge need not re-prove it at construction -- it just holds a
+        // connection ready, and the journal's first real barrier both uses it
+        // and logs the outcome once.
         self.barrierHelper = isWritable ? BarrierClient(bsdName: resource.bsdName) : nil
 
         if isWritable && barrierFD == nil && barrierHelper == nil {
@@ -237,17 +238,24 @@ final class BlockDeviceBridge {
         close()
     }
 
+    /// Serialises teardown so device/luksDevice are destroyed exactly once.
+    /// close() can arrive from deinit and from an explicit call; without this
+    /// a double close would ext4b_device_destroy the same handle twice.
+    private let teardownLock = OSAllocatedUnfairLock()
+
     /// Tear down in the order the layers were built: the filesystem's device
     /// first, since destroying it can still flush through the cipher, then the
-    /// decrypting layer, which zeroes its key material as it goes.
+    /// decrypting layer, which zeroes its key material as it goes. Idempotent.
     func close() {
-        if let device {
-            ext4b_device_destroy(device)
-            self.device = nil
-        }
-        if let luksDevice {
-            luks_device_close(luksDevice)
-            self.luksDevice = nil
+        teardownLock.withLock {
+            if let device {
+                ext4b_device_destroy(device)
+                self.device = nil
+            }
+            if let luksDevice {
+                luks_device_close(luksDevice)
+                self.luksDevice = nil
+            }
         }
     }
 

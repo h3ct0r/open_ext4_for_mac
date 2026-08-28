@@ -6,6 +6,7 @@
 import Foundation
 import FSKit
 import Ext4Core
+import os
 
 /// The extension's entry point into FSKit.
 ///
@@ -28,19 +29,61 @@ import Ext4Core
 final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
 
     let executor = Ext4Executor()
-    private var bridge: BlockDeviceBridge?
+
+    /// All the mount state that FSKit reaches from more than one concurrent
+    /// callback -- probe, load, unload, the volume's own unmount/deactivate,
+    /// and the detached startFormat task all touch it. It was a handful of
+    /// bare `var`s with no synchronisation, which raced: two closeVolume
+    /// callers (unmount and deactivate both fire on a normal umount) each
+    /// passing a guard and then both calling ext4b_unmount on the same handle.
+    ///
+    /// The rule is simple and enforced by construction: the lock is never held
+    /// across an `await`. Anything that must suspend -- unmounting through the
+    /// executor -- first *takes ownership* of what it needs out of the struct
+    /// under the lock, then awaits on the local copy. A second caller that
+    /// takes next finds nil and does nothing.
+    private struct MountState {
+        var bridge: BlockDeviceBridge?
+        var volume: Ext4Volume?
+        /// The last resource FSKit presented, whether to probe or to load. The
+        /// maintenance operations get a task but no resource, so this is how
+        /// startFormat/startCheck know what to operate on.
+        var lastSeen: FSBlockDeviceResource?
+        /// Every distinct device this process has been asked to probe. If it is
+        /// more than one, `lastSeen` is not a safe guess for a format target.
+        var probedBSDNames: Set<String> = []
+    }
+    private let state = OSAllocatedUnfairLock(uncheckedState: MountState())
+
     /// The live volume, when there is one. Read by the maintenance operations:
     /// FSKit loads a resource before asking for a check on it, so "is this
     /// already mounted" is a question the check has to be able to ask.
-    private(set) var volume: Ext4Volume?
+    var volume: Ext4Volume? { state.withLock { $0.volume } }
 
-    /// The last resource FSKit presented, whether to probe or to load.
-    ///
-    /// The maintenance operations -- startFormat and startCheck -- are handed
-    /// a task and options but no resource, and FSUnaryFileSystem has no
-    /// resource property, so this is the only way to know what to operate on.
-    /// fskitd probes a device before asking for maintenance on it.
-    private(set) var lastSeenResource: FSBlockDeviceResource?
+    /// The device startFormat/startCheck should operate on. They are handed no
+    /// resource, so it has to come from what this process has already seen --
+    /// but "last seen" is a trap: any probe of any device overwrites it, so a
+    /// format could land on whichever disk fskitd probed last. Resolution
+    /// order: (1) the live mount's own resource, the only certain answer;
+    /// (2) the last-probed resource, but ONLY if this process has seen exactly
+    /// one device; (3) otherwise refuse rather than guess.
+    func maintenanceTarget() throws -> FSBlockDeviceResource {
+        try state.withLock {
+            if let bridge = $0.bridge {
+                return bridge.resource
+            }
+            guard let last = $0.lastSeen else {
+                Ext4Log.error("maintenance requested but no resource has been presented")
+                throw Ext4Error.posix(ENODEV)
+            }
+            if $0.probedBSDNames.count > 1 {
+                Ext4Log.error("ambiguous maintenance target: \(($0.probedBSDNames).count) "
+                              + "devices probed by this process; refusing to guess")
+                throw Ext4Error.posix(ENODEV)
+            }
+            return last
+        }
+    }
 
     // MARK: - Probe
 
@@ -48,7 +91,10 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         guard let device = resource as? FSBlockDeviceResource else {
             return .notRecognized
         }
-        lastSeenResource = device
+        state.withLock {
+            $0.lastSeen = device
+            $0.probedBSDNames.insert(device.bsdName)
+        }
 
         guard let bridge = BlockDeviceBridge(resource: device, forceReadOnly: true, mode: .direct),
               let dev = bridge.device else {
@@ -111,8 +157,22 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         // The identity stays the *container's* UUID either way. A volume that
         // changed identity the moment it stopped being locked would look to
         // macOS like a different volume from the one it had just seen.
-        if (try? Ext4LUKSKeys.openEncryptedIfNeeded(bridge)) == true,
-           let decrypted = bridge.device {
+        // openEncryptedIfNeeded distinguishes ENEEDAUTH (no key stored -- the
+        // volume is simply locked) from EAUTH (a key IS stored but no longer
+        // opens the container -- the passphrase changed, or the stored key is
+        // stale). Both still present the locked container so the user can act,
+        // but the second is worth a distinct log line: silently collapsing it
+        // to "locked" hides why a supposedly-remembered volume keeps asking.
+        var unlocked = false
+        do {
+            unlocked = try Ext4LUKSKeys.openEncryptedIfNeeded(bridge)
+        } catch let e as NSError where e.domain == NSPOSIXErrorDomain && e.code == Int(EAUTH) {
+            Ext4Log.info("LUKS\(info.version) container: stored key no longer opens it "
+                         + "(EAUTH); presenting as locked")
+        } catch {
+            // ENEEDAUTH and anything else: locked, present it for unlocking.
+        }
+        if unlocked, let decrypted = bridge.device {
             var inner = ext4b_probe_info()
             if ext4b_probe(decrypted, &inner) == 0 {
                 switch inner.verdict {
@@ -149,7 +209,29 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         guard let device = resource as? FSBlockDeviceResource else {
             throw Ext4Error.notSupported
         }
-        lastSeenResource = device
+
+        // One volume per extension process. FSKit runs one instance per
+        // resource (this is a unary file system), so a second live bridge here
+        // means either a reload of the same device or a genuine second device
+        // -- the latter is a contract violation we refuse loudly rather than
+        // silently leaking the first bridge and its still-open volume.
+        let existing = state.withLock { $0.bridge != nil ? $0.lastSeen?.bsdName : nil }
+        if let existing {
+            if existing == device.bsdName {
+                Ext4Log.info("reloading \(device.bsdName); closing the previous mount first")
+                await closeVolume()
+            } else {
+                Ext4Log.error("refusing to load \(device.bsdName): this extension "
+                              + "process already has \(existing) mounted "
+                              + "(one volume per process)")
+                throw Ext4Error.posix(EBUSY)
+            }
+        }
+
+        state.withLock {
+            $0.lastSeen = device
+            $0.probedBSDNames.insert(device.bsdName)
+        }
 
         //
         // Mount mode.
@@ -187,30 +269,32 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         // barrier, for someone who accepts the risk knowingly.
         //
         // Reading is untouched either way. A disk image is exempt from all of
-        // this -- its writes reach APFS in issue order, which is why the
-        // interconnect matters rather than the removable flag alone.
+        // this -- its writes reach APFS in issue order, which is why the media
+        // class matters rather than the removable flag alone. And a device we
+        // cannot read from the IORegistry is treated as detachable, not as
+        // fixed: fail closed, so a lookup failure cannot open the door to an
+        // unbarriered write.
         //
-        let traits = MediaTraits.read(bsdName: device.bsdName)
+        let mediaClass = MediaTraits.classify(bsdName: device.bsdName)
         var inhibitedForRemovableMedia = false
-        if let traits, traits.isPhysicallyDetachable {
-            let forced = RemovableWritePolicy.directoryFromInsideTheSandbox()
+        if mediaClass.requiresBarrier {
+            let markerPresent = RemovableWritePolicy.directoryFromInsideTheSandbox()
                 .map { RemovableWritePolicy.isEnabled(in: $0) } ?? false
-            if forced {
-                Ext4Log.info("\(device.bsdName) is removable (\(traits.interconnect)); "
-                             + "writes forced by the marker file, barrier or not")
-            } else {
+            var barrierConfirmed = false
+            if !markerPresent {
                 let probe = BarrierClient(bsdName: device.bsdName)
-                let status = probe?.barrier() ?? EIO
+                barrierConfirmed = (probe?.barrier() ?? EIO) == 0
                 probe?.release()
-                if status == 0 {
-                    Ext4Log.info("\(device.bsdName) is removable (\(traits.interconnect)); "
-                                 + "write barrier confirmed, mounting read-write")
-                } else {
-                    inhibitedForRemovableMedia = true
-                    Ext4Log.info("\(device.bsdName) is removable (\(traits.interconnect)); "
-                                 + "no write barrier (status \(status)), mounting read-only")
-                }
             }
+            inhibitedForRemovableMedia = RemovableWritePolicy.inhibitsWrites(
+                requiresBarrier: true,
+                markerPresent: markerPresent,
+                barrierConfirmed: barrierConfirmed)
+
+            let how = markerPresent ? "writes forced by the marker file, barrier or not"
+                    : barrierConfirmed ? "write barrier confirmed, mounting read-write"
+                    : "no write barrier, mounting read-only"
+            Ext4Log.info("\(device.bsdName) needs a barrier (\(mediaClass)); \(how)")
         }
 
         let mediaWritable = device.isWritable && !inhibitedForRemovableMedia
@@ -261,8 +345,10 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
                                 readOnly: effectiveReadOnly,
                                 identity: IdentityMapper())
         volume.fileSystem = self
-        self.bridge = bridge
-        self.volume = volume
+        state.withLock {
+            $0.bridge = bridge
+            $0.volume = volume
+        }
 
         // FSKit tracks a container state machine and rejects the load with
         // EAGAIN ("unexpected container state") if the resource is still
@@ -290,7 +376,19 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
     /// and resume on the executor's own queue after awaiting it, so a
     /// `queue.sync` from there blocks the queue against itself.
     func closeVolume() async {
-        guard let bridge, let dev = bridge.device else { return }
+        // Take ownership under the lock: whichever caller wins nils the state
+        // out in the same critical section, so the loser -- the second of
+        // unmount and deactivate, which both fire on a normal umount -- takes
+        // (nil, nil) and returns. The unmount and close then happen on a
+        // bridge nobody else can still reach, so there is no double free and
+        // no double ext4b_unmount. The lock is released before the await.
+        let taken: BlockDeviceBridge? = state.withLock {
+            let b = $0.bridge
+            $0.bridge = nil
+            $0.volume = nil
+            return b
+        }
+        guard let bridge = taken, let dev = bridge.device else { return }
         // Carried across the concurrency boundary as an integer: OpaquePointer
         // is not Sendable, and the executor guarantees serial access anyway.
         let handle = UInt(bitPattern: dev)
@@ -298,8 +396,6 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             _ = ext4b_unmount(OpaquePointer(bitPattern: handle))
         }
         bridge.close()
-        self.bridge = nil
-        self.volume = nil
         Ext4Log.info("volume closed")
     }
 

@@ -7,6 +7,17 @@ import Foundation
 import FSKit
 import Ext4Core
 
+extension FSItem.Identifier {
+    /// An identifier for an ext4 inode, without the force-unwrap the direct
+    /// `init(rawValue:)!` needs. ext4 inode 0 is the "no entry" sentinel and
+    /// never names a real file; should one arrive from a corrupt directory it
+    /// maps to `.invalid` rather than risking a trap that would take the whole
+    /// extension down over one bad on-disk entry.
+    init(inode: UInt32) {
+        self = FSItem.Identifier(rawValue: UInt64(inode)) ?? .invalid
+    }
+}
+
 /// One filesystem object, identified by its ext4 inode number.
 ///
 /// FSKit hands these back to us on every subsequent operation, so the inode
@@ -43,7 +54,7 @@ final class Ext4Item: FSItem {
         super.init()
     }
 
-    var fileID: FSItem.Identifier { FSItem.Identifier(rawValue: UInt64(inode))! }
+    var fileID: FSItem.Identifier { FSItem.Identifier(inode: inode) }
 
     func attributes(from volume: Ext4Volume) throws -> ext4b_attrs {
         lock.lock()

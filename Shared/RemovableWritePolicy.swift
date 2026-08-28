@@ -56,8 +56,30 @@ public enum RemovableWritePolicy {
                                                     withIntermediateDirectories: true,
                                                     attributes: [.posixPermissions: 0o700])
             try Data().write(to: url)
-        } else {
-            try? FileManager.default.removeItem(at: url)
+        } else if FileManager.default.fileExists(atPath: url.path) {
+            // A `throws` function that swallowed the removal failure reported
+            // success while the marker stayed -- so "turn writes off" silently
+            // left them on. Let the failure surface.
+            try FileManager.default.removeItem(at: url)
         }
+    }
+
+    /// Whether to inhibit writes on removable media -- the whole truth table in
+    /// one pure place so it can be read and reasoned about without the mount
+    /// path's IO around it. Returns true to force read-only.
+    ///
+    ///   - requiresBarrier: does this media class need a barrier at all?
+    ///   - markerPresent:   did the user opt into unbarriered writes?
+    ///   - barrierConfirmed: did the helper confirm a real barrier on the device?
+    ///
+    /// Fixed and virtual media never inhibit. For barrier-requiring media the
+    /// marker is an explicit override; otherwise a confirmed barrier is the
+    /// one safe configuration and its absence means read-only.
+    public static func inhibitsWrites(requiresBarrier: Bool,
+                                      markerPresent: Bool,
+                                      barrierConfirmed: Bool) -> Bool {
+        guard requiresBarrier else { return false }
+        if markerPresent { return false }
+        return !barrierConfirmed
     }
 }

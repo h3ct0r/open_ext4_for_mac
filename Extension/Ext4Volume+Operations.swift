@@ -14,10 +14,15 @@ extension Ext4Volume: FSVolume.PathConfOperations {
 
     var maximumLinkCount: Int { 65000 }          // ext4 EXT4_LINK_MAX
     var maximumNameLength: Int { 255 }           // EXT4_NAME_LEN
-    var restrictsOwnershipChanges: Bool { true } // read-only for now
+    var restrictsOwnershipChanges: Bool { true } // chown is superuser-only
     var truncatesLongNames: Bool { false }       // we reject, never silently truncate
     var maximumXattrSize: Int { Int(bridge.blockSize) }
-    var maximumFileSize: UInt64 { 16 * 1024 * 1024 * 1024 * 1024 }  // 16 TiB at 4K blocks
+
+    /// The largest file the block map can address: block size times 2^32
+    /// logical blocks. 16 TiB at 4 KiB, but only 16 GiB at 1 KiB -- a fixed
+    /// 16 TiB would have overstated a 1 KiB volume by three orders of
+    /// magnitude. Matches the EFBIG ceiling the write path now enforces.
+    var maximumFileSize: UInt64 { UInt64(bridge.blockSize) << 32 }
 }
 
 extension Ext4Volume: FSVolume.Operations {
@@ -123,10 +128,20 @@ extension Ext4Volume: FSVolume.Operations {
         // unloadResource for umount(8), so this is the last chance to stop the
         // journal and write back the superblock.
         // Anything unlinked but still held open has to be freed before the
-        // volume closes, or it stays allocated with no name pointing at it.
+        // volume closes, or it stays allocated with no name pointing at it;
+        // anything owing a non-persistent preallocation trim has to give that
+        // space back, for the same reason.
         await releaseAllPending()
-        try? await executor.run { [self] in
-            _ = ext4b_sync(try device)
+        await drainPendingTrims()
+        do {
+            try await executor.run { [self] in
+                try Ext4Error.check(ext4b_sync(try device), "final sync at unmount")
+            }
+        } catch {
+            // The last write before the volume closes. If it fails, say so --
+            // this used to be a silent try? and a lost sync at unmount is a
+            // lost transaction the caller was told had succeeded.
+            Ext4Log.error("final sync at unmount failed: \(error.localizedDescription)")
         }
         reportCoreCollisions()
         await fileSystem?.closeVolume()
@@ -223,7 +238,14 @@ extension Ext4Volume: FSVolume.Operations {
             ext4Item.invalidate()
         }
 
-        return try await self.attributes(FSItem.GetAttributesRequest(), of: item)
+        // Reply with the attributes that were actually changed, not an empty
+        // set. FSKit rejects an incomplete setAttributes response wholesale
+        // (see the note on Ext4Volume.attributes), and an empty
+        // GetAttributesRequest asks populate() for nothing -- so the old code
+        // returned a blank reply that the kernel could reject.
+        let echo = FSItem.GetAttributesRequest()
+        echo.wantedAttributes = request.consumedAttributes
+        return try await self.attributes(echo, of: item)
     }
 
     // MARK: - Lookup and enumeration
@@ -419,9 +441,13 @@ extension Ext4Volume: FSVolume.Operations {
         // Defer only for a file something still has open. Everything else is
         // freed here and now, which keeps the crash window at zero for the
         // overwhelmingly common case.
-        let defer_ = isOpen(victim.inode)
         let unreferenced = try await executor.run { [self] in
             let dev = try device
+            // Evaluate "is it still open?" HERE, inside the executor task, not
+            // before it: computed outside, an openItem landing between the
+            // check and the unlink would make us free an inode a descriptor
+            // still points at -- the exact leak the deferral exists to prevent.
+            let defer_ = isOpen(victim.inode)
             var orphaned = false
             let rc = nameData.withUnsafeBytes { raw -> Int32 in
                 ext4b_unlink_ex(dev, dir.inode,
@@ -537,7 +563,7 @@ private let packEntry: @convention(c) (UnsafeMutableRawPointer?,
 
     return state.pointee.packer.packEntry(name: name,
                                           itemType: type.fsItemType,
-                                          itemID: FSItem.Identifier(rawValue: UInt64(inode))!,
+                                          itemID: FSItem.Identifier(inode: inode),
                                           nextCookie: FSDirectoryCookie(rawValue: nextCookie),
                                           attributes: attributes)
 }

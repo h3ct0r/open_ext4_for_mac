@@ -167,6 +167,33 @@ final class Ext4Volume: FSVolume {
         }
     }
 
+    /// Trim every inode that still owes a non-persistent preallocation. Called
+    /// at unmount: without it, a volume unmounted while an item is still
+    /// deactivating leaves that item's on-loan space allocated forever --
+    /// silently breaking the trim-on-close contract preallocateSpace promises.
+    /// Mirrors releaseAllPending; a failed trim is logged, not fatal.
+    func drainPendingTrims() async {
+        let owed = withItems { () -> Set<UInt32> in
+            let snapshot = trimOnDeactivate
+            trimOnDeactivate.removeAll()
+            return snapshot
+        }
+        for inode in owed {
+            do {
+                try await executor.run { [self] in
+                    try Ext4Error.check(ext4b_trim_preallocation(try device, inode),
+                                        "trim preallocation \(inode)")
+                }
+            } catch {
+                Ext4Log.error("could not trim preallocation on inode \(inode) "
+                              + "at unmount: \(error.localizedDescription)")
+            }
+        }
+        if !owed.isEmpty {
+            Ext4Log.volume.info("trimmed \(owed.count) preallocation(s) at unmount")
+        }
+    }
+
     init(bridge: BlockDeviceBridge,
          executor: Ext4Executor,
          probe: ext4b_probe_info,
@@ -277,7 +304,7 @@ final class Ext4Volume: FSVolume {
         if requested.contains(.linkCount) { target.linkCount = a.link_count }
         if requested.contains(.size)      { target.size = a.size }
         if requested.contains(.allocSize) { target.allocSize = a.alloc_size }
-        if requested.contains(.fileID)    { target.fileID = FSItem.Identifier(rawValue: UInt64(a.inode))! }
+        if requested.contains(.fileID)    { target.fileID = FSItem.Identifier(inode: a.inode) }
 
         // FSKit rejects the whole response if any requested attribute is
         // missing ("Reported attributes are incomplete"), which then stops it
@@ -288,6 +315,9 @@ final class Ext4Volume: FSVolume {
         }
         if requested.contains(.parentID) {
             let parent = parentHint ?? parentInode(of: a)
+            // .parentOfRoot, not .invalid, is the right fallback for a parent
+            // that does not resolve -- so this keeps the explicit rawValue form
+            // rather than the inode: helper, which falls back to .invalid.
             target.parentID = FSItem.Identifier(rawValue: UInt64(parent))
                 ?? FSItem.Identifier.parentOfRoot
         }

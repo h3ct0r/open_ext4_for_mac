@@ -253,13 +253,11 @@ extension Ext4FileSystem: FSManageableResourceMaintenanceOperations {
     // resource the probe saw is the one being operated on.
     //
     private func maintenanceResource() throws -> FSBlockDeviceResource {
-        guard let resource = lastSeenResource else {
-            Ext4Log.error("maintenance requested but no resource has been presented")
-            // ENODEV rather than ENOTSUP so this is distinguishable from
-            // "this module does not do formatting" in the caller's output.
-            throw Ext4Error.posix(ENODEV)
-        }
-        return resource
+        // The resolution lives on Ext4FileSystem, where the lock-guarded state
+        // is reachable; it prefers the live mount and refuses to guess when
+        // more than one device has been probed. ENODEV rather than ENOTSUP so
+        // it is distinguishable from "this module does not do formatting".
+        try maintenanceTarget()
     }
 }
 
