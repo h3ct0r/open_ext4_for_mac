@@ -97,28 +97,30 @@ core: check-submodule verify-patches $(CORE_LIB)
 PATCHES     := $(sort $(wildcard patches/lwext4/*.patch))
 PATCH_STAMP := $(BUILD)/.lwext4-patched
 
+# The authoritative test is the sequential replay in check_patches.sh: apply
+# everything to the pinned commit, diff against the tree. Per-patch checks
+# cannot be: a later patch may edit lines an earlier one introduced (0021
+# adjusts the purge loop 0020 wrote), and then the earlier patch fails a
+# reverse-check on a tree that is exactly right. So: if the replay proves the
+# tree, stamp it. Only when it does not, try to bring a clean checkout up by
+# applying whatever is missing, then prove it again.
 $(PATCH_STAMP): $(PATCHES) | check-submodule
 	@mkdir -p $(dir $@)
-	@for p in $(PATCHES); do \
-	  if git -C $(LWEXT4_DIR) apply --check --reverse "$(CURDIR)/$$p" 2>/dev/null; then \
-	    :; \
-	  elif git -C $(LWEXT4_DIR) apply "$(CURDIR)/$$p" 2>/dev/null; then \
+	@if bash scripts/check_patches.sh >/dev/null 2>&1; then touch $@; exit 0; fi; \
+	for p in $(PATCHES); do \
+	  if git -C $(LWEXT4_DIR) apply "$(CURDIR)/$$p" 2>/dev/null; then \
 	    echo "applied $$p"; \
-	  elif git -C $(LWEXT4_DIR) apply --check "$(CURDIR)/$$p" 2>/dev/null; then \
-	    echo "error: failed to apply $$p"; exit 1; \
-	  elif [ -n "$(ALLOW_UNAPPLIED_PATCHES)" ]; then \
-	    echo "note: $$p neither applies nor is applied; ALLOW_UNAPPLIED_PATCHES is set"; \
-	  else \
-	    echo "error: $$p neither applies nor is already applied."; \
-	    echo "  The file it touches has diverged. This branch used to print a"; \
-	    echo "  note and carry on, which is how a build without a write barrier"; \
-	    echo "  was produced and shipped -- 0014 had picked up hunks belonging to"; \
-	    echo "  0005 and 0008, failed as a whole, and said so in a line nobody"; \
-	    echo "  reads. Run scripts/check_patches.sh to see the divergence."; \
-	    echo "  Set ALLOW_UNAPPLIED_PATCHES=1 while developing a new patch."; \
-	    exit 1; \
 	  fi; \
-	done
+	done; \
+	if bash scripts/check_patches.sh >/dev/null 2>&1; then :; \
+	elif [ -n "$(ALLOW_UNAPPLIED_PATCHES)" ]; then \
+	  echo "note: working tree does not match the patch set (ALLOW_UNAPPLIED_PATCHES)"; \
+	else \
+	  bash scripts/check_patches.sh; \
+	  echo "  Set ALLOW_UNAPPLIED_PATCHES=1 while developing a patch, or run"; \
+	  echo "  'make repatch' to reset the submodule to pinned-plus-patches."; \
+	  exit 1; \
+	fi
 	@touch $@
 
 patch: $(PATCH_STAMP)
@@ -139,24 +141,14 @@ patch: $(PATCH_STAMP)
 # first version re-applied in that case and broke the build.
 #
 # `git apply --check` runs cost milliseconds; the confusion costs an hour.
-verify-patches: $(PATCH_STAMP)
-	@missing=""; \
-	for p in $(PATCHES); do \
-	  git -C $(LWEXT4_DIR) apply --check --reverse "$(CURDIR)/$$p" >/dev/null 2>&1 \
-	    || missing="$$missing $$p"; \
-	done; \
-	if [ -n "$$missing" ]; then \
-	  echo "patches no longer applied:$$missing"; \
-	  rm -f $(PATCH_STAMP); \
-	  $(MAKE) --no-print-directory $(PATCH_STAMP); \
-	fi
-# The per-patch check above answers "is each patch still applied?". It cannot
-# answer "does the patch set describe this tree?" -- an edit made directly in
-# the submodule is invisible to it, and that is how the journal checksum fix
-# spent a day existing on one machine. A quarter of a second, once per build.
+# One question, asked the strong way: does replaying the patch set onto the
+# pinned commit reproduce this tree? (Per-patch reverse-checks used to live
+# here and were wrong twice over -- blind to direct submodule edits, and
+# falsely alarmed by stacked patches that edit each other's lines.)
 # ALLOW_UNAPPLIED_PATCHES exempts a tree that is mid-patch-development -- the
 # working tree legitimately leads the patch set while a fix is being built --
-# but prints what diverges, so forgetting to regenerate stays impossible.
+# but prints a note, so forgetting to regenerate stays visible.
+verify-patches: $(PATCH_STAMP)
 	@if [ -n "$(ALLOW_UNAPPLIED_PATCHES)" ]; then \
 	  bash scripts/check_patches.sh >/dev/null 2>&1 || \
 	    echo "note: working tree leads the patch set (ALLOW_UNAPPLIED_PATCHES)"; \
