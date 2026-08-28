@@ -466,7 +466,8 @@ helper: $(HELPER_BIN)
 $(HELPER_BIN): Helper/$(HELPER_NAME).c
 	@mkdir -p $(dir $@)
 	@rm -rf $@.dSYM
-	cc -target arm64-apple-macos$(DEPLOY_TARGET) -O2 -Wall \
+	cc -target arm64-apple-macos$(DEPLOY_TARGET) -O2 -Wall -Wextra \
+	    -fstack-protector-strong -D_FORTIFY_SOURCE=2 -Wformat -Wformat-security \
 	    -framework Security -framework CoreFoundation $< -o $@
 
 $(HELPER_PLIST): Helper/$(HELPER_LABEL).plist
@@ -558,7 +559,7 @@ override FS_BUNDLE_DEST := /Library/Filesystems/ext4.fs
 # `override` so the destinations cannot be pointed somewhere else from the
 # command line: these targets run as root and remove what they find.
 override BARRIER_LABEL   := dev.h3ct0r.ext4mac.barrier
-override BARRIER_PROGRAM := /usr/local/libexec/ext4barrierd
+override BARRIER_PROGRAM := /Library/PrivilegedHelperTools/ext4barrierd
 override BARRIER_PLIST   := /Library/LaunchDaemons/$(BARRIER_LABEL).plist
 
 install-barrier:
@@ -581,7 +582,7 @@ install-barrier:
 	    echo "      make sign && sudo make install-barrier"; \
 	    exit 1; }
 	@launchctl bootout system "$(BARRIER_PLIST)" 2>/dev/null || true
-	@install -d -o root -g wheel -m 755 /usr/local/libexec
+	@install -d -o root -g wheel -m 755 /Library/PrivilegedHelperTools
 	@install -o root -g wheel -m 755 "$(HELPER_BIN)" "$(BARRIER_PROGRAM)"
 	@install -o root -g wheel -m 644 Packaging/$(BARRIER_LABEL).plist "$(BARRIER_PLIST)"
 	@launchctl bootstrap system "$(BARRIER_PLIST)"
@@ -593,6 +594,9 @@ uninstall-barrier:
 	@test "$$(id -u)" = "0" || { echo "needs root: sudo make uninstall-barrier"; exit 1; }
 	@launchctl bootout system "$(BARRIER_PLIST)" 2>/dev/null || true
 	@rm -f "$(BARRIER_PLIST)" "$(BARRIER_PROGRAM)"
+	@# Clean up the daemon's former home too, so a machine that installed the
+	@# old /usr/local/libexec build does not keep a stale root binary around.
+	@rm -f /usr/local/libexec/ext4barrierd
 	@echo "removed the barrier daemon"
 	@echo "without it there is no write barrier; keep removable media read-only"
 

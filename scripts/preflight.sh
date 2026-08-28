@@ -25,7 +25,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEVICE="${1:-}"
 TEAM_ID="${TEAM_ID:-BDLYXW7QMN}"
 LABEL="dev.h3ct0r.ext4mac.barrier"
-PROGRAM="/usr/local/libexec/ext4barrierd"
+PROGRAM="/Library/PrivilegedHelperTools/ext4barrierd"
 APP="/Applications/Ext4Mac.app"
 
 FAIL=0

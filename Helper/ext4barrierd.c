@@ -60,7 +60,7 @@
 /* Where install-barrier puts this binary. Only used to tell the user which
  * file to hand Full Disk Access to, which is the one thing they must do by
  * hand and the one thing no error message otherwise mentions. */
-#define BARRIER_PROGRAM_PATH "/usr/local/libexec/ext4barrierd"
+#define BARRIER_PROGRAM_PATH "/Library/PrivilegedHelperTools/ext4barrierd"
 
 /* Who may ask. The team is this project's; the identifier is the FSKit
  * extension's. Nothing else on the machine matches, including the container
@@ -133,33 +133,32 @@ static dispatch_queue_t device_queue;
 
 static int synchronize(int fd);
 
+/* Reduce a partition name to its whole disk: disk8s1 -> disk8. A no-op for a
+ * name that is already a whole disk. The cache flush is a property of the
+ * drive, so the whole-disk node is what we key on and open -- and keying on it
+ * means the two partitions of one disk share a single entry and a single
+ * descriptor, instead of consuming two slots and holding two fds on the same
+ * node (which is what forget then failed to fully release). */
+static void whole_disk_of(const char *name, char *out, size_t out_len)
+{
+    strlcpy(out, name, out_len);
+    char *suffix = strrchr(out, 's');
+    if (suffix && suffix != out && suffix[-1] >= '0' && suffix[-1] <= '9')
+        *suffix = '\0';
+}
+
 /* Must run on device_queue. */
 static int descriptor_for(const char *name)
 {
+    char whole[sizeof devices[0].name];
+    whole_disk_of(name, whole, sizeof whole);
+
     for (size_t i = 0; i < device_count; i++)
-        if (strcmp(devices[i].name, name) == 0)
+        if (strcmp(devices[i].name, whole) == 0)
             return devices[i].fd;
 
     if (device_count == MAX_DEVICES)
         return -1;
-
-    /*
-     * The whole disk, not the partition.
-     *
-     * A cache flush is a property of the drive: there is one cache, and
-     * DKIOCSYNCHRONIZE on any node reaches the same hardware. So the partition
-     * node buys nothing, and it costs something real -- it is the node FSKit
-     * has mounted, and a second process holding it open is what wedged this
-     * stick four times, each needing a physical replug to clear.
-     *
-     * /dev/rdisk8s1 becomes /dev/rdisk8. If the name has no partition suffix
-     * it is already a whole disk and is used as-is.
-     */
-    char whole[sizeof devices[0].name];
-    strlcpy(whole, name, sizeof whole);
-    char *suffix = strrchr(whole, 's');
-    if (suffix && suffix != whole && suffix[-1] >= '0' && suffix[-1] <= '9')
-        *suffix = '\0';
 
     char path[40];
     snprintf(path, sizeof path, "/dev/r%s", whole);
@@ -199,7 +198,7 @@ static int descriptor_for(const char *name)
 
         int rc = synchronize(fd);
         if (rc == 0) {
-            strlcpy(devices[device_count].name, name, sizeof devices[0].name);
+            strlcpy(devices[device_count].name, whole, sizeof devices[0].name);
             devices[device_count].fd = fd;
             device_count++;
             os_log(log_handle, "opened %{public}s for barriers (mode %d)",
@@ -245,13 +244,15 @@ static int descriptor_for(const char *name)
  * a device that reuses the name would inherit the failure. */
 static void forget_descriptor(const char *name)
 {
+    char whole[sizeof devices[0].name];
+    whole_disk_of(name, whole, sizeof whole);
     for (size_t i = 0; i < device_count; i++) {
-        if (strcmp(devices[i].name, name) != 0)
+        if (strcmp(devices[i].name, whole) != 0)
             continue;
         close(devices[i].fd);
         devices[i] = devices[device_count - 1];
         device_count--;
-        os_log(log_handle, "released %{public}s", name);
+        os_log(log_handle, "released %{public}s", whole);
         return;
     }
 }
@@ -318,7 +319,14 @@ static bool peer_is_trusted(xpc_connection_t peer)
         return false;
     }
 
-    rc = SecCodeCheckValidity(code, kSecCSDefaultFlags, requirement);
+    /* Strict, and every architecture: the default flags accept a signature
+     * that strict validation would reject, and on a fat binary they would
+     * check only the running slice. This is the whole trust boundary for a
+     * root daemon, so it pays the stricter check. */
+    SecCSFlags check = kSecCSDefaultFlags
+                     | kSecCSStrictValidate
+                     | kSecCSCheckAllArchitectures;
+    rc = SecCodeCheckValidity(code, check, requirement);
     CFRelease(requirement);
     CFRelease(code);
 
@@ -392,24 +400,46 @@ static void handle_connection(xpc_connection_t peer)
      * it. An extension that is killed rather than unmounted never sends a
      * release, and being killed is exactly the case this daemon exists for.
      */
-    __block char *owned = NULL;
+    /* The set of whole disks this client has opened, so teardown can release
+     * every one -- not just the last. A single char* leaked all but the most
+     * recent when a client named more than one device. Keyed by whole disk
+     * (disk8s1 and disk8s2 collapse to disk8), so the small fixed set is more
+     * than enough: one client is one extension serving one volume. On the heap
+     * behind a __block pointer, because a block cannot reference a __block
+     * array directly. */
+    struct owned_set {
+        size_t count;
+        char   names[MAX_DEVICES][sizeof devices[0].name];
+    };
+    __block struct owned_set *owned = calloc(1, sizeof *owned);
+    if (!owned) { xpc_connection_cancel(peer); return; }
 
     xpc_connection_set_event_handler(peer, ^(xpc_object_t event) {
         if (xpc_get_type(event) == XPC_TYPE_ERROR) {
-            char *name = owned;
-            owned = NULL;
-            if (name) {
-                dispatch_sync(device_queue, ^{ forget_descriptor(name); });
-                free(name);
+            for (size_t i = 0; i < owned->count; i++) {
+                /* A block can capture a char* but not a C array, so pass a
+                 * heap copy; dispatch_sync is synchronous, so freeing right
+                 * after is safe. */
+                char *wp = strdup(owned->names[i]);
+                if (!wp) continue;
+                dispatch_sync(device_queue, ^{ forget_descriptor(wp); });
+                free(wp);
             }
+            free(owned);
+            owned = NULL;
             return;
         }
+        if (!owned) return;
 
         const char *device = xpc_dictionary_get_string(event, "device");
-        if (device && valid_bsd_name(device) &&
-            (!owned || strcmp(owned, device) != 0)) {
-            free(owned);
-            owned = strdup(device);
+        if (device && valid_bsd_name(device)) {
+            char whole[sizeof devices[0].name];
+            whole_disk_of(device, whole, sizeof whole);
+            bool known = false;
+            for (size_t i = 0; i < owned->count; i++)
+                if (strcmp(owned->names[i], whole) == 0) { known = true; break; }
+            if (!known && owned->count < MAX_DEVICES)
+                strlcpy(owned->names[owned->count++], whole, sizeof devices[0].name);
         }
 
         handle_message(peer, event);
@@ -419,7 +449,11 @@ static void handle_connection(xpc_connection_t peer)
 
 int main(void)
 {
-    log_handle = os_log_create("dev.h3ct0r.ext4mac", "barrier");
+    /* Same subsystem as the app and extension (dev.h3ct0r.ext4), so the one
+     * documented `log stream --predicate 'subsystem == "dev.h3ct0r.ext4"'`
+     * shows the daemon too -- it used to log under a subsystem that predicate
+     * never matched. */
+    log_handle = os_log_create("dev.h3ct0r.ext4", "barrier");
     device_queue = dispatch_queue_create("dev.h3ct0r.ext4mac.barrier.devices",
                                          DISPATCH_QUEUE_SERIAL);
 

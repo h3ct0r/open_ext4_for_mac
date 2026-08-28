@@ -9,7 +9,7 @@
 	     launchd will not run a daemon whose program anyone but root can
 	     replace, and /Applications belongs to the installing user. -->
 	<key>Program</key>
-	<string>/usr/local/libexec/ext4barrierd</string>
+	<string>/Library/PrivilegedHelperTools/ext4barrierd</string>
 
 	<!-- Launched on demand by the first barrier request and left running
 	     after: opening a disk device is not free, and this sits on the path
@@ -25,5 +25,11 @@
 
 	<key>ProcessType</key>
 	<string>Adaptive</string>
+
+	<!-- Surfaces the daemon under the app in System Settings > Login Items,
+	     so the user can see and disable it rather than having a root daemon
+	     with no GUI affordance. -->
+	<key>AssociatedBundleIdentifiers</key>
+	<string>dev.h3ct0r.ext4mac</string>
 </dict>
 </plist>

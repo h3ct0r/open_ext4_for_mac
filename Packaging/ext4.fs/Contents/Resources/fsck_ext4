@@ -3,15 +3,16 @@
 # fsck_ext4 — bridge from Disk Utility's fsck convention to FSKit.
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# This is NOT a structural checker. The extension behind it parses the
-# superblock, applies the feature gate, verifies the checksum seed and replays
-# a dirty journal -- it decides whether the volume can be mounted safely. It
-# does not walk the inode table and it cannot repair anything, because lwext4
-# has no fsck.
-#
-# That distinction matters here more than anywhere else: Disk Utility's First
-# Aid passes -y, meaning "repair without asking". Answering "repaired" to that
-# when nothing was repaired would be a lie the user acts on.
+# What this does, precisely -- because the honest description is subtle. The
+# extension parses the superblock, applies the feature gate, verifies the
+# checksum seed, and replays a dirty journal. Replaying the journal IS the
+# standard repair for a journaled filesystem: a dirty ext4 is *made consistent*
+# by replaying, which is exactly what a power-cut volume needs. What this does
+# NOT do is a full structural check -- walking the inode table, cross-checking
+# block bitmaps against extent trees -- because lwext4 has no fsck. So it can
+# recover a dirty volume but cannot repair structural damage; for the latter,
+# e2fsprogs. Earlier this script claimed it "cannot repair one" even as it
+# replayed the journal, which was the opposite of honest.
 set -u
 
 self=$(basename "$0")
@@ -21,19 +22,20 @@ repair_requested=0
 while [ $# -gt 1 ]; do
     case "$1" in
         -n) args+=(-n) ;;
-        -y) repair_requested=1 ;;
-        -p|-f|-q|-d) ;;   # preen/force/quiet/debug: nothing for us to vary
+        -y|-p) repair_requested=1 ;;   # repair / preen: replay if dirty
+        -f|-q|-d) ;;   # force/quiet/debug: nothing for us to vary
         *) echo "$self: unsupported option $1" >&2; exit 1 ;;
     esac
     shift
 done
 
-[ $# -eq 1 ] || { echo "usage: $self [-n|-y] device" >&2; exit 1; }
+[ $# -eq 1 ] || { echo "usage: $self [-n|-y|-p] device" >&2; exit 1; }
 device="$1"
 
 if [ "$repair_requested" -eq 1 ]; then
-    echo "$self: this driver can verify a volume but cannot repair one." >&2
-    echo "$self: run e2fsck from e2fsprogs to repair an ext2/3/4 volume." >&2
+    echo "$self: recovering by replaying the journal if the volume is dirty" >&2
+    echo "$self: (the standard repair for ext3/4); for a full structural" >&2
+    echo "$self: check of a clean volume, run e2fsck from e2fsprogs." >&2
 fi
 
 # FSKit modules are enabled per user, and fskitd will not start a third-party
