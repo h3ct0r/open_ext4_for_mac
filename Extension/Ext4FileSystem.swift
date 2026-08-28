@@ -236,9 +236,17 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         let effectiveReadOnly = readOnly || info.verdict == EXT4B_PROBE_READ_ONLY
 
         guard info.verdict == EXT4B_PROBE_USABLE || info.verdict == EXT4B_PROBE_READ_ONLY else {
+            // Not a refusal -- a load is not a mount. fskitd loads a resource
+            // before it will format or check it, so media with no filesystem
+            // on it (the thing newfs exists to fix) must load successfully.
+            // The shell volume this returns can be formatted and checked but
+            // fails activation, which is where an actual mount of
+            // unrecognised media now gets the ENOTSUP the load used to give.
             bridge.close()
-            Ext4Log.error("refusing to mount: \(Self.reason(info))")
-            throw Ext4Error.notSupported
+            Ext4Log.info("no mountable filesystem (\(Self.reason(info))); "
+                         + "loaded for maintenance only")
+            containerStatus = FSContainerStatus.ready
+            return Ext4UnformattedVolume(bsdName: device.bsdName)
         }
 
         try executor.runSync {

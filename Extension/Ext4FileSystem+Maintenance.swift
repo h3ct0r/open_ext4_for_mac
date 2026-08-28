@@ -41,7 +41,11 @@ extension Ext4FileSystem: FSManageableResourceMaintenanceOperations {
             throw Ext4Error.posix(EROFS)
         }
 
-        // Two units: erase the old signatures, then build the filesystem.
+        // Two units: close any live mount of the device, then build the
+        // filesystem. Foreign-signature wiping happens inside ext4b_format --
+        // FSKit's wipeResource facility is unreachable from a CLI-initiated
+        // format ("no connector talking to fskitd is available"), which was
+        // the last failure between newfs_fskit and a working volume.
         let progress = Progress(totalUnitCount: 2)
 
         Task.detached { [weak self] in
@@ -49,11 +53,13 @@ extension Ext4FileSystem: FSManageableResourceMaintenanceOperations {
             do {
                 task.logMessage("creating ext\(request.generation) on \(resource.bsdName)")
 
-                // Clear any other filesystem's signatures first. A stale
-                // signature elsewhere on the partition can win a later probe
-                // and send the volume to the wrong driver. FSKit wraps
-                // libutil's wipefs for exactly this.
-                try await self.wipeSignatures(resource)
+                // If the load that preceded this format found a mountable
+                // filesystem, it mounted it -- journal attached, cache live.
+                // That handle must be gone before the new filesystem is
+                // written: closing it *afterwards* would write the old
+                // superblock over the new volume on unload. Idempotent, and a
+                // no-op for the usual case of unformatted media.
+                await self.closeVolume()
                 progress.completedUnitCount = 1
 
                 try await self.format(resource, request: request)
@@ -70,15 +76,6 @@ extension Ext4FileSystem: FSManageableResourceMaintenanceOperations {
         }
 
         return progress
-    }
-
-    private func wipeSignatures(_ resource: FSBlockDeviceResource) async throws {
-        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-            // Imported from wipeResource:completionHandler:.
-            wipe(resource) { error in
-                if let error { c.resume(throwing: error) } else { c.resume() }
-            }
-        }
     }
 
     private func format(_ resource: FSBlockDeviceResource,

@@ -77,7 +77,7 @@ ARGON2_CFLAGS := $(CFLAGS) -Wno-everything -I$(ARGON2_DIR)
 
 CORE_LIB := $(BUILD)/lib/libext4core.a
 
-.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-crypto test-orphan test-luks test-mount-crash test-mount-luks test-kill-recovery check-extension check-signing validate tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil
+.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-crypto test-orphan test-luks test-mount-crash test-mount-luks test-kill-recovery check-extension check-signing validate tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil
 
 all: app
 
@@ -259,6 +259,10 @@ test-orphan: tools
 
 test-prealloc: tools
 	@bash Tests/run_prealloc_tests.sh
+
+# The live formatter: needs the extension installed and enabled.
+test-newfs:
+	@bash Tests/run_newfs_tests.sh
 
 # ext4 inside a LUKS container. Fixtures come from real cryptsetup, and what we
 # write is handed back to cryptsetup and the Linux kernel to read -- a

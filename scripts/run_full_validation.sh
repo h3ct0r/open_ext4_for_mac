@@ -214,10 +214,12 @@ if docker info >/dev/null 2>&1; then
     stage "9. mounted driver" bash Tests/run_mount_crash_tests.sh
     stage "10. encrypted volumes, mounted" bash Tests/run_mount_luks_tests.sh
     stage "11. recovery after a kill" bash Tests/run_kill_recovery_tests.sh
+    stage "12. newfs through FSKit" bash Tests/run_newfs_tests.sh
   else
     skip "9. mounted driver" "the FSKit extension is not installed"
     skip "10. encrypted volumes, mounted" "the FSKit extension is not installed"
     skip "11. recovery after a kill" "the FSKit extension is not installed"
+    skip "12. newfs through FSKit" "the FSKit extension is not installed"
   fi
 else
   skip "6. LUKS containers"       "docker daemon not reachable"

@@ -537,7 +537,7 @@ int ext4b_format(ext4b_device *dev, const ext4b_format_options *opts)
         return EINVAL;
     if (dev->mounted)
         return EBUSY;
-    if (dev->read_only)
+    if (dev->read_only || !dev->write_fn)
         return EROFS;
 
     int fs_type;
@@ -563,6 +563,42 @@ int ext4b_format(ext4b_device *dev, const ext4b_format_options *opts)
     uint32_t block_size = opts->block_size ? opts->block_size : 4096;
     if (dev->iface.ph_bsize > block_size)
         return EINVAL;
+
+    /*
+     * Clear foreign filesystem signatures before building ours. ext4 never
+     * touches the first 1024 bytes (the "boot area"), which is exactly where
+     * FAT, exFAT and NTFS keep their magic -- formatting over a FAT volume
+     * would otherwise leave a boot sector that a FAT prober still claims,
+     * and the volume goes to the wrong driver. The last 64 KiB gets the same
+     * treatment for the signatures that anchor at the end (HFS+ alternate
+     * header, RAID metadata). FSKit has a wipeResource facility for this,
+     * but it is not reachable from a CLI-initiated format ("no connector
+     * talking to fskitd is available"), and 128 KiB of zeroes needs no
+     * facility.
+     */
+    {
+        enum { WIPE_SPAN = 64 * 1024 };
+        uint64_t dev_bytes = dev->iface.ph_bcnt * (uint64_t)dev->iface.ph_bsize;
+        uint8_t *zeroes = calloc(1, WIPE_SPAN);
+        if (!zeroes)
+            return ENOMEM;
+        int wr = 0;
+        if (dev_bytes <= 2 * WIPE_SPAN) {
+            for (uint64_t off = 0; off < dev_bytes && wr == 0; off += WIPE_SPAN) {
+                size_t len = (size_t)((dev_bytes - off < WIPE_SPAN)
+                                      ? dev_bytes - off : WIPE_SPAN);
+                wr = dev->write_fn(dev->ctx, zeroes, off, len);
+            }
+        } else {
+            wr = dev->write_fn(dev->ctx, zeroes, 0, WIPE_SPAN);
+            if (wr == 0)
+                wr = dev->write_fn(dev->ctx, zeroes,
+                                   dev_bytes - WIPE_SPAN, WIPE_SPAN);
+        }
+        free(zeroes);
+        if (wr != 0)
+            return EIO;
+    }
 
     struct ext4_mkfs_info info;
     memset(&info, 0, sizeof(info));

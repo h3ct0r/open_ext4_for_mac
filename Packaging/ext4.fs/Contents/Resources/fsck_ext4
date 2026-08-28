@@ -36,7 +36,21 @@ if [ "$repair_requested" -eq 1 ]; then
     echo "$self: run e2fsck from e2fsprogs to repair an ext2/3/4 volume." >&2
 fi
 
+# FSKit modules are enabled per user, and fskitd will not start a third-party
+# module on behalf of root -- which is who runs First Aid's checks. Same
+# re-dispatch as newfs_ext4: enter the console user's bootstrap context and
+# run as them, because theirs is the enablement that exists.
+#
 # macOS ships bash 3.2, where expanding an empty array under `set -u` is an
 # unbound-variable error rather than nothing. First Aid passes no options we
 # forward, so the empty case is the common one.
+if [ "$(id -u)" -eq 0 ]; then
+    console_uid=$(/usr/bin/stat -f %u /dev/console 2>/dev/null || echo 0)
+    if [ "$console_uid" -gt 0 ]; then
+        exec /bin/launchctl asuser "$console_uid" \
+             /usr/bin/sudo -n -u "#$console_uid" \
+             /sbin/fsck_fskit -t ext4 ${args[@]+"${args[@]}"} "$device"
+    fi
+fi
+
 exec /sbin/fsck_fskit -t ext4 ${args[@]+"${args[@]}"} "$device"

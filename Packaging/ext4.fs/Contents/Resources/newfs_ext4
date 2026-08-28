@@ -55,4 +55,21 @@ device="$1"
 args=(-t ext4 -g "$gen")
 [ -n "$label" ] && args+=(-L "$label")
 
+# FSKit modules are enabled per user, and fskitd will not start a third-party
+# module on behalf of root -- but Disk Utility's backend (diskmanagementd)
+# runs formatters exactly as root, so a direct exec fails with "No extension
+# with fsShortName found" and Erase reports "File system formatter failed".
+# Re-dispatch to the console user, whose enablement is the one that exists:
+# launchctl asuser enters that user's bootstrap context, so newfs_fskit
+# reaches fskitd the same way an interactive run does. The device stays
+# accessible because fskit_helper (root) opens it, not the calling user.
+if [ "$(id -u)" -eq 0 ]; then
+    console_uid=$(/usr/bin/stat -f %u /dev/console 2>/dev/null || echo 0)
+    if [ "$console_uid" -gt 0 ]; then
+        exec /bin/launchctl asuser "$console_uid" \
+             /usr/bin/sudo -n -u "#$console_uid" \
+             /sbin/newfs_fskit "${args[@]}" "$device"
+    fi
+fi
+
 exec /sbin/newfs_fskit "${args[@]}" "$device"

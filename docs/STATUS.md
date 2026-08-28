@@ -389,8 +389,12 @@ of ext2/ext3/ext4 to create is `-g`. The options are declared in `Info.plist`
 under `FSFormatOptionSyntax` (`g:b:L:I:N:J:n`) and `FSCheckOptionSyntax` (`n`);
 FSKit parses them with getopt before the module sees them.
 
-Formatting clears any previous filesystem's signatures first, via FSKit's
-`wipeResource` (a wrapper around libutil's `wipefs`), then builds the volume.
+Formatting clears any previous filesystem's signatures first — 64 KiB of
+zeroes over each end of the partition, inside `ext4b_format` itself, since
+ext4 never touches the boot area where FAT/exFAT/NTFS keep their magic and a
+surviving boot sector would win the next probe. (FSKit's `wipeResource` was
+tried and is unreachable from a CLI-initiated format.) Then it builds the
+volume.
 Each volume gets a fresh random UUID — lwext4's `mkfs` copies whatever UUID it
 is handed straight into the superblock and never generates one, so every
 volume would otherwise be all-zero and indistinguishable to DiskArbitration.
@@ -569,63 +573,61 @@ The `FSRepair` entry is a half-truth worth knowing about: First Aid passes
 `-y`, meaning "repair without asking", and the wrapper prints that it can
 verify but not repair rather than reporting a repair that never happened.
 
-Formatting *through* Disk Utility is untested, because it ends up in
-`newfs_fskit`, which does not work yet — see below.
+Formatting *through* Disk Utility's Erase runs the wrapper as **root**
+(diskmanagementd invokes formatters that way), and FSKit module enablement is
+per user — root has no modules, so a direct exec fails with "No extension
+with fsShortName found" and Erase reports "File system formatter failed".
+Both wrappers therefore re-dispatch when run as root: `launchctl asuser`
+into the console user's bootstrap context, `sudo -n` to their uid, and the
+enablement that exists is the one consulted. The device stays accessible
+because fskit_helper (root) opens it, not the calling user.
 
-### `newfs_fskit` does not work yet
+### `newfs_fskit` works — and what its long failure actually was
 
-`newfs_fskit -t ext4 <device>` fails with `ENOTSUP` and never calls our
-`startFormat`. What has been ruled out, each with a control:
+`newfs_fskit -t ext4 [-g 2|3|4] [-b size] [-L label] <device>` formats
+through the extension, all three generations, and `fsck_fskit -t ext4` runs
+the mountability check. Neither needed an ObjC principal class, a different
+entry point, or any of the structural surgery the failure seemed to demand.
 
-| Suspected | Evidence against |
-|---|---|
-| the device or permissions | Apple's `msdos` and `exfat` format the same device fine, without `sudo` |
-| the probe gating format | fails on an already-ext4 volume too |
-| extension-declared conformance | `FSVolume.RenameOperations` is declared the same way and works |
-| missing selectors | `startFormatWithTask:options:error:` and the protocol are both in the shipped binary |
-| unregistered conformance | the earlier `does not support operation newfs` message is gone |
-| `EXExtensionPrincipalClass` | adding it *deregisters* the module entirely |
+For most of this project's history the command failed with `ENOTSUP` and
+`startFormat` was never called, and the investigation record accumulated a
+table of ruled-out suspects pointing at the Swift `@main` entry point as the
+remaining explanation. That hypothesis was wrong, and the tracing that
+disproved it is worth keeping:
 
-Instrumentation (`FSTask.logMessage` as the first statement of `startFormat`)
-never prints, while Apple's exfat module's own messages do — so the call never
-arrives.
+* fskitd's own log showed the extension **launching** for the format
+  (assertion grabbed, user client configured) — the Swift entry point,
+  manifest and conformance all worked. The glue's launch log even said so
+  outright: `Got delegate conformance ... Maintenance 1`.
+* the msdos control's only trace difference was one fskitd line — `Adding
+  taskID to resource` — which disassembly places in the *success callback*
+  of the load that precedes every format.
+* our own appex log then completed the story: `loadResource` ran, probed the
+  blank device, logged `refusing to mount`, and returned ENOTSUP. **The
+  error `newfs_fskit` printed was this module's own refusal**, relayed back
+  through fskitd from a load that was never a mount.
 
-The Swift overlay is the remaining explanation, and it is now better supported.
-`UnaryFileSystemExtension` constrains its associated type only to
-`FSUnaryFileSystem, FSUnaryFileSystemOperations`, and the word *maintenance*
-appears nowhere in FSKit's `swiftinterface` at all. Apple's own modules are
-wired the other way: `msdos` declares
+fskitd loads a resource before it will format or check it. Media with no
+recognisable filesystem on it — the thing `newfs` exists to fix — must
+therefore *load* successfully. `loadResource` now answers unrecognised media
+with `Ext4UnformattedVolume`, a shell that can be the target of `startFormat`
+and `startCheck` but fails activation with the ENOTSUP the load used to
+give; auto-mount is unchanged because the probe still refuses everything the
+shell stands in for. Two consequences got fixed in the same motion:
+`startFormat` closes any volume the preceding load mounted (or the old
+handle would write its superblock over the fresh filesystem on unload), and
+foreign-signature wiping moved into `ext4b_format` — FSKit's `wipeResource`
+facility turned out to be unreachable from a CLI-initiated format ("no
+connector talking to fskitd is available"), and 128 KiB of zeroes over the
+signature-bearing head and tail of the partition needs no facility. The
+format suite covers the wipe offline: planted FAT and end-anchored
+signatures are gone after `ext4dump format`, and the volume is e2fsck-clean.
 
-```
-EXExtensionPrincipalClass => msdosFileSystem
-```
-
-implements `startFormatWithTask:options:error:`, and `newfs_fskit -t msdos`
-duly works.
-
-Adding that key here deregisters the module. One good explanation for that was
-eliminated in the process: a Swift class is registered with the ObjC runtime
-under its mangled name — this one was `_TtC6Ext4FS14Ext4FileSystem` — so a
-principal class named `Ext4FileSystem` resolved to nothing, and an
-unresolvable principal class is indistinguishable from a module that will not
-register. `@objc(Ext4FileSystem)` fixes the name, and was verified to: the
-class now appears under it. The module still deregisters.
-
-So the name was never the problem, and what is left is structural. This
-extension is a Swift `@main UnaryFileSystemExtension`, which is
-ExtensionFoundation's entry-point mechanism; `EXExtensionPrincipalClass` is the
-other, mutually exclusive one. Declaring both appears to make the manifest
-incoherent.
-
-Four things have now been ruled out — missing selectors, missing conformance,
-an unregistered conformance, and an unresolvable class name — and reaching
-`startFormat` most likely means giving up the Swift entry point and rebuilding
-the extension around an ObjC principal class. That is a large change with a
-real chance of not working, and **every attempt costs the System Settings
-approval**, which no script can restore.
-
-`@objc(Ext4FileSystem)` was kept anyway. It costs nothing and pins a name that
-was otherwise incidental.
+`EXExtensionPrincipalClass` remains poison for a Swift `@main` module — that
+part of the old record stands, the two entry-point mechanisms really are
+mutually exclusive — it was just never the reason formatting failed.
+`@objc(Ext4FileSystem)` was kept; it costs nothing and pins a name that was
+otherwise incidental.
 
 The same core path is fully covered offline: `ext4dump format` builds volumes
 across 117 geometries, all `e2fsck`-clean.
@@ -1465,7 +1467,9 @@ format suite's geometry sweep now e2fsck-verifies every checksum across
 thirteen sizes × three block sizes × three generations.
 
 ## Not yet done
-- `newfs_fskit` reaches the module but never calls `startFormat`; see below
+- Disk Utility Erase end-to-end: the wrappers' root-to-console-user
+  re-dispatch is written but needs `sudo make install-diskutil` and a live
+  Erase to confirm
 - A notification when a locked volume appears and the agent is not running;
   today it simply does not show up
 - Reading a LUKS header from media the user does not own — untested against a
