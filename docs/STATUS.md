@@ -485,31 +485,32 @@ repair tool. Entries whose link count is zero are finished off; entries that
 still have a name are dropped and left alone, which is how an interrupted
 *addition* undoes itself.
 
-**Where it is not atomic, and why that is the shape it is.** Linux journals the
-superblock alongside the inode, so a list edit and the change it protects
-commit together. lwext4 writes the superblock outside the journal
-(`ext4_block_writebytes` goes straight to the device, past both the block cache
-and the transaction), so the two halves land separately and the *order* has to
-do the work instead:
+**It is atomic now, the way Linux does it.** The superblock is a journaled
+block (patches 0022/0023): the chain-head publish goes through the current
+transaction and commits together with the inode change it points at, on both
+the add and the remove side. The careful measured orderings this section used
+to describe — publish-then-commit on add, free-then-drop on remove — existed
+because the two halves landed separately and the order had to pick which
+half-state a cut could leave. There is no half-state any more: before the
+commit neither happened, after it both did.
 
-| | order | what a cut in the middle leaves |
-|---|---|---|
-| adding | publish the head, **then** commit the unlink | an inode that is on the list and still has its name — which recovery recognises by the link count and drops. Nothing lost |
-| removing | free the inode, **then** drop it from the list | a list entry pointing at an inode that is already free — which recovery recognises from the inode bitmap and skips |
+The case this closed was measured before and after. Two simultaneous
+open-unlinks, the write stream cut between publishing the second head and
+committing it: four consecutive cut points stranded the first orphan — off
+the chain, out of every directory, invisible to everything but a full fsck.
+The two-orphan sweep in `Tests/run_orphan_tests.sh` now covers every cut
+point of exactly that scenario, and the Linux kernel replays the
+superblock-carrying transactions clean at every cut (fourteen kernel
+recoveries in the tag-0 check).
 
-Both orderings were chosen by measurement, not argument: the opposite choice on
-the removal side failed 6 of 41 cut points with `Deleted inode has zero dtime`,
-and the sweep is what said so.
-
-One case is still imperfect and is documented rather than hidden. The new head
-carries its own next pointer inside the transaction, so a cut between
-publishing the head and committing loses the *rest* of the chain — every other
-inode that happened to be deleted-but-open at that instant. Those leak exactly
-as they did before any of this existed, so it is not a regression; it means a
-volume with two simultaneous open-unlinks is protected for one of them rather
-than both. Closing it needs the superblock inside the transaction, which needs
-the block cache to accept block 0, which `patches/lwext4/0008` deliberately
-forbids.
+What made it possible in lwext4: the block cache now admits block 0 — the
+superblock's home on all volumes with blocks over 1 KiB — through one
+sanctioned door (`ext4_block_get_sb`), while the hole-marker refusal that
+patch 0008 introduced stays exactly where it was for every mapping-derived
+fetch. And jbd's replay had a tag-0 superblock branch all along, unreachable
+upstream because nothing ever journaled the superblock; it has a writer now.
+Volumes without a journal (ext2) keep the old direct-write ordering, which is
+the best a journal-less mode can offer.
 
 **`FSKit`'s own `enableOpenUnlinkEmulation` is deliberately not enabled**, and
 the reason it appeared to do nothing earlier turned out to be a mistake worth

@@ -1,0 +1,208 @@
+Subject: journal the superblock
+
+ext4_sb_write() puts a superblock change on the medium by itself, with no
+relation to any transaction. For fields like s_last_orphan that is exactly
+wrong: the value only means anything together with the inode change it points
+at, and a crash between the two -- either order -- leaves a state where one
+happened without the other. The measured cost: with two entries on the orphan
+chain, four consecutive cut points stranded an inode that no list, no
+directory, and no bitmap scan would ever find again.
+
+Three pieces make the superblock a journaled block:
+
+  * ext4_sb_write_trans(): update the superblock's home block through the
+    cache and mark it dirty in the current transaction. The change commits
+    atomically with everything else in the transaction or not at all.
+    Replay was already prepared for this, unreachably: the commit path tags
+    a journaled block by number, block 0 tags as 0, and recovery has had a
+    dedicated tag-0 branch restoring bytes 1024..2047 all along -- written
+    for a writer that never existed until now. On 1 KiB volumes the
+    superblock is block 1 and replays as an ordinary block. The Linux
+    kernel replays both forms; measured across every cut of an orphan-add
+    transaction, fourteen kernel recoveries, all clean.
+  * ext4_sb_write() itself becomes cache-coherent: it still writes the
+    medium directly, and now also folds the bytes into the cached copy of
+    the superblock's block when one exists (ext4_bcache_update_if_cached,
+    non-dirtying). Without this, the seven direct callers -- mount, unmount,
+    journal start/stop, recovery -- would race a cached block 0 and a later
+    journaled update would commit stale bytes over theirs.
+  * jbd_recover() reloads the superblock from the medium after replay. The
+    tag-0 branch refreshes the in-memory copy; the ordinary-block path on
+    1 KiB volumes only writes the disk, and everything that runs after
+    recovery -- flag edits, orphan cleanup, the unmount write-back -- was
+    operating on a stale superblock and quietly undoing what replay had
+    restored. Measured: a replayed orphan-list head vanished at exactly
+    this seam and stranded its inode.
+
+Callers choose the form explicitly; the journaled write is not a fallback.
+Volumes without a journal keep the direct write and its immediate
+durability, which is the best that mode offers.
+--- a/src/ext4_bcache.c
++++ b/src/ext4_bcache.c
+@@ -144,6 +144,34 @@
+ }
+ 
+ static struct ext4_buf *
++ext4_buf_lookup(struct ext4_bcache *bc, uint64_t lba);
++
++/* Fold a direct device write into the cached copy, when one exists.
++ *
++ * ext4_block_writebytes goes straight to the medium, past this cache. That
++ * was always true and never mattered, because nothing wrote the same bytes
++ * both ways. The journaled superblock changes that: block 0 can now sit in
++ * the cache while mount, unmount and journal start/stop write the superblock
++ * directly. Without this, the cached copy goes stale and the next journaled
++ * superblock update commits old bytes over the new ones.
++ *
++ * Deliberately does not mark the buffer dirty: the bytes are already on the
++ * medium; the cache is only being told about them. */
++void ext4_bcache_update_if_cached(struct ext4_bcache *bc, uint64_t lba,
++				  uint32_t offset, const void *src,
++				  uint32_t len)
++{
++	struct ext4_buf *buf;
++
++	if (!bc)
++		return;
++	buf = ext4_buf_lookup(bc, lba);
++	if (!buf || offset + len > bc->itemsize)
++		return;
++	memcpy(buf->data + offset, src, len);
++}
++
++struct ext4_buf *
+ ext4_buf_lookup(struct ext4_bcache *bc, uint64_t lba)
+ {
+ 	struct ext4_buf tmp = {
+--- a/include/ext4_bcache.h
++++ b/include/ext4_bcache.h
+@@ -249,6 +249,18 @@
+  * @param   bc block cache descriptor
+  * @param   from starting lba
+  * @param   cnt block counts*/
++/**@brief   Fold a direct (cache-bypassing) device write into the cached copy
++ *          of a block, when one exists. Does not mark the buffer dirty: the
++ *          bytes are already on the medium.
++ * @param   bc block cache descriptor (may be NULL)
++ * @param   lba logical block address
++ * @param   offset byte offset within the block
++ * @param   src bytes just written to the medium
++ * @param   len byte count*/
++void ext4_bcache_update_if_cached(struct ext4_bcache *bc, uint64_t lba,
++				  uint32_t offset, const void *src,
++				  uint32_t len);
++
+ void ext4_bcache_invalidate_lba(struct ext4_bcache *bc,
+ 				uint64_t from,
+ 				uint32_t cnt);
+--- a/src/ext4_super.c
++++ b/src/ext4_super.c
+@@ -46,6 +46,8 @@
+ #include <ext4_debug.h>
+ 
+ #include <ext4_super.h>
++#include <ext4_trans.h>
++#include <ext4_bcache.h>
+ #include <ext4_crc32.h>
+ 
+ uint32_t ext4_block_group_cnt(struct ext4_sblock *s)
+@@ -141,9 +143,57 @@
+ 
+ int ext4_sb_write(struct ext4_blockdev *bdev, struct ext4_sblock *s)
+ {
++	int r;
+ 	ext4_sb_set_csum(s);
+-	return ext4_block_writebytes(bdev, EXT4_SUPERBLOCK_OFFSET, s,
+-				     EXT4_SUPERBLOCK_SIZE);
++	r = ext4_block_writebytes(bdev, EXT4_SUPERBLOCK_OFFSET, s,
++				  EXT4_SUPERBLOCK_SIZE);
++	if (r != EOK)
++		return r;
++
++	/* writebytes goes straight to the medium, past the block cache --
++	 * and the superblock's block can be *in* that cache now, because
++	 * journaled superblock updates (ext4_sb_write_trans) put it there.
++	 * Tell the cached copy, or the next journaled update commits stale
++	 * bytes over what was just written. */
++	ext4_bcache_update_if_cached(bdev->bc,
++			(bdev->lg_bsize > EXT4_SUPERBLOCK_OFFSET) ? 0 : 1,
++			EXT4_SUPERBLOCK_OFFSET % bdev->lg_bsize,
++			s, EXT4_SUPERBLOCK_SIZE);
++	return EOK;
++}
++
++/* The same write, through the journal.
++ *
++ * The direct form above makes a superblock change durable on its own, with
++ * no relation to any transaction -- which is exactly wrong for a field like
++ * s_last_orphan, whose value only makes sense together with the inode change
++ * it points at. This form updates the superblock's home block through the
++ * cache and marks it dirty in the current transaction, so the field commits
++ * atomically with everything else in it or not at all.
++ *
++ * Replay already understands the result: jbd tags the block by number, the
++ * commit path emits tag 0 for the superblock's block, and recovery has a
++ * dedicated branch for tag 0 that restores bytes 1024..2047. That branch
++ * existed upstream, unreachable, waiting for a writer.
++ *
++ * With no journal or no open transaction this is not a fallback for the
++ * direct form; callers choose explicitly. */
++int ext4_sb_write_trans(struct ext4_blockdev *bdev, struct ext4_sblock *s)
++{
++	struct ext4_block b = EXT4_BLOCK_ZERO();
++	uint32_t off = EXT4_SUPERBLOCK_OFFSET % bdev->lg_bsize;
++	int r;
++
++	ext4_sb_set_csum(s);
++	r = ext4_block_get_sb(bdev, &b);
++	if (r != EOK)
++		return r;
++
++	memcpy((uint8_t *)b.data + off, s, EXT4_SUPERBLOCK_SIZE);
++	r = ext4_trans_set_block_dirty(b.buf);
++
++	ext4_block_set(bdev, &b);
++	return r;
+ }
+ 
+ int ext4_sb_read(struct ext4_blockdev *bdev, struct ext4_sblock *s)
+--- a/include/ext4_super.h
++++ b/include/ext4_super.h
+@@ -200,6 +200,15 @@
+  * @return  Standard error code */
+ int ext4_sb_write(struct ext4_blockdev *bdev, struct ext4_sblock *s);
+ 
++/**@brief   Write the superblock through the current journal transaction, so
++ *          the update commits atomically with the rest of the transaction.
++ *          Callers choose this or ext4_sb_write() explicitly; it is not a
++ *          fallback.
++ * @param   bdev block device
++ * @param   s superblock to write
++ * @return  standard error code*/
++int ext4_sb_write_trans(struct ext4_blockdev *bdev, struct ext4_sblock *s);
++
+ /**@brief   Superblock read.
+  * @param   bdev block device descriptor.
+  * @param   s superblock descriptor
+--- a/src/ext4_journal.c
++++ b/src/ext4_journal.c
+@@ -1250,6 +1250,19 @@
+ 		 * they are not needed again. Make the first true before
+ 		 * stating the second. */
+ 		(void)ext4_block_barrier(jbd_fs->bdev);
++		/* Replay may have rewritten the superblock's own home --
++		 * journaled superblock updates land as tag 0 on volumes with
++		 * blocks larger than 1 KiB, handled by the dedicated branch
++		 * above, but as an ordinary tagged block on 1 KiB volumes,
++		 * where the superblock is block 1. The dedicated branch
++		 * refreshes the in-memory copy; the ordinary path only writes
++		 * the medium. Reload, or everything after this point -- the
++		 * flag edits below, orphan cleanup, the eventual unmount
++		 * write-back -- runs on a stale superblock and quietly undoes
++		 * what replay restored. Measured: a replayed orphan-list head
++		 * vanished at exactly this seam and stranded its inode. */
++		(void)ext4_sb_read(jbd_fs->inode_ref.fs->bdev,
++				   &jbd_fs->inode_ref.fs->sb);
+ 		/* If we successfully replay the journal,
+ 		 * clear EXT4_FINCOM_RECOVER flag on the
+ 		 * ext4 superblock, and set the start of

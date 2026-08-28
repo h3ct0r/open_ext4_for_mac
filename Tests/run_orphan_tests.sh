@@ -241,6 +241,85 @@ sweep_recover unlink_open  rm-open /v.bin
 # The whole lifecycle in one session: deleted, then closed.
 sweep_recover unlink_cycle rm-cycle /v.bin
 
+# ------------------------------------------------- two orphans, two txns --
+# The gap this sweep exists to catch: with the chain head published by a
+# direct superblock write and the rest of the chain journaled, a cut between
+# publishing the second orphan's head and committing its transaction loses
+# every orphan already on the chain -- the head points at an uncommitted
+# inode, recovery drops it, and whatever it linked to is unreachable.
+#
+# The two unlinks must sit in *separate* transactions or the window closes by
+# accident: one batch commits both together and there is no moment where the
+# first is durable and the second is half-published. EXT4B_TXN_BATCH=1 forces
+# the split -- which is also what any sync between two real unlinks does.
+sweep_two_orphans() {
+  local label="two_orphans"
+  local seed="$WORK/${label}_seed.img"
+
+  new_volume "$seed"
+  local base_usage
+  base_usage=$(usage_of "$seed")
+  "$DUMP" "$seed" create /a.bin >/dev/null 2>&1
+  "$DUMP" "$seed" write /a.bin "$(payload A)" >/dev/null 2>&1
+  "$DUMP" "$seed" create /b.bin >/dev/null 2>&1
+  "$DUMP" "$seed" write /b.bin "$(payload B)" >/dev/null 2>&1
+
+  local probe="$WORK/${label}_probe.img"
+  cp "$seed" "$probe"
+  local total
+  total=$(EXT4B_TXN_BATCH=1 count_writes "$probe" script /dev/stdin <<'WL'
+rm-open /a.bin
+rm-open /b.bin
+WL
+)
+  rm -f "$probe"
+  if [ -z "$total" ]; then bad "$label: could not count writes"; return; fi
+
+  local img="$WORK/${label}_cut.img"
+  local n leaked=0 dirty=0 unmountable=0 first=""
+  for ((n=0; n<=total; n++)); do
+    cp "$seed" "$img"
+    EXT4DUMP_FAIL_AFTER="$n" EXT4B_TXN_BATCH=1       "$DUMP" "$img" script /dev/stdin >/dev/null 2>&1 <<'WL'
+rm-open /a.bin
+rm-open /b.bin
+WL
+
+    if ! "$DUMP" "$img" label RECOVERED >/dev/null 2>&1; then
+      unmountable=$((unmountable+1))
+      [ -z "$first" ] && first="cut $n: the volume could not be mounted"
+      continue
+    fi
+    if ! fsck_clean "$img"; then
+      dirty=$((dirty+1))
+      [ -z "$first" ] && first="cut $n: $(fsck_first_complaint "$img")"
+      continue
+    fi
+    # Survivors are legitimate -- a cut before either unlink committed leaves
+    # one or both files in place. Anything beyond the surviving files' own
+    # usage is a leak.
+    local u
+    u=$(usage_of "$img")
+    if [ "$u" != "$base_usage" ]; then
+      local survivors=0
+      "$DUMP" "$img" stat /a.bin >/dev/null 2>&1 && survivors=$((survivors+1))
+      "$DUMP" "$img" stat /b.bin >/dev/null 2>&1 && survivors=$((survivors+1))
+      if [ "$survivors" -eq 0 ]; then
+        leaked=$((leaked+1))
+        [ -z "$first" ] && first="cut $n: no files left, usage [$u] not [$base_usage]"
+      fi
+    fi
+  done
+  rm -f "$img" "$seed"
+
+  local total_bad=$(( leaked + dirty + unmountable ))
+  if [ "$total_bad" -eq 0 ]; then
+    ok "$label: all $((total+1)) cut points recover with nothing leaked"
+  else
+    bad "$label: all $((total+1)) cut points recover with nothing leaked"         "$unmountable unmountable, $dirty unclean, $leaked leaked — first: $first"
+  fi
+}
+sweep_two_orphans
+
 # ==================================================== other implementations ==
 note ""
 note "a list we wrote is understood by the tools that did not write it"

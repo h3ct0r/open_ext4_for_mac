@@ -1,0 +1,137 @@
+Subject: block zero is a real block
+
+The block cache used lb_id == 0 on the caller's handle to mean "not holding a
+block", asserted it on release, and ext4_block_get_noread() refuses lba 0
+outright because ext4's mapping code returns 0 to mean "hole". All reasonable
+-- and jointly they made block 0 unfetchable, which matters because block 0 is
+where the filesystem superblock lives on every volume with blocks larger than
+1 KiB, and journaling superblock updates requires that block in the cache.
+
+Untangle the three meanings:
+
+  * The release-time validity check becomes what it always really was: does
+    the handle hold a buffer. The lb_id assert conflated "unset" with
+    "block 0"; the buf-pointer assert two lines below already catches empty
+    handles, including EXT4_BLOCK_ZERO() ones.
+  * The hole refusal in ext4_block_get_noread() stays exactly where it is.
+    The directory and extent code pass mapping results straight into it, and
+    a fetched "hole" is a stale mapping being followed; refusing keeps that
+    a clean failure. Nothing that resolves mappings can fetch block 0.
+  * The one sanctioned door is new: ext4_block_get_sb() computes the
+    superblock's block itself -- 0 for 2 KiB and larger blocks, 1 for 1 KiB
+    -- so no caller-supplied hole can arrive through it, and returns the
+    block read through the cache like any other.
+
+The cache-side key (ext4_buf.lba) never had a sentinel: the RB tree compares
+numerically and 0 is an ordinary key. No other change is needed there.
+--- a/src/ext4_bcache.c
++++ b/src/ext4_bcache.c
+@@ -272,11 +272,12 @@
+ 	struct ext4_buf *buf = b->buf;
+ 
+ 	ext4_assert(bc && b);
+-
+-	/*Check if valid.*/
+-	ext4_assert(b->lb_id);
+ 
+-	/*Block should have a valid pointer to ext4_buf.*/
++	/* An empty handle has no buffer; that is the validity test. lb_id was
++	 * asserted non-zero here too, which conflated "unset handle" with
++	 * "holds block 0" -- and block 0 is a real, cacheable block: it
++	 * carries the superblock on every volume with blocks larger than
++	 * 1 KiB, and journaling the superblock requires it in the cache. */
+ 	ext4_assert(buf);
+ 
+ 	/*Check if someone don't try free unreferenced block cache.*/
+--- a/src/ext4_blockdev.c
++++ b/src/ext4_blockdev.c
+@@ -233,13 +233,15 @@
+ 		return ENXIO;
+ 
+ 	/* Block 0 is ext4's hole marker: ext4_fs_get_inode_dblk_idx() returns
+-	 * it for a logical block that has no physical block behind it, and no
+-	 * real metadata ever lives there. Fetching it anyway caches a buffer
+-	 * with lb_id == 0, which then trips the ext4_assert(b->lb_id) in
+-	 * ext4_bcache_free() on release -- so a directory with a hole in it,
+-	 * or an inode whose blocks have been freed underneath a stale lookup,
+-	 * takes the whole driver down instead of returning an error.
+-	 * Refusing here turns every one of those into a clean failure. */
++	 * it for a logical block that has no physical block behind it. The
++	 * directory and extent code pass that result straight into this
++	 * function, and a fetched "hole" is a stale or freed mapping being
++	 * followed -- so refusing here turns each of those into a clean
++	 * failure instead of handing garbage to a caller that trusted its
++	 * mapping. Block 0 is also a real block: on volumes with blocks
++	 * larger than 1 KiB it carries the superblock, and the one legitimate
++	 * way to fetch it is ext4_block_get_sb() below, which no mapping
++	 * lookup can reach. */
+ 	if (lba == 0)
+ 		return ENXIO;
+ 
+@@ -286,6 +288,49 @@
+ 	return EOK;
+ }
+ 
++int ext4_block_get_sb(struct ext4_blockdev *bdev, struct ext4_block *b)
++{
++	bool is_new;
++	int r;
++	/* Byte 1024: inside block 0 for 2 KiB and larger blocks, exactly
++	 * block 1 for 1 KiB blocks. */
++	uint64_t lba = (bdev->lg_bsize > EXT4_SUPERBLOCK_OFFSET) ? 0 : 1;
++
++	/* The deliberate door past the hole refusal in
++	 * ext4_block_get_noread(): the superblock's home is a real block, and
++	 * journaling superblock updates requires it in the cache. The lba is
++	 * computed here rather than accepted, so no mapping lookup can arrive
++	 * with a hole and end up in this path. */
++	ext4_assert(bdev && b);
++	if (!bdev->bdif->ph_refctr)
++		return EIO;
++	if (!(lba < bdev->lg_bcnt))
++		return ENXIO;
++
++	b->lb_id = lba;
++	r = ext4_block_cache_shake(bdev);
++	if (r != EOK)
++		return r;
++	r = ext4_bcache_alloc(bdev->bc, b, &is_new);
++	if (r != EOK)
++		return r;
++	if (!b->data)
++		return ENOMEM;
++
++	if (ext4_bcache_test_flag(b->buf, BC_UPTODATE))
++		return EOK;
++
++	r = ext4_blocks_get_direct(bdev, b->data, lba, 1);
++	if (r != EOK) {
++		ext4_bcache_free(bdev->bc, b);
++		b->lb_id = 0;
++		return r;
++	}
++
++	ext4_bcache_set_flag(b->buf, BC_UPTODATE);
++	return EOK;
++}
++
+ int ext4_block_set(struct ext4_blockdev *bdev, struct ext4_block *b)
+ {
+ 	ext4_assert(bdev && b);
+--- a/include/ext4_blockdev.h
++++ b/include/ext4_blockdev.h
+@@ -193,6 +193,14 @@
+  * @return  standard error code; EOK when the device offers no barrier, since
+  *          a caller that cannot have one is not failing.*/
+ int ext4_block_barrier(struct ext4_blockdev *bdev);
++
++/**@brief   Get the block holding the filesystem superblock, through the
++ *          cache. The only sanctioned way to fetch block 0, which
++ *          ext4_block_get_noread() otherwise refuses as ext4's hole marker.
++ * @param   bdev block device
++ * @param   b block descriptor
++ * @return  standard error code*/
++int ext4_block_get_sb(struct ext4_blockdev *bdev, struct ext4_block *b);
+ 
+ /**@brief   Flush data in buffer of given lba to disk,
+  *          if that buffer exists in block cache.

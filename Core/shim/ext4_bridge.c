@@ -2048,44 +2048,25 @@ int ext4b_hardlink(ext4b_device *dev,
  * use. A volume left with orphans by this driver is cleaned up correctly by
  * either of them, and one left by Linux is cleaned up by us.
  *
- * The one thing that cannot be copied from Linux is atomicity. Linux journals
- * the superblock alongside the inode, so a list edit and the change it
- * protects commit together. lwext4 writes the superblock outside the journal
- * (ext4_block_writebytes goes straight to the device, bypassing both the block
- * cache and the transaction), so the two halves land separately. The orderings
- * below are chosen so that whichever half survives, the worst outcome is a
- * leaked inode that e2fsck reclaims -- never a live file destroyed:
+ * Atomicity is copied from Linux too, now. The superblock is a journaled
+ * block (lwext4 patches 0022/0023): a list edit made inside a transaction --
+ * the head publish on add, the head advance on remove, the predecessor patch
+ * mid-chain -- commits together with the inode change it protects, or not at
+ * all. There is no ordering to choose and no half-state for a cut to find:
+ * before the commit neither half happened, after it both did.
  *
- *   adding    publish the head first, commit the unlink second. Cut in
- *             between, the volume has a listed inode that still has its name
- *             and its link -- and recovery, ours and Linux's alike, tells the
- *             two apart by the link count and simply drops such an entry. The
- *             file is untouched and nothing leaks. Committing first would
- *             instead leave the inode unreferenced and on no list for the
- *             width of one device write, which is the leak this exists to
- *             close.
- *   removing  free the inode first, drop it from the list second -- the
- *             opposite way round, and for the same reason. Cut in between,
- *             the list points at an inode that is already free, which
- *             recovery recognises from the inode bitmap and skips; cut before
- *             it, the entry is still there and recovery finishes the job.
- *             Detaching first would leave the inode unreferenced and on no
- *             list for the width of one commit. This only works for the head
- *             of the list, because that is the one entry whose removal is a
- *             superblock write; taking out a middle entry means rewriting its
- *             predecessor's inode, which is journaled and cannot be ordered
- *             against the superblock, so that path detaches first and accepts
- *             the window.
+ * That sentence used to be thirty lines of carefully measured ordering
+ * discipline, and one admitted imperfection: with two simultaneous
+ * open-unlinks, a cut between publishing the second head (a direct device
+ * write then) and committing its transaction lost the rest of the chain --
+ * measured, four consecutive cut points stranding an inode. The two-orphan
+ * sweep in Tests/run_orphan_tests.sh covers every cut of that scenario now,
+ * and the Linux kernel replays the superblock-carrying transactions clean.
  *
- * One case is still not perfect, and it is the reason the ordering above is a
- * choice rather than an answer. The new head's own next pointer travels in the
- * transaction, so a cut between publishing the head and committing loses the
- * rest of the chain -- every *other* inode that was already deleted-but-open
- * at that instant. Those leak, exactly as they did before any of this existed,
- * so it is not a regression; it just means a volume with two simultaneous
- * open-unlinks is protected for one of them rather than both. Closing it
- * properly needs the superblock inside the transaction, which needs the block
- * cache to accept block 0, which patch 0008 deliberately forbids.
+ * Volumes without a journal (ext2) still take the direct write and the old
+ * ordering, adding-side publish-first: there is no atomicity to be had, and
+ * the worst outcome stays a leaked inode that e2fsck reclaims -- never a
+ * live file destroyed.
  */
 
 /* A corrupt or circular chain must not be able to spin the driver. */
@@ -2145,13 +2126,28 @@ static int inode_in_use(struct ext4_fs *fs, uint32_t index, bool *out)
 }
 
 /* The head is the only part of the list that is not inside an inode, so this
- * is the only place the superblock is written for it. It goes to the medium
- * immediately -- an orphan record that is still sitting in a cache when the
- * power fails protects nothing. */
+ * is the only place the superblock is written for it.
+ *
+ * Inside a journal transaction, the head goes through the journal
+ * (ext4_sb_write_trans) and commits atomically with the inode change it
+ * points at. That closes the gap this file used to document at length: a
+ * crash between a direct head publish and the commit of the unlink behind it
+ * lost every orphan already on the chain -- measured, four consecutive cut
+ * points leaking an inode in the two-orphan sweep. Atomic means there is no
+ * "between" any more: before the commit neither the head nor the unlink
+ * happened; after it, both did.
+ *
+ * Without a journal (ext2) or outside a transaction, the old direct write
+ * and barrier remain -- there is no atomicity to be had there, and immediate
+ * durability is the best that mode can offer. */
 static int orphan_publish_head(ext4b_device *dev, struct ext4_fs *fs,
                                uint32_t ino)
 {
     ext4_set32(&fs->sb, last_orphan, ino);
+#if CONFIG_JOURNALING_ENABLE
+    if (fs->jbd_journal && fs->curr_trans)
+        return ext4_sb_write_trans(fs->bdev, &fs->sb);
+#endif
     int r = ext4_sb_write(fs->bdev, &fs->sb);
     if (r != EOK)
         return r;
@@ -2189,10 +2185,14 @@ static int orphan_del(ext4b_device *dev, struct ext4_fs *fs, uint32_t ino)
     ext4_fs_put_inode_ref(&victim);
 
     if (head == ino) {
-        r = txn_finish(dev, fs, EOK);
+        /* Inside the transaction, so the head moves in the same commit that
+         * rewrites the victim's inode. On failure the journal discards the
+         * block; only the in-memory copy needs putting back. */
+        r = orphan_publish_head(dev, fs, after);
+        r = txn_finish(dev, fs, r);
         if (r != EOK)
-            return r;
-        return orphan_publish_head(dev, fs, after);
+            ext4_set32(&fs->sb, last_orphan, head);
+        return r;
     }
 
     uint32_t prev = head;
@@ -2408,10 +2408,16 @@ int ext4b_release_inode(ext4b_device *dev, uint32_t inode)
         r = ext4_fs_free_inode(&ref);
 
     ext4_fs_put_inode_ref(&ref);
-    r = txn_finish(dev, fs, r);
 
+    /* The head advance joins the same transaction as the free, which ends
+     * the choose-your-failure ordering this used to need: freed-but-listed
+     * and listed-but-freed were both real states a cut could leave, and the
+     * order only picked which. Now the commit carries both or neither. */
     if (r == EOK && is_head)
-        (void)orphan_publish_head(dev, fs, next);
+        r = orphan_publish_head(dev, fs, next);
+    r = txn_finish(dev, fs, r);
+    if (r != EOK && is_head)
+        ext4_set32(&fs->sb, last_orphan, inode);
 
     return r;
 }
@@ -2497,20 +2503,25 @@ int ext4b_unlink_ex(ext4b_device *dev,
     ext4_fs_put_inode_ref(&child);
     ext4_fs_put_inode_ref(&parent);
 
-    /* Before the commit, not after -- see the ordering note above. */
+    /* Inside the transaction: the head and the unlink it protects commit
+     * together, or not at all. */
     if (r == EOK && joined_orphans) {
         int pr = orphan_publish_head(dev, fs, child_ino);
         if (pr != EOK) {
             bridge_log(3, "could not record the deleted-but-open inode on the "
                           "orphan list; a crash before it is closed would leak "
                           "it");
+            ext4_set32(&fs->sb, last_orphan, prev_head);
             joined_orphans = false;
         }
     }
 
     r = txn_finish(dev, fs, r);
 
-    /* The unlink did not happen after all, so neither should the list entry. */
+    /* The unlink did not happen after all, so neither should the list entry.
+     * An aborted transaction already discarded the journaled superblock
+     * block; this puts the in-memory copy back (and, on a journal-less
+     * volume, un-publishes the direct write). */
     if (r != EOK && joined_orphans)
         orphan_publish_head(dev, fs, prev_head);
 
