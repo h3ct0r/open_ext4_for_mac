@@ -33,7 +33,7 @@ enum Ext4Barrier {
 
     private static let label = "dev.h3ct0r.ext4mac.barrier"
     private static let plist = "/Library/LaunchDaemons/dev.h3ct0r.ext4mac.barrier.plist"
-    private static let program = "/usr/local/libexec/ext4barrierd"
+    private static let program = "/Library/PrivilegedHelperTools/ext4barrierd"
 
     static func command(_ argument: String?) -> Int32 {
         switch argument {
