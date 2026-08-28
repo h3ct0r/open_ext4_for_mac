@@ -16,6 +16,7 @@
 #include <ext4_extent.h>
 #include <ext4_blockdev.h>
 #include <ext4_bcache.h>
+#include <ext4_trans.h>
 #include <ext4_xattr.h>
 #include <ext4_crc32.h>
 #include <ext4_types.h>
@@ -82,6 +83,32 @@ static void bridge_log(int level, const char *msg)
     if (g_log_fn)
         g_log_fn(g_log_ctx, level, msg);
 }
+
+/*
+ * Where a failed lwext4 assertion goes. Patch 0026 points ext4_assert at this
+ * instead of a printf to stdout: in a sandboxed appex stdout reaches no one,
+ * so the reason the driver just aborted was invisible. Routed through the
+ * bridge logger, it lands in os_log (appex) or on stderr (the tool). Still
+ * fail-stop -- a filesystem that runs past a broken invariant writes garbage
+ * with authority; aborting tears the mount down and leaves a record instead.
+ */
+void ext4b_assert_fail(const char *file, int line)
+{
+    char msg[256];
+    snprintf(msg, sizeof msg, "lwext4 assertion failed at %s:%d", file, line);
+    bridge_log(3, msg);
+    fflush(NULL);
+    abort();
+}
+
+#ifdef EXT4B_TEST_HOOKS
+/* Deliberately trip an lwext4 assertion, to prove the failure path reports
+ * through the logger and not to stdout. Test builds only. */
+void ext4b_trip_assert(void)
+{
+    ext4_assert(0);
+}
+#endif
 
 /* Commit any batched-but-uncommitted mutations. Defined with the transaction
  * machinery below; declared here because sync and unmount both need it and
@@ -260,22 +287,6 @@ static int bd_flush(struct ext4_blockdev *bdev)
     if (!dev || !dev->flush_fn || dev->read_only)
         return EOK;
 
-    /*
-     * Tests only: pretend the journal never asked.
-     *
-     * This is how the reorder suite establishes that the barriers patch 0014
-     * places around the commit block are load-bearing, rather than assuming
-     * it. With this set, the bridge still flushes at its own boundaries --
-     * txn_finish, sync, unmount -- exactly as it did before that patch, so a
-     * run with it on reproduces the driver as it was. If the suite passes
-     * either way, the patch is decoration.
-     */
-    static int suppressed = -1;
-    if (suppressed < 0)
-        suppressed = getenv("EXT4B_NO_JOURNAL_BARRIER") != NULL;
-    if (suppressed)
-        return EOK;
-
     return dev->flush_fn(dev->ctx) == 0 ? EOK : EIO;
 }
 
@@ -310,17 +321,6 @@ ext4b_device *ext4b_device_create(void *ctx,
     dev->write_fn  = write_fn;
     dev->flush_fn  = flush_fn;
     dev->txn_batch = BRIDGE_TXN_BATCH;
-    {
-        /* Tests need to vary this: a batch of 1 is the old
-         * transaction-per-operation behaviour, which is what the suites
-         * compare against. */
-        const char *env = getenv("EXT4B_TXN_BATCH");
-        if (env) {
-            unsigned long v = strtoul(env, NULL, 10);
-            if (v >= 1 && v <= 1024)
-                dev->txn_batch = (uint32_t)v;
-        }
-    }
     dev->read_only = read_only;
 
     dev->iface.open     = bd_open;
@@ -350,6 +350,26 @@ void ext4b_device_destroy(ext4b_device *dev)
         ext4b_unmount(dev);
     free(dev->block_buf);
     free(dev);
+}
+
+/*
+ * How many mutations may share one journal transaction. A real tunable, not a
+ * test hook: batching is 11x on small-file work and the default (16) is the
+ * shipping value. The old code read EXT4B_TXN_BATCH from the environment
+ * inside this library -- a getenv the appex carried but never used; the tool
+ * calls this setter instead, so the shipping core reads no environment at all.
+ * Clamped to [1, 1024]; 1 is transaction-per-operation, the pre-batching
+ * behaviour the crash suites compare against.
+ */
+void ext4b_set_txn_batch(ext4b_device *dev, uint32_t batch)
+{
+    if (!dev)
+        return;
+    if (batch < 1)
+        batch = 1;
+    if (batch > 1024)
+        batch = 1024;
+    dev->txn_batch = batch;
 }
 
 /* ================================================================ probe == */
@@ -468,10 +488,18 @@ int ext4b_probe(ext4b_device *dev, ext4b_probe_info *out)
     else
         out->generation = 2;
 
-    /* Sanity: the volume must not claim to be larger than the device. */
-    uint64_t fs_bytes = out->block_count * (uint64_t)out->block_size;
+    /*
+     * Sanity: the volume must not claim to be larger than the device. Done by
+     * division, not multiplication: block_count is 64-bit and read from
+     * untrusted media, and block_size can be 65536, so block_count *
+     * block_size can wrap past 2^64 and a wildly oversized volume would sail
+     * through a `product > dev_bytes` test. dev_bytes cannot overflow (real
+     * device geometry), so comparing block_count against dev_bytes/block_size
+     * is exact and wrap-free.
+     */
     uint64_t dev_bytes = dev->iface.ph_bcnt * (uint64_t)dev->iface.ph_bsize;
-    if (out->block_count == 0 || fs_bytes > dev_bytes) {
+    uint64_t max_blocks = out->block_size ? dev_bytes / out->block_size : 0;
+    if (out->block_count == 0 || out->block_count > max_blocks) {
         out->verdict = EXT4B_PROBE_UNSUPPORTED;
         snprintf(out->unsupported, sizeof(out->unsupported),
                  "superblock claims %llu blocks, larger than the device",
@@ -870,9 +898,26 @@ int ext4b_statfs(ext4b_device *dev, ext4b_statfs_info *out)
     out->block_size   = st.block_size;
     out->total_blocks = st.blocks_count;
     out->free_blocks  = st.free_blocks_count;
-    out->avail_blocks = st.free_blocks_count;
     out->total_inodes = st.inodes_count;
     out->free_inodes  = st.free_inodes_count;
+
+    /*
+     * Available != free. s_r_blocks_count is set aside for root so a full
+     * volume stays usable by privileged processes; unprivileged callers see
+     * it as unavailable, and df/Finder show it as used. Reporting free as
+     * available overstates space by (default) 5%. The mount-stats struct does
+     * not carry the reserve, so read it from the superblock directly.
+     */
+    struct ext4_fs *fs = dev->bdev.fs;   /* bridge_fs is defined below */
+    uint64_t reserved = 0;
+    if (fs) {
+        reserved = to_le32(fs->sb.reserved_blocks_count_lo);
+        if (to_le32(fs->sb.features_incompatible) & EXT4_FINCOM_64BIT)
+            reserved |= (uint64_t)to_le32(fs->sb.reserved_blocks_count_hi) << 32;
+    }
+    out->avail_blocks = (st.free_blocks_count > reserved)
+                      ? st.free_blocks_count - reserved
+                      : 0;
     return EOK;
 }
 
@@ -1058,8 +1103,20 @@ int ext4b_readdir(ext4b_device *dev,
 
         uint16_t nlen  = ext4_dir_en_get_name_len(&fs->sb, it.curr);
         uint8_t  ftype = ext4_dir_en_get_inode_type(&fs->sb, it.curr);
-        if (nlen > 255)
-            nlen = 255;
+        /*
+         * ext4 names are at most EXT4_NAME_LEN (255). A longer one is a
+         * corrupt or hostile directory entry; the old code clamped it to 255
+         * and handed FSKit a *different* name than what is on disk, which is
+         * how a lookup of that name then fails. Skip it instead of inventing
+         * a name -- truncatesLongNames is false, and that promise applies to
+         * reads too.
+         */
+        if (nlen > 255) {
+            r = ext4_dir_iterator_next(&it);
+            if (r != EOK)
+                break;
+            continue;
+        }
 
         /* Copy the name out before advancing: stepping the iterator may
          * release the underlying block and invalidate it.curr. */
@@ -1913,6 +1970,35 @@ static bool unlink_forbidden(struct ext4_inode_ref *dir,
         || is_immutable(victim) || is_append_only(victim);
 }
 
+/*
+ * The inode a directory's ".." points at. NOT ext4_dir_find_entry: on an
+ * htree-indexed directory (lwext4 sets EXT4_INODE_FLAG_INDEX on the dirs it
+ * creates) that walks the hash index, which never contains "." or ".." --
+ * those live only in the first data block. So read the first block and match
+ * ".." there directly. Returns 0 on any failure, which callers treat as
+ * "stop walking".
+ */
+static uint32_t dir_parent_inode(struct ext4_fs *fs, uint32_t dir_inode)
+{
+    struct ext4_inode_ref d;
+    if (ext4_fs_get_inode_ref(fs, dir_inode, &d) != EOK)
+        return 0;
+
+    uint32_t parent = 0;
+    ext4_fsblk_t fblk = 0;
+    if (ext4_fs_get_inode_dblk_idx(&d, 0, &fblk, false) == EOK && fblk != 0) {
+        struct ext4_block b;
+        if (ext4_trans_block_get(fs->bdev, &b, fblk) == EOK) {
+            struct ext4_dir_en *en = NULL;
+            if (ext4_dir_find_in_block(&b, &fs->sb, 2, "..", &en) == EOK && en)
+                parent = ext4_dir_en_get_inode(en);
+            ext4_block_set(fs->bdev, &b);
+        }
+    }
+    ext4_fs_put_inode_ref(&d);
+    return parent;
+}
+
 /* ---------------------------------------------------------------- create -- */
 
 static int create_common(ext4b_device *dev, struct ext4_fs *fs,
@@ -2009,6 +2095,18 @@ static int create_common(ext4b_device *dev, struct ext4_fs *fs,
                 }
             }
             if (r != EOK) {
+                /*
+                 * The name is already linked but the target never made it to
+                 * disk. Undo the link and free the inode rather than leave a
+                 * zero-length symlink -- under batching txn_finish commits, so
+                 * "return the error" is not enough to make it not have
+                 * happened.
+                 */
+                ext4_dir_remove_entry(&parent, name, (uint32_t)name_len);
+                ext4_fs_inode_links_count_dec(&child);
+                ext4_inode_set_del_time(child.inode, now_seconds());
+                ext4_fs_free_inode(&child);
+                child.dirty = false;
                 ext4_fs_put_inode_ref(&child);
                 ext4_fs_put_inode_ref(&parent);
                 return txn_finish(dev, fs, r);
@@ -2051,7 +2149,17 @@ int ext4b_symlink(ext4b_device *dev,
     WRITE_PROLOGUE(dev, fs);
     if (!target || target_len == 0)
         return EINVAL;
-    if (target_len > 4095)
+    /*
+     * An ext4 symlink target lives either inline in the inode's block array
+     * (a fast symlink) or in exactly one data block (a slow symlink). Either
+     * way it cannot exceed one block -- and it must be rejected HERE, before
+     * create_common allocates and links the inode, or a target too long to
+     * store would (a) overflow the one-block staging buffer, and (b) leave a
+     * linked, zero-length symlink behind when the payload write bailed.
+     * The terminator has to fit too, hence >= not >.
+     */
+    uint32_t bsize = ext4_sb_get_block_size(&fs->sb);
+    if (target_len >= bsize || target_len > 4095)
         return ENAMETOOLONG;
     return create_common(dev, fs, parent_inode, name, name_len,
                          EXT4_DE_SYMLINK, 0777, uid, gid,
@@ -2095,6 +2203,17 @@ int ext4b_hardlink(ext4b_device *dev,
         ext4_fs_put_inode_ref(&child);
         ext4_fs_put_inode_ref(&parent);
         return txn_finish(dev, fs, EPERM);
+    }
+
+    /* Refuse to shadow an existing name -- link(2) returns EEXIST, and
+     * silently adding a second directory entry for the same name corrupts
+     * the directory. create_common guards this; hardlink did not. */
+    struct ext4_dir_search_result exists;
+    if (ext4_dir_find_entry(&exists, &parent, name, (uint32_t)name_len) == EOK) {
+        ext4_dir_destroy_result(&parent, &exists);
+        ext4_fs_put_inode_ref(&child);
+        ext4_fs_put_inode_ref(&parent);
+        return txn_finish(dev, fs, EEXIST);
     }
 
     r = link_child(fs, &parent, &child, name, (uint32_t)name_len, false);
@@ -2395,6 +2514,7 @@ int ext4b_orphan_cleanup(ext4b_device *dev, uint32_t *out_freed,
     return EOK;
 }
 
+#ifdef EXT4B_TEST_HOOKS
 void ext4b_set_orphan_cleanup(ext4b_device *dev, bool enabled)
 {
     if (dev)
@@ -2411,6 +2531,7 @@ int ext4b_orphan_head(ext4b_device *dev, uint32_t *out_head)
     *out_head = ext4_get32(&fs->sb, last_orphan);
     return EOK;
 }
+#endif /* EXT4B_TEST_HOOKS */
 
 /* ---------------------------------------------------------------- unlink -- */
 
@@ -2654,6 +2775,28 @@ int ext4b_rename(ext4b_device *dev,
         goto out;
     }
 
+    bool child_is_dir =
+        ext4_inode_is_type(&fs->sb, child.inode, EXT4_INODE_MODE_DIRECTORY);
+
+    /*
+     * Refuse to move a directory into its own subtree. Without this the moved
+     * directory and everything under it becomes an unreachable cycle -- '..'
+     * points into a loop, nothing points at the loop, and only e2fsck can
+     * find it. Walk the destination's ancestry to the root: if the thing
+     * being moved appears in it, the move would close a cycle. (rename(2)
+     * answers EINVAL for exactly this.)
+     */
+    if (child_is_dir && dst_parent != src_parent) {
+        uint32_t walk = dst_parent;
+        while (walk != EXT4_INODE_ROOT_INDEX) {
+            if (walk == child_ino) { r = EINVAL; goto out; }
+            uint32_t parent_of = dir_parent_inode(fs, walk);
+            if (parent_of == 0 || parent_of == walk)
+                break;                     /* malformed or self-parent: stop */
+            walk = parent_of;
+        }
+    }
+
     /* If something already occupies the destination, remove it first --
      * rename(2) replaces the target atomically. */
     struct ext4_dir_search_result dst_res;
@@ -2666,6 +2809,26 @@ int ext4b_rename(ext4b_device *dev,
             r = ext4_fs_get_inode_ref(fs, victim_ino, &victim);
             if (r != EOK)
                 goto out;
+
+            /*
+             * Type compatibility, as rename(2) requires it: a directory may
+             * only replace an (empty) directory, and a non-directory may only
+             * replace a non-directory. unlink_child below rejects a non-empty
+             * directory (ENOTEMPTY); the two cases it cannot see are a
+             * non-dir over a dir (EISDIR) and a dir over a non-dir (ENOTDIR).
+             */
+            bool victim_is_dir =
+                ext4_inode_is_type(&fs->sb, victim.inode, EXT4_INODE_MODE_DIRECTORY);
+            if (!child_is_dir && victim_is_dir) {
+                ext4_fs_put_inode_ref(&victim);
+                r = EISDIR;
+                goto out;
+            }
+            if (child_is_dir && !victim_is_dir) {
+                ext4_fs_put_inode_ref(&victim);
+                r = ENOTDIR;
+                goto out;
+            }
 
             /* Renaming over a protected file destroys it just as surely as
              * unlinking it would. */
@@ -2750,6 +2913,22 @@ int ext4b_write(ext4b_device *dev,
 
     const uint32_t bsize = ext4_sb_get_block_size(&fs->sb);
     uint64_t fsize = ext4_inode_get_size(&fs->sb, ref.inode);
+
+    /*
+     * Refuse a write the address space cannot hold, BEFORE any of the loop
+     * below runs. Two failures otherwise: the logical block number
+     * (offset / bsize) is truncated to 32 bits, so an offset past bsize*2^32
+     * wraps to a low block and overwrites live data; and even short of that,
+     * the append-past-EOF loop walks out one block at a time, so a write at a
+     * huge sparse offset spins through hundreds of millions of allocations
+     * inside the volume's serial executor before it finally hits ENOSPC.
+     * The ceiling is what the extent/indirect map can address: bsize * 2^32.
+     */
+    const uint64_t max_file_size = (uint64_t)bsize << 32;
+    if (count > max_file_size || offset > max_file_size - count) {
+        ext4_fs_put_inode_ref(&ref);
+        return txn_finish(dev, fs, EFBIG);
+    }
 
     /*
      * Append-only, at the level this layer can see it.

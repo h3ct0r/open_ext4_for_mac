@@ -768,13 +768,17 @@ static int run_write_command(ext4b_device *dev, int argc, char **argv)
         else printf("created inode %u\n", ino);
 
     } else if (strcmp(cmd, "write") == 0 || strcmp(cmd, "append") == 0) {
-        if (argc < 5) { fprintf(stderr, "%s needs <path> <text>\n", cmd); rc = 2; return rc; }
+        if (argc < 5) { fprintf(stderr, "%s needs <path> <text> [offset]\n", cmd); rc = 2; return rc; }
         uint32_t ino = resolve(dev, argv[3], NULL);
         if (!ino) { rc = 1; return rc; }
         uint64_t off = 0;
         if (strcmp(cmd, "append") == 0) {
             ext4b_attrs a;
             if (ext4b_getattr(dev, ino, &a) == 0) off = a.size;
+        } else if (argc >= 6) {
+            /* Explicit offset -- the only way to reach the far end of the
+             * address space from a test (a huge sparse write). */
+            off = strtoull(argv[5], NULL, 10);
         }
         size_t written = 0;
         r = ext4b_write(dev, ino, off, argv[4], strlen(argv[4]), &written);
@@ -957,6 +961,14 @@ int main(int argc, char **argv)
 
     ext4b_set_logger(logger, NULL);
 
+    /* Prove the assertion failure path reports through the logger (stderr
+     * here, os_log in the appex) rather than printing to a stdout no sandboxed
+     * extension can be heard on. Aborts; needs no image. */
+    if (strcmp(cmd, "__assert_selftest") == 0) {
+        ext4b_trip_assert();
+        return 0;   /* unreached: ext4b_trip_assert aborts */
+    }
+
     bool writable = is_write_cmd(cmd);
     int fd = open(image, writable ? O_RDWR : O_RDONLY);
     if (fd < 0) {
@@ -1068,13 +1080,47 @@ int main(int argc, char **argv)
         io_flush = luks_device_flush;
     }
 
-    const uint32_t bs = 512;
+    /*
+     * Device block size. The default has always been 512, but the appex
+     * passes the device's real sector size -- commonly 4096 -- and that is a
+     * geometry the suites must be able to exercise: the byte-offset
+     * arithmetic in the block callbacks, the alignment windows, and
+     * ext4b_format's refusal to build a filesystem with blocks smaller than
+     * the device's are all invisible at 512.
+     */
+    uint32_t bs = 512;
+    const char *bs_env = getenv("EXT4DUMP_DEVICE_BSIZE");
+    if (bs_env) {
+        unsigned long v = strtoul(bs_env, NULL, 10);
+        if (v < 512 || v > 65536 || (v & (v - 1)) != 0) {
+            fprintf(stderr, "EXT4DUMP_DEVICE_BSIZE must be a power of two in [512, 65536]\n");
+            rc = 1;
+            goto out;
+        }
+        bs = (uint32_t)v;
+    }
+    if (dev_bytes % bs != 0) {
+        fprintf(stderr, "device size %llu is not a multiple of block size %u\n",
+                (unsigned long long)dev_bytes, bs);
+        rc = 1;
+        goto out;
+    }
     dev = ext4b_device_create(io_ctx, bs, dev_bytes / bs,
                               !writable, io_read, io_write, io_flush);
     if (!dev) {
         fprintf(stderr, "failed to create device\n");
         rc = 1;
         goto out;
+    }
+
+    /* The batching knob lives here now, not in the shipping core. The suites
+     * set EXT4B_TXN_BATCH to force batch=1 (transaction-per-operation) so a
+     * crash cut lands mid-history; the appex uses the compiled-in default. */
+    const char *batch_env = getenv("EXT4B_TXN_BATCH");
+    if (batch_env) {
+        unsigned long v = strtoul(batch_env, NULL, 10);
+        if (v >= 1 && v <= 1024)
+            ext4b_set_txn_batch(dev, (uint32_t)v);
     }
 
     if (strcmp(cmd, "format") == 0) {
@@ -1175,8 +1221,9 @@ int main(int argc, char **argv)
 
     ext4b_statfs_info sfs;
     if (ext4b_statfs(dev, &sfs) == 0 && strcmp(cmd, "ls") == 0) {
-        printf("# %" PRIu64 "/%" PRIu64 " blocks free, %u/%u inodes free, bs=%u\n",
-               sfs.free_blocks, sfs.total_blocks,
+        printf("# %" PRIu64 "/%" PRIu64 " blocks free, avail=%" PRIu64
+               ", %u/%u inodes free, bs=%u\n",
+               sfs.free_blocks, sfs.total_blocks, sfs.avail_blocks,
                sfs.free_inodes, sfs.total_inodes, sfs.block_size);
     }
 

@@ -39,6 +39,13 @@
 #include <stdarg.h>
 #include <errno.h>
 
+/* A sane ceiling on the inode count we will allocate a visited-bitmap for.
+ * 2^32 inodes is 512 MiB of bitmap; no real volume this driver mounts has
+ * anywhere near it (an inode is at least 128 bytes, so even a 16 TiB volume
+ * tops out around 2^31 inodes and mke2fs picks far fewer). A count above this
+ * is a corrupt or hostile superblock, not a volume to walk. */
+#define EXT4B_CHECK_MAX_INODES (64u * 1024u * 1024u)
+
 /* Directories still to descend into. Explicit rather than recursive: a
  * directory tree's depth is attacker-controlled on a volume from elsewhere,
  * and blowing the stack inside a filesystem driver is a poor way to report
@@ -187,10 +194,19 @@ int ext4b_check_tree(ext4b_device *dev, ext4b_check_result *out)
         return EIO;
 
     inode_set visited = { 0 };
-    visited.count = (uint32_t)sfs.total_inodes;
-    if (visited.count == 0)
+    /*
+     * total_inodes comes from the superblock -- untrusted on media we did not
+     * format. Two guards: cap it so a corrupt count cannot ask for a
+     * half-gigabyte bitmap inside the appex, and do the round-up in 64-bit so
+     * a count near UINT32_MAX cannot wrap (count + 7) to a tiny allocation
+     * that mark()/seen() then index far past.
+     */
+    if (sfs.total_inodes == 0)
         return EIO;
-    visited.bits = calloc((visited.count + 7) / 8, 1);
+    if (sfs.total_inodes > EXT4B_CHECK_MAX_INODES)
+        return EFBIG;
+    visited.count = (uint32_t)sfs.total_inodes;
+    visited.bits = calloc(((uint64_t)visited.count + 7) / 8, 1);
     if (!visited.bits)
         return ENOMEM;
 

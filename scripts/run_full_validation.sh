@@ -181,8 +181,18 @@ fi
 # green run of a tree that only exists here is the most expensive kind of pass.
 stage "0. patches reproduce lwext4" bash scripts/check_patches.sh
 
+# What is in the shipping core, and what must not be: no getenv, no test-only
+# exports, none of the removed env-var names. Needs the ship library, which
+# `make tools` above does not build -- so build it here (fast, cached after).
+make core >/dev/null 2>&1
+stage "0b. shipping core surface" bash scripts/check_ship_surface.sh
+
 stage "1. read suite"  bash Tests/run_tests.sh
 stage "2. write suite" bash Tests/run_write_tests.sh
+
+# Bounds, overflow, and POSIX semantics -- the pre-release audit's findings,
+# each with an oracle. Offline, seconds.
+stage "2b. bounds & semantics" bash Tests/run_bounds_tests.sh
 
 # Only the format suite's Linux round-trip needs Docker, and it skips that
 # section by itself; the geometry sweep needs nothing but e2fsck.
@@ -191,6 +201,10 @@ stage "3. format" bash Tests/run_format_tests.sh
 # Same arrangement: only its cross-check against the Linux kernel needs Docker.
 stage "4. open-unlink recovery" bash Tests/run_orphan_tests.sh
 stage "4b. preallocation" bash Tests/run_prealloc_tests.sh
+
+# Every revoke block in the journal, entry by entry -- the suite that caught
+# the off-by-tail phantom entry. Seconds, offline, no Docker.
+stage "4c. journal revoke records" bash Tests/run_revoke_tests.sh
 
 # Known-answer tests for the crypto primitives need nothing at all; the LUKS
 # suite needs cryptsetup, so it lives with the Docker stages below.
@@ -207,19 +221,15 @@ if docker info >/dev/null 2>&1; then
   stage "7b. reordered writes" bash Tests/run_reorder_tests.sh
   stage "8. differential vs Linux" bash Tests/run_diff_tests.sh
 
-  # Stages 1-8 all drive the core directly through a plain file. Only this one
-  # goes through FSKit, so it is the only evidence about the path a real mount
-  # takes. It needs the signed extension installed *and enabled*.
+  # Stages 1-8 all drive the core directly through a plain file. These two go
+  # through FSKit *and* hand their images to the Linux kernel, so they need
+  # both the enabled extension and Docker.
   if pluginkit -m -p com.apple.fskit.fsmodule 2>/dev/null | grep -q "dev.h3ct0r.ext4mac.Ext4FS"; then
     stage "9. mounted driver" bash Tests/run_mount_crash_tests.sh
     stage "10. encrypted volumes, mounted" bash Tests/run_mount_luks_tests.sh
-    stage "11. recovery after a kill" bash Tests/run_kill_recovery_tests.sh
-    stage "12. newfs through FSKit" bash Tests/run_newfs_tests.sh
   else
     skip "9. mounted driver" "the FSKit extension is not installed"
     skip "10. encrypted volumes, mounted" "the FSKit extension is not installed"
-    skip "11. recovery after a kill" "the FSKit extension is not installed"
-    skip "12. newfs through FSKit" "the FSKit extension is not installed"
   fi
 else
   skip "6. LUKS containers"       "docker daemon not reachable"
@@ -228,7 +238,16 @@ else
   skip "8. differential vs Linux" "docker daemon not reachable"
   skip "9. mounted driver"        "docker daemon not reachable"
   skip "10. encrypted volumes, mounted" "docker daemon not reachable"
-  skip "11. recovery after a kill"      "docker daemon not reachable"
+fi
+
+# Mounted, but Docker-free: e2fsck is their oracle. Gated only on the
+# extension, so a machine without Docker still measures the live driver.
+if pluginkit -m -p com.apple.fskit.fsmodule 2>/dev/null | grep -q "dev.h3ct0r.ext4mac.Ext4FS"; then
+  stage "11. recovery after a kill" bash Tests/run_kill_recovery_tests.sh
+  stage "12. newfs through FSKit" bash Tests/run_newfs_tests.sh
+else
+  skip "11. recovery after a kill" "the FSKit extension is not installed"
+  skip "12. newfs through FSKit" "the FSKit extension is not installed"
 fi
 
 summary

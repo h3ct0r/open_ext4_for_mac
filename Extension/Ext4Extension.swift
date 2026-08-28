@@ -19,7 +19,11 @@ struct Ext4Extension: UnaryFileSystemExtension {
     /// table. Handing back a new instance each time means `loadResource` lands
     /// on a different object than `probeResource` did, and the volume the
     /// kernel is given is not the one holding the mount.
-    private static let shared = Ext4FileSystem()
+    private static let shared: Ext4FileSystem = {
+        // Route the C core's diagnostics into os_log before anything mounts.
+        _ = Ext4Log.installBridgeLogger
+        return Ext4FileSystem()
+    }()
 
     var fileSystem: Ext4FileSystem { Self.shared }
 }

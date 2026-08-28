@@ -302,7 +302,6 @@ The knobs, following the existing `EXT4DUMP_*` idiom:
 | `EXT4DUMP_REORDER_SEED` | permutation used for eviction and for the crash |
 | `EXT4DUMP_REORDER_DROP` | percentage of the pending queue lost at the cut |
 | `EXT4DUMP_IGNORE_BARRIERS` | a drive that reports a cache flush and does not perform one |
-| `EXT4B_NO_JOURNAL_BARRIER` | suppress only the commit-block barriers, reproducing the driver before patch 0014 |
 
 One trap, since it invalidated a whole run before anyone noticed: counting the
 workload's writes must be done against a *copy* of the fixture. Run against the

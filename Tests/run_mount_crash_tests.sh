@@ -97,6 +97,10 @@ if ! pluginkit -m -p com.apple.fskit.fsmodule 2>/dev/null | grep -q "$BUNDLE_ID"
   # as success is how a suite quietly stops testing anything.
   exit 77
 fi
+
+# Refuse-to-lie guard: are we measuring the build in this tree, or a stale
+# install? Warns by default; EXT4_REQUIRE_FRESH=1 makes staleness fatal.
+bash "$ROOT/scripts/check_install_freshness.sh" || exit 1
 docker info >/dev/null 2>&1 || { echo "docker is not running; cannot replay journals"; exit 1; }
 command -v mke2fs >/dev/null || { echo "mke2fs not found; brew install e2fsprogs"; exit 1; }
 mount | grep -q "$(basename "$MNT") " && { echo "$MNT is already mounted"; exit 1; }

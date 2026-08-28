@@ -5,6 +5,7 @@
 
 import Foundation
 import os
+import Ext4Core
 
 /// Unified logging for the extension.
 ///
@@ -23,4 +24,22 @@ enum Ext4Log {
     static func error(_ message: String) { core.error("\(message, privacy: .public)") }
     static func info(_ message: String)  { core.info("\(message, privacy: .public)") }
     static func debug(_ message: String) { core.debug("\(message, privacy: .public)") }
+
+    /// Route the C core's diagnostics into os_log. The bridge calls
+    /// `ext4b_set_logger` nowhere on its own, so until this runs every
+    /// `bridge_log` -- "journal recovery failed; refusing read-write mount",
+    /// "could not start journal", the orphan-cleanup failures -- is written to
+    /// a logger that was never installed and vanishes. Idempotent, install
+    /// once at startup. Levels: the core uses >= 3 for errors, less for info.
+    static let installBridgeLogger: Void = {
+        ext4b_set_logger({ _, level, msg in
+            guard let msg else { return }
+            let text = String(cString: msg)
+            if level >= 3 {
+                Ext4Log.core.error("core: \(text, privacy: .public)")
+            } else {
+                Ext4Log.core.info("core: \(text, privacy: .public)")
+            }
+        }, nil)
+    }()
 }

@@ -1,0 +1,41 @@
+Route a failed assertion through a host handler, not printf
+
+CONFIG_DEBUG_ASSERT ships enabled, so patch 0007's handler is what runs on a
+broken invariant -- and it printed to stdout before aborting. A sandboxed
+FSKit extension has no stdout anyone can read, so the one message that says
+*why* the driver just aborted was written where it could never be seen.
+
+Point ext4_assert_failed at an extern ext4b_assert_fail() the shim provides.
+The shim logs through the bridge logger (os_log in the appex, stderr in the
+tool) and then abort()s. The decision to abort is unchanged and deliberate: a
+filesystem that keeps running past a failed invariant writes corruption with
+authority, so fail-stop is correct; this only fixes where the reason is
+reported. Every binary linking the core defines the handler.
+
+diff --git a/include/ext4_debug.h b/include/ext4_debug.h
+--- a/include/ext4_debug.h
++++ b/include/ext4_debug.h
+@@ -176,14 +176,20 @@
+  * Ending the process instead tears the mount down, gives callers EIO, and
+  * leaves a crash report naming the invariant that broke.
+  *
++ * The message goes through a host-provided handler rather than printf: a
++ * sandboxed FSKit extension has no stdout anyone can read, so the reason for
++ * the abort was invisible exactly where it mattered most. ext4b_assert_fail
++ * (defined by the shim) routes it to os_log and then abort()s -- still
++ * fail-stop, now with a record. It does not return.
++ *
+  * This lives in a function rather than in the macro body because ext4_journal.c
+  * has parameters named `abort`, which shadow the libc function at the point of
+  * expansion. */
++void ext4b_assert_fail(const char *file, int line);
++
+ static inline void ext4_assert_failed(const char *file, int line)
+ {
+-	printf("assertion failed:\nfile: %s\nline: %d\n", file, line);
+-	fflush(stdout);
+-	abort();
++	ext4b_assert_fail(file, line);
+ }
+ 
+ #define ext4_assert(_v)                                                        \

@@ -161,6 +161,22 @@ for img in ext4_4k ext4_1k ext3_4k ext2_4k; do
   fi
 done
 
+# ------------------------------------------------- 4096-byte device blocks --
+echo
+echo "4096-byte device blocks"
+
+# The appex passes the device's real sector size -- commonly 4096, never 512.
+# Same fixture, same answers, different byte-offset arithmetic underneath;
+# this is the production geometry, so reading it wrong would be reading every
+# 4Kn disk wrong.
+ls512=$("$DUMP" "$FIX/ext4_4k.img" ls /docs 2>/dev/null)
+ls4k=$(EXT4DUMP_DEVICE_BSIZE=4096 "$DUMP" "$FIX/ext4_4k.img" ls /docs 2>/dev/null)
+expect_eq "directory listing identical at 512 and 4096 device blocks" "$ls512" "$ls4k"
+
+sum512=$("$DUMP" "$FIX/ext4_4k.img" cat /docs/medium.bin 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
+sum4k=$(EXT4DUMP_DEVICE_BSIZE=4096 "$DUMP" "$FIX/ext4_4k.img" cat /docs/medium.bin 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
+expect_eq "file content identical at 512 and 4096 device blocks" "$sum512" "$sum4k"
+
 # ---------------------------------------------------------------- report --
 echo
 echo "─────────────────────────────────"

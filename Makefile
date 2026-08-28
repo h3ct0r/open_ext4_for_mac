@@ -53,17 +53,32 @@ SHIM_CFLAGS   := $(CFLAGS) -Wextra -Wno-unused-parameter
 
 TARGET_FLAG := -target arm64-apple-macos$(DEPLOY_TARGET)
 
+# Objects and libraries carry the CONFIG in their path. Two reasons:
+#
+#  * A debug/ASan object must never silently link into a release appex. When
+#    objects all landed in build/obj/, `make tools CONFIG=debug` then `make
+#    app` linked the -O0 instrumented core into the shipping extension,
+#    because make saw the objects as up to date.
+#  * Only the *shim* differs between the shipping and test builds: lwext4,
+#    crypto and argon2 objects are profile-independent, so they are compiled
+#    once per config and shared by both libraries. The shim is compiled twice
+#    -- plain for shipping, and with EXT4B_TEST_HOOKS for the tools, which is
+#    how the orphan-inspection hooks (and any getenv) stay out of the appex's
+#    symbol set entirely.
+OBJ := $(BUILD)/obj/$(CONFIG)
+
 LWEXT4_SRCS := $(wildcard $(LWEXT4_DIR)/src/*.c)
-LWEXT4_OBJS := $(patsubst $(LWEXT4_DIR)/src/%.c,$(BUILD)/obj/lwext4/%.o,$(LWEXT4_SRCS))
-SHIM_OBJS   := $(BUILD)/obj/shim/ext4_bridge.o \
-               $(BUILD)/obj/shim/device_barrier.o \
-               $(BUILD)/obj/shim/ext4_check.o
+LWEXT4_OBJS := $(patsubst $(LWEXT4_DIR)/src/%.c,$(OBJ)/lwext4/%.o,$(LWEXT4_SRCS))
+
+SHIM_NAMES     := ext4_bridge device_barrier ext4_check
+SHIM_OBJS      := $(patsubst %,$(OBJ)/shim/%.o,$(SHIM_NAMES))
+SHIM_TEST_OBJS := $(patsubst %,$(OBJ)/shim-test/%.o,$(SHIM_NAMES))
 
 # Block-level decryption, for ext4 inside a LUKS container. It sits below the
 # filesystem, decorating the same read/write/flush callbacks ext4b_device_create
 # already takes, so lwext4 never learns that anything is encrypted.
 CRYPTO_SRCS := $(wildcard $(CRYPTO_DIR)/*.c)
-CRYPTO_OBJS := $(patsubst $(CRYPTO_DIR)/%.c,$(BUILD)/obj/crypto/%.o,$(CRYPTO_SRCS))
+CRYPTO_OBJS := $(patsubst $(CRYPTO_DIR)/%.c,$(OBJ)/crypto/%.o,$(CRYPTO_SRCS))
 
 # Argon2, vendored unmodified for LUKS2 key derivation; see
 # Core/crypto/argon2/README.md. Third-party, so its warnings are silenced the
@@ -72,12 +87,15 @@ ARGON2_DIR  := $(CRYPTO_DIR)/argon2
 ARGON2_SRCS := $(ARGON2_DIR)/argon2.c $(ARGON2_DIR)/core.c $(ARGON2_DIR)/ref.c \
                $(ARGON2_DIR)/thread.c $(ARGON2_DIR)/encoding.c \
                $(ARGON2_DIR)/blake2/blake2b.c
-ARGON2_OBJS := $(patsubst $(CRYPTO_DIR)/%.c,$(BUILD)/obj/crypto/%.o,$(ARGON2_SRCS))
+ARGON2_OBJS := $(patsubst $(CRYPTO_DIR)/%.c,$(OBJ)/crypto/%.o,$(ARGON2_SRCS))
 ARGON2_CFLAGS := $(CFLAGS) -Wno-everything -I$(ARGON2_DIR)
 
-CORE_LIB := $(BUILD)/lib/libext4core.a
+# The shipping library (shim built plain) and the test library (shim built
+# with EXT4B_TEST_HOOKS). lwext4/crypto/argon2 objects are shared.
+CORE_LIB      := $(BUILD)/lib/$(CONFIG)/libext4core.a
+CORE_TEST_LIB := $(BUILD)/lib/$(CONFIG)/libext4core-test.a
 
-.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-crypto test-orphan test-luks test-mount-crash test-mount-luks test-kill-recovery check-extension check-signing validate tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil
+.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-reorder test-crypto test-orphan test-luks test-mount-crash test-mount-luks test-kill-recovery check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil helper install-barrier uninstall-barrier preflight prepare-device
 
 all: app
 
@@ -107,9 +125,12 @@ PATCH_STAMP := $(BUILD)/.lwext4-patched
 $(PATCH_STAMP): $(PATCHES) | check-submodule
 	@mkdir -p $(dir $@)
 	@if bash scripts/check_patches.sh >/dev/null 2>&1; then touch $@; exit 0; fi; \
+	failed=""; \
 	for p in $(PATCHES); do \
 	  if git -C $(LWEXT4_DIR) apply "$(CURDIR)/$$p" 2>/dev/null; then \
 	    echo "applied $$p"; \
+	  else \
+	    failed="$$failed $$p"; \
 	  fi; \
 	done; \
 	if bash scripts/check_patches.sh >/dev/null 2>&1; then :; \
@@ -117,6 +138,10 @@ $(PATCH_STAMP): $(PATCHES) | check-submodule
 	  echo "note: working tree does not match the patch set (ALLOW_UNAPPLIED_PATCHES)"; \
 	else \
 	  bash scripts/check_patches.sh; \
+	  if [ -n "$$failed" ]; then \
+	    echo "  patches that did not apply cleanly (already present, or in conflict):"; \
+	    for p in $$failed; do echo "    $$p"; done; \
+	  fi; \
 	  echo "  Set ALLOW_UNAPPLIED_PATCHES=1 while developing a patch, or run"; \
 	  echo "  'make repatch' to reset the submodule to pinned-plus-patches."; \
 	  exit 1; \
@@ -186,6 +211,7 @@ unpatch:
 	@for p in $(PATCHES); do \
 	  git -C $(LWEXT4_DIR) apply --reverse "$(CURDIR)/$$p" 2>/dev/null && echo "reverted $$p" || true; \
 	done
+	@rm -f $(PATCH_STAMP)
 
 # The header dependency is not decoration. A struct in ext4_journal.h grew a
 # field during development; only ext4_journal.o was rebuilt, every other
@@ -194,23 +220,35 @@ unpatch:
 # untouched images as a clean pass.
 LWEXT4_HEADERS := $(wildcard $(LWEXT4_DIR)/include/*.h $(LWEXT4_DIR)/include/misc/*.h)
 
-$(BUILD)/obj/lwext4/%.o: $(LWEXT4_DIR)/src/%.c $(LWEXT4_HEADERS) $(PATCH_STAMP)
+$(OBJ)/lwext4/%.o: $(LWEXT4_DIR)/src/%.c $(LWEXT4_HEADERS) $(PATCH_STAMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(LWEXT4_CFLAGS) -c $< -o $@
 
-$(BUILD)/obj/shim/%.o: $(SHIM_DIR)/%.c $(SHIM_DIR)/ext4_bridge.h $(LWEXT4_HEADERS) $(PATCH_STAMP)
+# Shipping shim: no test hooks, no getenv.
+$(OBJ)/shim/%.o: $(SHIM_DIR)/%.c $(SHIM_DIR)/ext4_bridge.h $(LWEXT4_HEADERS) $(PATCH_STAMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(SHIM_CFLAGS) -c $< -o $@
 
-$(BUILD)/obj/crypto/argon2/%.o: $(ARGON2_DIR)/%.c
+# Test shim: EXT4B_TEST_HOOKS exposes the orphan-inspection API the suites use.
+$(OBJ)/shim-test/%.o: $(SHIM_DIR)/%.c $(SHIM_DIR)/ext4_bridge.h $(LWEXT4_HEADERS) $(PATCH_STAMP)
+	@mkdir -p $(dir $@)
+	$(CC) $(TARGET_FLAG) $(SHIM_CFLAGS) -DEXT4B_TEST_HOOKS=1 -c $< -o $@
+
+$(OBJ)/crypto/argon2/%.o: $(ARGON2_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(ARGON2_CFLAGS) -c $< -o $@
 
-$(BUILD)/obj/crypto/%.o: $(CRYPTO_DIR)/%.c
+$(OBJ)/crypto/%.o: $(CRYPTO_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(SHIM_CFLAGS) -I$(ARGON2_DIR) -c $< -o $@
 
 $(CORE_LIB): $(LWEXT4_OBJS) $(SHIM_OBJS) $(CRYPTO_OBJS) $(ARGON2_OBJS)
+	@mkdir -p $(dir $@)
+	@rm -f $@
+	ar rcs $@ $^
+	@echo "built $@"
+
+$(CORE_TEST_LIB): $(LWEXT4_OBJS) $(SHIM_TEST_OBJS) $(CRYPTO_OBJS) $(ARGON2_OBJS)
 	@mkdir -p $(dir $@)
 	@rm -f $@
 	ar rcs $@ $^
@@ -223,16 +261,19 @@ tools: verify-patches $(BUILD)/bin/ext4dump $(BUILD)/bin/cryptotest
 
 # Known-answer tests for the crypto primitives, against vectors generated by
 # OpenSSL rather than transcribed by hand. See Tests/gen_xts_vectors.sh.
-$(BUILD)/bin/cryptotest: tools/cryptotest.c $(CORE_LIB)
+$(BUILD)/bin/cryptotest: tools/cryptotest.c $(CORE_TEST_LIB)
 	@mkdir -p $(dir $@)
-	$(CC) $(TARGET_FLAG) $(CFLAGS) $< $(CORE_LIB) -o $@
+	$(CC) $(TARGET_FLAG) $(CFLAGS) $< $(CORE_TEST_LIB) -o $@
 
 test-crypto: $(BUILD)/bin/cryptotest
 	@$(BUILD)/bin/cryptotest
 
-$(BUILD)/bin/ext4dump: tools/ext4dump.c $(CORE_LIB)
+# The tool is compiled with EXT4B_TEST_HOOKS so the header exposes the
+# orphan-inspection declarations it calls, and links the test library that
+# actually defines them.
+$(BUILD)/bin/ext4dump: tools/ext4dump.c $(CORE_TEST_LIB)
 	@mkdir -p $(dir $@)
-	$(CC) $(TARGET_FLAG) $(CFLAGS) $< $(CORE_LIB) -o $@
+	$(CC) $(TARGET_FLAG) $(CFLAGS) -DEXT4B_TEST_HOOKS=1 $< $(CORE_TEST_LIB) -o $@
 
 test: tools
 	@bash Tests/run_tests.sh
@@ -263,6 +304,14 @@ test-prealloc: tools
 # The live formatter: needs the extension installed and enabled.
 test-newfs:
 	@bash Tests/run_newfs_tests.sh
+
+# Every revoke block in the journal, entry by entry. Offline, seconds.
+test-revoke: tools
+	@bash Tests/run_revoke_tests.sh
+
+# Bounds, overflow, and POSIX-semantics checks. Offline, seconds.
+test-bounds: tools
+	@bash Tests/run_bounds_tests.sh
 
 # ext4 inside a LUKS container. Fixtures come from real cryptsetup, and what we
 # write is handed back to cryptsetup and the Linux kernel to read -- a
@@ -373,6 +422,12 @@ typecheck: core
 extension: $(APPEX)
 
 $(APPEX): $(SWIFT_SRCS) $(CORE_LIB) Extension/Info.plist
+	@if [ "$(CONFIG)" = "debug" ] && [ -z "$(ALLOW_DEBUG_APPEX)" ]; then \
+	  echo "refusing to build the appex against a debug/ASan core."; \
+	  echo "the shipping extension must be a release build; set"; \
+	  echo "ALLOW_DEBUG_APPEX=1 only if you really mean to."; \
+	  exit 1; \
+	fi
 	@rm -rf "$(APPEX)"
 	@mkdir -p "$(APPEX)/Contents/MacOS"
 	swiftc $(SWIFT_SRCS) $(SWIFTFLAGS) $(CORE_LIB) \
@@ -454,7 +509,12 @@ TEAM_ID ?= $(shell security cms -D -i Extension/Ext4FS.provisionprofile 2>/dev/n
 # codesign reports errSecInternalComponent from a cluttered login keychain.
 SIGN_KEYCHAIN ?=
 
-sign: app entitlements
+# Asserts the shipping core carries no getenv, no test-only exports, and none
+# of the removed env-var names -- built once, then it is what gets signed.
+check-ship-surface: $(CORE_LIB) $(CORE_TEST_LIB)
+	@bash scripts/check_ship_surface.sh
+
+sign: app entitlements check-ship-surface
 	@SIGN_KEYCHAIN="$(SIGN_KEYCHAIN)" bash scripts/sign.sh "$(BUILD)/$(APP_NAME).app" "$(SIGN_ID)"
 
 # Expand the entitlements template with the team ID from the profile.

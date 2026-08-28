@@ -70,7 +70,30 @@ int ext4b_probe_disk_ioctl(int fd, uint32_t *block_size)
 
 int ext4b_barrier_fd(int fd)
 {
-    return ext4b_barrier_fd_verbose(fd, NULL);
+    if (fd < 0)
+        return EBADF;
+
+    /*
+     * The hot path -- this runs on every journal commit. Stop at the first
+     * call that succeeds instead of issuing all three: a real barrier
+     * (DKIOCSYNCHRONIZE) is sufficient on its own, and the two fallbacks
+     * (a full cache flush, then F_FULLFSYNC) exist only for media that refuse
+     * it. Doing all three unconditionally tripled the dominant cost of a
+     * commit. The verbose variant still runs the full set, for diagnosis.
+     */
+    dk_synchronize_t sync;
+    memset(&sync, 0, sizeof sync);
+    sync.options = DK_SYNCHRONIZE_OPTION_BARRIER;
+    if (ioctl(fd, DKIOCSYNCHRONIZE, &sync) == 0)
+        return 0;
+
+    if (ioctl(fd, DKIOCSYNCHRONIZECACHE) == 0)
+        return 0;
+
+    if (fcntl(fd, F_FULLFSYNC) == 0)
+        return 0;
+
+    return errno ? errno : EIO;
 }
 
 /* The same three calls, reporting what each one said.
@@ -93,14 +116,16 @@ int ext4b_barrier_fd_verbose(int fd, ext4b_barrier_report *out)
         return EBADF;
     }
 
+    /* errno ? errno : EIO on each: a failed ioctl that happens to leave errno
+     * at 0 must not be recorded as a success. */
     dk_synchronize_t sync;
     memset(&sync, 0, sizeof sync);
     sync.options = DK_SYNCHRONIZE_OPTION_BARRIER;
-    r.sync_barrier = ioctl(fd, DKIOCSYNCHRONIZE, &sync) == 0 ? 0 : errno;
+    r.sync_barrier = ioctl(fd, DKIOCSYNCHRONIZE, &sync) == 0 ? 0 : (errno ? errno : EIO);
 
-    r.sync_cache = ioctl(fd, DKIOCSYNCHRONIZECACHE) == 0 ? 0 : errno;
+    r.sync_cache = ioctl(fd, DKIOCSYNCHRONIZECACHE) == 0 ? 0 : (errno ? errno : EIO);
 
-    r.fullfsync = fcntl(fd, F_FULLFSYNC) == 0 ? 0 : errno;
+    r.fullfsync = fcntl(fd, F_FULLFSYNC) == 0 ? 0 : (errno ? errno : EIO);
 
     if (out) *out = r;
 

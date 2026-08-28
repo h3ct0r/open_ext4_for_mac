@@ -26,6 +26,10 @@ set -uo pipefail
 export PATH="/opt/homebrew/opt/e2fsprogs/sbin:/opt/homebrew/opt/e2fsprogs/bin:$PATH"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Refuse-to-lie guard: are we measuring the build in this tree, or a stale
+# install? Warns by default; EXT4_REQUIRE_FRESH=1 makes staleness fatal.
+bash "$ROOT/scripts/check_install_freshness.sh" || exit 1
 WORK="$ROOT/build/kill-recovery"
 REPORT="$ROOT/build/kill-recovery-report.txt"
 MNT="$WORK/mnt"

@@ -33,6 +33,10 @@ if ! pluginkit -m -p com.apple.fskit.fsmodule 2>/dev/null | grep -q "$BUNDLE_ID"
   exit 1
 fi
 
+# Refuse-to-lie guard: are we measuring the build in this tree, or a stale
+# install? Warns by default; EXT4_REQUIRE_FRESH=1 makes staleness fatal.
+bash "$ROOT/scripts/check_install_freshness.sh" || exit 1
+
 rm -rf "$WORK"; mkdir -p "$WORK" "$MNT"
 
 echo "########## NEWFS THROUGH FSKIT ##########"

@@ -466,6 +466,42 @@ else
       "$(grep -iE 'checksum' <<<"$seed_fsck" | head -3)"
 fi
 
+# ============================================== 4096-byte device blocks ======
+# Format, write, and verify with the device presented in 4096-byte blocks --
+# the geometry the appex actually sees on modern media. Exercises the block
+# callbacks' offset arithmetic and ext4b_format's device-vs-filesystem block
+# size gate, which are invisible at the tool's default 512.
+echo
+echo "4096-byte device blocks"
+
+bs4k_img="$TMP/bs4k.img"
+dd if=/dev/zero of="$bs4k_img" bs=1m count=64 2>/dev/null
+export EXT4DUMP_DEVICE_BSIZE=4096
+if "$DUMP" "$bs4k_img" format 4 4096 BS4K >/dev/null 2>&1; then
+  ok "format succeeds on a 4096-byte-block device"
+else
+  bad "format succeeds on a 4096-byte-block device"
+fi
+"$DUMP" "$bs4k_img" mkdir /d >/dev/null 2>&1
+"$DUMP" "$bs4k_img" create /d/f.txt >/dev/null 2>&1
+"$DUMP" "$bs4k_img" write /d/f.txt "four-k native" >/dev/null 2>&1
+got=$("$DUMP" "$bs4k_img" cat /d/f.txt 2>/dev/null)
+expect_eq "write and read back on 4096-byte device blocks" "four-k native" "$got"
+# A filesystem block smaller than the device block cannot exist; the format
+# must refuse rather than build a volume it could never address.
+if "$DUMP" "$bs4k_img" format 4 1024 TOO_SMALL >/dev/null 2>&1; then
+  bad "1024-byte fs blocks on a 4096-byte device are refused"
+else
+  ok "1024-byte fs blocks on a 4096-byte device are refused"
+fi
+unset EXT4DUMP_DEVICE_BSIZE
+if e2fsck -fn "$bs4k_img" >/dev/null 2>&1; then
+  FSCK_RUNS=$((FSCK_RUNS+1))
+  ok "e2fsck accepts the 4Kn-built volume"
+else
+  bad "e2fsck accepts the 4Kn-built volume"
+fi
+
 # ==================================================================== report ==
 echo
 echo "─────────────────────────────────"

@@ -80,6 +80,13 @@ ext4b_device *ext4b_device_create(void *ctx,
 
 void ext4b_device_destroy(ext4b_device *dev);
 
+/// How many mutations may share one journal transaction (default 16; clamped
+/// to [1, 1024]). A performance tunable -- batching is ~11x on small-file
+/// work -- and the interface the test suites use to force batch=1, the
+/// pre-batching behaviour their crash oracles compare against. The shipping
+/// core reads no environment; callers that want a non-default batch call this.
+void ext4b_set_txn_batch(ext4b_device *dev, uint32_t batch);
+
 /* ------------------------------------------------------------------ probe -- */
 
 /* Feature-support verdict for a candidate volume. */
@@ -437,15 +444,29 @@ int ext4b_orphan_cleanup(ext4b_device *dev,
                          uint32_t *out_freed,
                          uint32_t *out_dropped);
 
+/// Where a failed lwext4 assertion is reported (patch 0026 routes ext4_assert
+/// here). Does not return; it abort()s after logging through the bridge
+/// logger. Defined by the shim; every binary linking the core provides it.
+void ext4b_assert_fail(const char *file, int line);
+
+#ifdef EXT4B_TEST_HOOKS
+/// Deliberately trip an lwext4 assertion. Test builds only.
+void ext4b_trip_assert(void);
+
 /// Turn the automatic mount-time orphan cleanup off. For tests that need to
 /// look at what an interrupted session actually left on the medium, which an
 /// ordinary read-write mount would have tidied away before they could see it.
 /// On by default; must be called before ext4b_mount().
+///
+/// Test-only: compiled out unless EXT4B_TEST_HOOKS is defined, so it is absent
+/// from the shipping appex's symbol set (it disables recovery on a live mount).
 void ext4b_set_orphan_cleanup(ext4b_device *dev, bool enabled);
 
 /// The head of the orphan list, or 0 when nothing is on it. For tests: a
 /// deferred delete must show up here, and a clean unmount must leave it empty.
+/// Test-only; see the note on ext4b_set_orphan_cleanup.
 int ext4b_orphan_head(ext4b_device *dev, uint32_t *out_head);
+#endif /* EXT4B_TEST_HOOKS */
 
 /// Move/rename an entry, optionally between directories. If a plain file
 /// already exists at the destination it is replaced.
