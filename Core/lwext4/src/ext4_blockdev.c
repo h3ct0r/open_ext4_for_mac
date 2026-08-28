@@ -233,13 +233,15 @@ int ext4_block_get_noread(struct ext4_blockdev *bdev, struct ext4_block *b,
 		return ENXIO;
 
 	/* Block 0 is ext4's hole marker: ext4_fs_get_inode_dblk_idx() returns
-	 * it for a logical block that has no physical block behind it, and no
-	 * real metadata ever lives there. Fetching it anyway caches a buffer
-	 * with lb_id == 0, which then trips the ext4_assert(b->lb_id) in
-	 * ext4_bcache_free() on release -- so a directory with a hole in it,
-	 * or an inode whose blocks have been freed underneath a stale lookup,
-	 * takes the whole driver down instead of returning an error.
-	 * Refusing here turns every one of those into a clean failure. */
+	 * it for a logical block that has no physical block behind it. The
+	 * directory and extent code pass that result straight into this
+	 * function, and a fetched "hole" is a stale or freed mapping being
+	 * followed -- so refusing here turns each of those into a clean
+	 * failure instead of handing garbage to a caller that trusted its
+	 * mapping. Block 0 is also a real block: on volumes with blocks
+	 * larger than 1 KiB it carries the superblock, and the one legitimate
+	 * way to fetch it is ext4_block_get_sb() below, which no mapping
+	 * lookup can reach. */
 	if (lba == 0)
 		return ENXIO;
 
@@ -282,6 +284,49 @@ int ext4_block_get(struct ext4_blockdev *bdev, struct ext4_block *b,
 
 	/* Mark buffer up-to-date, since
 	 * fresh data is read from physical device just now. */
+	ext4_bcache_set_flag(b->buf, BC_UPTODATE);
+	return EOK;
+}
+
+int ext4_block_get_sb(struct ext4_blockdev *bdev, struct ext4_block *b)
+{
+	bool is_new;
+	int r;
+	/* Byte 1024: inside block 0 for 2 KiB and larger blocks, exactly
+	 * block 1 for 1 KiB blocks. */
+	uint64_t lba = (bdev->lg_bsize > EXT4_SUPERBLOCK_OFFSET) ? 0 : 1;
+
+	/* The deliberate door past the hole refusal in
+	 * ext4_block_get_noread(): the superblock's home is a real block, and
+	 * journaling superblock updates requires it in the cache. The lba is
+	 * computed here rather than accepted, so no mapping lookup can arrive
+	 * with a hole and end up in this path. */
+	ext4_assert(bdev && b);
+	if (!bdev->bdif->ph_refctr)
+		return EIO;
+	if (!(lba < bdev->lg_bcnt))
+		return ENXIO;
+
+	b->lb_id = lba;
+	r = ext4_block_cache_shake(bdev);
+	if (r != EOK)
+		return r;
+	r = ext4_bcache_alloc(bdev->bc, b, &is_new);
+	if (r != EOK)
+		return r;
+	if (!b->data)
+		return ENOMEM;
+
+	if (ext4_bcache_test_flag(b->buf, BC_UPTODATE))
+		return EOK;
+
+	r = ext4_blocks_get_direct(bdev, b->data, lba, 1);
+	if (r != EOK) {
+		ext4_bcache_free(bdev->bc, b);
+		b->lb_id = 0;
+		return r;
+	}
+
 	ext4_bcache_set_flag(b->buf, BC_UPTODATE);
 	return EOK;
 }

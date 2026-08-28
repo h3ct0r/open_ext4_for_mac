@@ -273,10 +273,11 @@ int ext4_bcache_free(struct ext4_bcache *bc, struct ext4_block *b)
 
 	ext4_assert(bc && b);
 
-	/*Check if valid.*/
-	ext4_assert(b->lb_id);
-
-	/*Block should have a valid pointer to ext4_buf.*/
+	/* An empty handle has no buffer; that is the validity test. lb_id was
+	 * asserted non-zero here too, which conflated "unset handle" with
+	 * "holds block 0" -- and block 0 is a real, cacheable block: it
+	 * carries the superblock on every volume with blocks larger than
+	 * 1 KiB, and journaling the superblock requires it in the cache. */
 	ext4_assert(buf);
 
 	/*Check if someone don't try free unreferenced block cache.*/

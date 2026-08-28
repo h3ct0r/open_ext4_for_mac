@@ -194,6 +194,14 @@ int ext4_block_flush_buf(struct ext4_blockdev *bdev, struct ext4_buf *buf);
  *          a caller that cannot have one is not failing.*/
 int ext4_block_barrier(struct ext4_blockdev *bdev);
 
+/**@brief   Get the block holding the filesystem superblock, through the
+ *          cache. The only sanctioned way to fetch block 0, which
+ *          ext4_block_get_noread() otherwise refuses as ext4's hole marker.
+ * @param   bdev block device
+ * @param   b block descriptor
+ * @return  standard error code*/
+int ext4_block_get_sb(struct ext4_blockdev *bdev, struct ext4_block *b);
+
 /**@brief   Flush data in buffer of given lba to disk,
  *          if that buffer exists in block cache.
  * @param   bdev block device descriptor
