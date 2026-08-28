@@ -1,0 +1,317 @@
+Subject: unwritten extents gain a writer
+
+The machinery for unwritten extents was almost all here, and almost all
+unreachable. Reads treated them as holes; ext4_extent_get_blocks converted
+them in place on write, zeroing what the write does not cover and splitting
+in all three geometries; truncate masked the state bit out of every length.
+What did not exist was a way to create one -- so none of it ever ran, and
+preallocation (fallocate's whole point: blocks without content, zeros
+without writing them) was unimplementable.
+
+ext4_extent_preallocate() is the missing origin: back a logical range with
+extents marked unwritten, skipping ranges already backed by either state.
+ext4_extent_probe() is its witness -- it reports what backs a block and
+whether the extent is unwritten, a question the mapping API cannot answer
+because it folds unwritten and hole into the same zero.
+
+Three latent defects had to be fixed for the dormant machinery to be safe
+to wake, and each was the kind that corrupts silently:
+
+  * the merge predicates tested only adjacency, so a written extent could
+    merge into an unwritten neighbour and inherit its state -- data
+    reinterpreted as zeros, or preallocated garbage exposed as data. They
+    now require equal state, as Linux's do.
+  * ext4_ext_zero_unwritten_range left its zeroed blocks dirty in the block
+    cache while file data is written directly to the device; a later cache
+    flush would have replaced the data with the zeros. It zeroes on the
+    medium and invalidates any cached copy instead -- and stops routing
+    file-data blocks into the journal on the way.
+  * ext4_fs_truncate_inode decided by size alone, so truncate(0) of a
+    zero-length preallocated file was a no-op -- and every unlink truncates
+    to 0 first, so preallocated blocks leaked on delete. The sweep now runs
+    whenever blocks exist past the target, not only when the size shrinks.
+
+Allocation is block-at-a-time, coalesced by the (fixed) merge; a run
+allocator in ext4_balloc is the known follow-up -- 256 MB preallocates in
+about a second, which is usable and not proud.
+
+Verified by Tests/run_prealloc_tests.sh: unwritten extents confirmed by
+debugfs's own [u] markers, reads return zeros over deliberately marker-
+filled reused blocks, first-write conversion keeps the data and zeros the
+rest, truncate and unlink leak nothing, e2fsck clean throughout, and every
+crash cut of the whole lifecycle recovers through Linux-kernel replay.
+--- a/src/ext4_extent.c
++++ b/src/ext4_extent.c
+@@ -1193,6 +1193,14 @@
+ static inline bool ext4_ext_can_prepend(struct ext4_extent *ex1,
+ 					struct ext4_extent *ex2)
+ {
++	/* Merging a written extent into an unwritten one (or the reverse)
++	 * would hand the merged run whichever state ex1 happens to carry --
++	 * data silently reinterpreted as zeros, or preallocated garbage
++	 * exposed as data. Adjacency was the only test here until unwritten
++	 * extents gained a writer. */
++	if (ext4_ext_is_unwritten(ex1) != ext4_ext_is_unwritten(ex2))
++		return 0;
++
+ 	if (ext4_ext_pblock(ex2) + ext4_ext_get_actual_len(ex2) !=
+ 	    ext4_ext_pblock(ex1))
+ 		return 0;
+@@ -1221,6 +1229,10 @@
+ static inline bool ext4_ext_can_append(struct ext4_extent *ex1,
+ 				       struct ext4_extent *ex2)
+ {
++	/* Same state test as can_prepend, same reason. */
++	if (ext4_ext_is_unwritten(ex1) != ext4_ext_is_unwritten(ex2))
++		return 0;
++
+ 	if (ext4_ext_pblock(ex1) + ext4_ext_get_actual_len(ex1) !=
+ 	    ext4_ext_pblock(ex2))
+ 		return 0;
+@@ -1968,19 +1980,28 @@
+ 	int err = EOK;
+ 	uint32_t i;
+ 	uint32_t block_size = ext4_sb_get_block_size(&inode_ref->fs->sb);
+-	for (i = 0; i < blocks_count; i++) {
+-		struct ext4_block bh = EXT4_BLOCK_ZERO();
+-		err = ext4_trans_block_get_noread(inode_ref->fs->bdev, &bh,
+-						  block + i);
+-		if (err != EOK)
+-			break;
++	void *zeros = ext4_calloc(1, block_size);
++	if (!zeros)
++		return ENOMEM;
+ 
+-		memset(bh.data, 0, block_size);
+-		ext4_trans_set_block_dirty(bh.buf);
+-		err = ext4_block_set(inode_ref->fs->bdev, &bh);
++	/* Straight to the medium, not through the cache -- for coherence, not
++	 * speed. The file write this conversion serves also writes its data
++	 * directly (ext4_block_writebytes); the old version left the zeroed
++	 * blocks dirty in the block cache, where a later cache flush would
++	 * have written them out AFTER the caller's data and replaced it with
++	 * zeros. Zeroing on the medium first and dropping any cached copy
++	 * gives the caller a clean base its direct write can land on. It also
++	 * keeps data blocks out of the journal, where the transaction-dirty
++	 * path would have put them. */
++	for (i = 0; i < blocks_count; i++) {
++		err = ext4_blocks_set_direct(inode_ref->fs->bdev, zeros,
++					     block + i, 1);
+ 		if (err != EOK)
+ 			break;
+ 	}
++	ext4_bcache_invalidate_lba(inode_ref->fs->bdev->bc, block,
++				   blocks_count);
++	ext4_free(zeros);
+ 	return err;
+ }
+ 
+@@ -2136,4 +2157,136 @@
+ 
+ 	return err;
+ }
++
++/* Preallocate: back [iblock, iblock+count) with UNWRITTEN extents.
++ *
++ * The one origin of unwritten extents in this tree. Everything downstream
++ * already existed, unreachable, before this: reads treat unwritten as a hole,
++ * ext4_extent_get_blocks converts in place on write -- zeroing what the write
++ * does not cover, splitting when it covers part of an extent -- truncate
++ * masks the state bit out of lengths, and the merge predicates now refuse to
++ * merge across the written/unwritten boundary.
++ *
++ * Allocation is block-at-a-time and relies on the merge in insert_leaf to
++ * coalesce runs; ranges already backed by an extent (either state) are
++ * skipped, so preallocating over existing data is harmless. *allocated
++ * reports only blocks newly allocated here.
++ */
++int ext4_extent_preallocate(struct ext4_inode_ref *inode_ref,
++			    ext4_lblk_t iblock, uint32_t count,
++			    uint32_t *allocated)
++{
++	int err = EOK;
++	uint32_t done = 0;
++
++	if (allocated)
++		*allocated = 0;
++
++	while (done < count) {
++		struct ext4_extent_path *path = NULL;
++		struct ext4_extent *ex;
++		struct ext4_extent newex;
++		ext4_lblk_t at = iblock + done;
++		int32_t depth;
++
++		err = ext4_find_extent(inode_ref, at, &path, 0);
++		if (err != EOK)
++			return err;
++
++		depth = ext_depth(inode_ref->inode);
++		ex = path[depth].extent;
++		if (ex) {
++			ext4_lblk_t ee_block = to_le32(ex->first_block);
++			uint16_t ee_len = ext4_ext_get_actual_len(ex);
++			if (IN_RANGE(at, ee_block, ee_len)) {
++				/* Already backed; skip to its end. */
++				done += ee_len - (at - ee_block);
++				goto next;
++			}
++		}
++
++		{
++			ext4_lblk_t gap_end =
++				ext4_ext_next_allocated_block(path);
++			ext4_fsblk_t goal =
++				ext4_ext_find_goal(inode_ref, path, at);
++			uint32_t want = 1;
++			ext4_fsblk_t block =
++				ext4_new_meta_blocks(inode_ref, goal, 0,
++						     &want, &err);
++			(void)gap_end;
++			if (!block)
++				goto fail;
++
++			newex.first_block = to_le32(at);
++			ext4_ext_store_pblock(&newex, block);
++			newex.block_count = to_le16(want);
++			ext4_ext_mark_unwritten(&newex);
++			err = ext4_ext_insert_extent(inode_ref, &path,
++						     &newex, 0);
++			if (err != EOK) {
++				ext4_ext_free_blocks(inode_ref, block, want,
++						     0);
++				goto fail;
++			}
++			done += want;
++			if (allocated)
++				*allocated += want;
++		}
++next:
++		ext4_ext_drop_refs(inode_ref, path, 0);
++		ext4_free(path);
++		continue;
++fail:
++		ext4_ext_drop_refs(inode_ref, path, 0);
++		ext4_free(path);
++		return err;
++	}
++	return EOK;
++}
++
++/* What backs one logical block: a physical block, a run length within its
++ * extent, and whether that extent is unwritten. fblock 0 with unwritten
++ * false is a genuine hole (run = the gap up to the next extent). A read-only
++ * question the mapping API cannot answer -- ext4_fs_get_inode_dblk_idx folds
++ * holes and unwritten extents into the same 0. */
++int ext4_extent_probe(struct ext4_inode_ref *inode_ref, ext4_lblk_t iblock,
++		      ext4_fsblk_t *fblock, uint32_t *run_len,
++		      bool *unwritten)
++{
++	struct ext4_extent_path *path = NULL;
++	struct ext4_extent *ex;
++	int32_t depth;
++	int err;
++
++	*fblock = 0;
++	*run_len = 0;
++	*unwritten = false;
++
++	err = ext4_find_extent(inode_ref, iblock, &path, 0);
++	if (err != EOK)
++		return err;
++
++	depth = ext_depth(inode_ref->inode);
++	ex = path[depth].extent;
++	if (ex) {
++		ext4_lblk_t ee_block = to_le32(ex->first_block);
++		uint16_t ee_len = ext4_ext_get_actual_len(ex);
++		if (IN_RANGE(iblock, ee_block, ee_len)) {
++			*fblock = ext4_ext_pblock(ex) + (iblock - ee_block);
++			*run_len = ee_len - (iblock - ee_block);
++			*unwritten = ext4_ext_is_unwritten(ex) != 0;
++			goto out;
++		}
++	}
++	{
++		ext4_lblk_t next = ext4_ext_next_allocated_block(path);
++		*run_len = (next == EXT_MAX_BLOCKS) ? 0 : (next - iblock);
++	}
++out:
++	ext4_ext_drop_refs(inode_ref, path, 0);
++	ext4_free(path);
++	return EOK;
++}
++
+ #endif
+--- a/include/ext4_extent.h
++++ b/include/ext4_extent.h
+@@ -60,6 +60,30 @@
+  * @param inode_ref   I-node to release blocks from
+  * @param iblock_from First logical block to release
+  * @return Error code */
++/**@brief   Back a logical range with UNWRITTEN extents: allocated, excluded
++ *          from reads (they see zeros), converted to written on first write.
++ *          Ranges already backed by any extent are skipped.
++ * @param   inode_ref inode
++ * @param   iblock first logical block
++ * @param   count logical block count
++ * @param   allocated out: blocks newly allocated (may be NULL)
++ * @return  standard error code*/
++int ext4_extent_preallocate(struct ext4_inode_ref *inode_ref,
++			    ext4_lblk_t iblock, uint32_t count,
++			    uint32_t *allocated);
++
++/**@brief   Report what backs one logical block, distinguishing a hole from
++ *          an unwritten extent -- which the mapping API folds together.
++ * @param   inode_ref inode
++ * @param   iblock logical block
++ * @param   fblock out: physical block, 0 for a hole
++ * @param   run_len out: blocks remaining in this extent (or gap; 0 = EOF gap)
++ * @param   unwritten out: the extent is unwritten
++ * @return  standard error code*/
++int ext4_extent_probe(struct ext4_inode_ref *inode_ref, ext4_lblk_t iblock,
++		      ext4_fsblk_t *fblock, uint32_t *run_len,
++		      bool *unwritten);
++
+ int ext4_extent_remove_space(struct ext4_inode_ref *inode_ref, ext4_lblk_t from,
+ 			     ext4_lblk_t to);
+ 
+--- a/src/ext4_fs.c
++++ b/src/ext4_fs.c
+@@ -1194,9 +1194,15 @@
+ 	if (!ext4_inode_can_truncate(sb, inode_ref->inode))
+ 		return EINVAL;
+ 
+-	/* If sizes are equal, nothing has to be done. */
++	/* If sizes are equal, nothing has to be done -- unless blocks live past
++	 * the size, which is exactly what preallocation leaves. i_size and
++	 * i_blocks are independent in ext4; deciding by size alone made
++	 * truncate(0) of a zero-length preallocated file a no-op, and every
++	 * unlink truncates to 0 first, so those blocks leaked on delete. */
+ 	uint64_t old_size = ext4_inode_get_size(sb, inode_ref->inode);
+-	if (old_size == new_size)
++	if (old_size == new_size &&
++	    (new_size != 0 ||
++	     ext4_inode_get_blocks_count(sb, inode_ref->inode) == 0))
+ 		return EOK;
+ 
+ 	/* It's not supported to make the larger file by truncate operation */
+@@ -1236,8 +1242,16 @@
+ 	if ((ext4_sb_feature_incom(sb, EXT4_FINCOM_EXTENTS)) &&
+ 	    (ext4_inode_has_flag(inode_ref->inode, EXT4_INODE_FLAG_EXTENTS))) {
+ 
+-		/* Extents require special operation */
+-		if (diff_blocks_cnt) {
++		/* Extents require special operation.
++		 *
++		 * The sweep runs to EXT_MAX_BLOCKS, not to old_size's block:
++		 * preallocated extents live past EOF, and the diff test alone
++		 * would skip the sweep whenever the *size* did not shrink
++		 * across a block boundary while unwritten blocks still hung
++		 * beyond it. */
++		if (diff_blocks_cnt ||
++		    (new_size == 0 &&
++		     ext4_inode_get_blocks_count(sb, inode_ref->inode))) {
+ 			r = ext4_extent_remove_space(inode_ref, new_blocks_cnt,
+ 						     EXT_MAX_BLOCKS);
+ 			if (r != EOK)

@@ -89,6 +89,28 @@ final class Ext4Volume: FSVolume {
     /// How many times each inode is currently open. Guarded by `itemsLock`.
     var openCounts: [UInt32: Int] = [:]
 
+    /// Inodes whose preallocated space was NOT flagged persistent, and so is
+    /// trimmed back to EOF when the item deactivates -- FSKit's
+    /// trim-on-close contract for preallocateSpace. Guarded by `itemsLock`.
+    private var trimOnDeactivate: Set<UInt32> = []
+
+    func notePreallocation(_ inode: UInt32, persistent: Bool) {
+        withItems {
+            if persistent { _ = trimOnDeactivate.remove(inode) }
+            else { _ = trimOnDeactivate.insert(inode) }
+        }
+    }
+
+    /// Trim preallocated space past EOF, if this inode owes one.
+    func trimIfPending(_ inode: UInt32) async {
+        let owes = withItems { trimOnDeactivate.remove(inode) != nil }
+        guard owes else { return }
+        try? await executor.run { [self] in
+            try Ext4Error.check(ext4b_trim_preallocation(try device, inode),
+                                "trim preallocation \(inode)")
+        }
+    }
+
     /// Whether anything holds this inode open right now.
     func isOpen(_ inode: UInt32) -> Bool {
         withItems { (openCounts[inode] ?? 0) > 0 }

@@ -77,7 +77,7 @@ ARGON2_CFLAGS := $(CFLAGS) -Wno-everything -I$(ARGON2_DIR)
 
 CORE_LIB := $(BUILD)/lib/libext4core.a
 
-.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-crypto test-orphan test-luks test-mount-crash test-mount-luks test-kill-recovery check-extension check-signing validate tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil
+.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-crypto test-orphan test-luks test-mount-crash test-mount-luks test-kill-recovery check-extension check-signing validate tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil
 
 all: app
 
@@ -256,6 +256,9 @@ test-format: tools
 # them. Only the Linux cross-check needs Docker; it skips itself without one.
 test-orphan: tools
 	@bash Tests/run_orphan_tests.sh
+
+test-prealloc: tools
+	@bash Tests/run_prealloc_tests.sh
 
 # ext4 inside a LUKS container. Fixtures come from real cryptsetup, and what we
 # write is handed back to cryptsetup and the Linux kernel to read -- a
@@ -556,7 +559,12 @@ uninstall-diskutil:
 	@echo "removed $(FS_BUNDLE_DEST)"
 
 install: sign
-	@rm -rf "/Applications/$(APP_NAME).app"
-	@cp -R "$(BUILD)/$(APP_NAME).app" /Applications/
+# In place, not delete-and-recreate. rm -rf + cp gives the bundle a new
+# identity, and (since the last reboot, reliably) LaunchServices responds by
+# deregistering the extension and dropping its System Settings approval --
+# which only the user can grant back, one Settings visit per build. rsync
+# --delete updates the contents while the directory keeps its inode, and the
+# registration survives.
+	@rsync -a --delete "$(BUILD)/$(APP_NAME).app/" "/Applications/$(APP_NAME).app/"
 	@echo "installed to /Applications/$(APP_NAME).app"
 	@echo "Enable it in System Settings > General > Login Items & Extensions > File System Extensions"

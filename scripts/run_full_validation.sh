@@ -190,6 +190,7 @@ stage "3. format" bash Tests/run_format_tests.sh
 
 # Same arrangement: only its cross-check against the Linux kernel needs Docker.
 stage "4. open-unlink recovery" bash Tests/run_orphan_tests.sh
+stage "4b. preallocation" bash Tests/run_prealloc_tests.sh
 
 # Known-answer tests for the crypto primitives need nothing at all; the LUKS
 # suite needs cryptsetup, so it lives with the Docker stages below.

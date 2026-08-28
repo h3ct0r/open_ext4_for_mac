@@ -1195,6 +1195,42 @@ int ext4b_map_extents(ext4b_device *dev,
 
     uint32_t bsize = ext4_sb_get_block_size(&fs->sb);
     uint64_t fsize = ext4_inode_get_size(&fs->sb, ref.inode);
+
+    size_t n = 0;
+
+#if CONFIG_EXTENT_ENABLE && CONFIG_EXTENTS_ENABLE
+    /* Extent-mapped inodes get the accurate answer: the probe can tell an
+     * unwritten extent from a hole -- the mapping API folds both into 0 --
+     * and is not clamped to i_size, so preallocated blocks past EOF are
+     * visible. That is not cosmetic: it is how the tests see them. */
+    if (ext4_inode_has_flag(ref.inode, EXT4_INODE_FLAG_EXTENTS)) {
+        uint32_t lblk     = (uint32_t)(offset / bsize);
+        uint32_t end_lblk = (uint32_t)((offset + length - 1) / bsize);
+        while (lblk <= end_lblk && n < max_extents) {
+            ext4_fsblk_t fblk = 0;
+            uint32_t run = 0;
+            bool unwr = false;
+            r = ext4_extent_probe(&ref, lblk, &fblk, &run, &unwr);
+            if (r != EOK)
+                break;
+            if (fblk == 0 && run == 0)
+                break;                     /* the gap runs to EOF */
+            if (run > end_lblk - lblk + 1)
+                run = end_lblk - lblk + 1;
+            out[n].logical_offset  = (uint64_t)lblk * bsize;
+            out[n].physical_offset = (uint64_t)fblk * bsize;
+            out[n].length          = (uint64_t)run * bsize;
+            out[n].is_hole         = (fblk == 0);
+            out[n].is_unwritten    = unwr;
+            n++;
+            lblk += run;
+        }
+        *out_count = n;
+        ext4_fs_put_inode_ref(&ref);
+        return (n > 0) ? EOK : r;
+    }
+#endif
+
     if (offset >= fsize) {
         ext4_fs_put_inode_ref(&ref);
         return EOK;
@@ -1204,7 +1240,6 @@ int ext4b_map_extents(ext4b_device *dev,
 
     uint32_t lblk     = (uint32_t)(offset / bsize);
     uint32_t end_lblk = (uint32_t)((offset + length - 1) / bsize);
-    size_t   n        = 0;
 
     while (lblk <= end_lblk && n < max_extents) {
         ext4_fsblk_t fblk = 0;
@@ -1228,6 +1263,7 @@ int ext4b_map_extents(ext4b_device *dev,
         out[n].physical_offset = (uint64_t)fblk * bsize;
         out[n].length          = (uint64_t)run * bsize;
         out[n].is_hole         = (fblk == 0);
+        out[n].is_unwritten    = false;    /* indirect files have no such state */
         n++;
 
         lblk += run;
@@ -2811,6 +2847,102 @@ int ext4b_truncate(ext4b_device *dev, uint32_t inode, uint64_t new_size)
 
     if (r == EOK && new_size != old_size)
         touch(fs, &ref, TOUCH_MTIME | TOUCH_CTIME);
+
+    ext4_fs_put_inode_ref(&ref);
+    return txn_finish(dev, fs, r);
+}
+
+int ext4b_preallocate(ext4b_device *dev,
+                      uint32_t inode,
+                      uint64_t offset,
+                      uint64_t length,
+                      uint64_t *out_allocated)
+{
+    WRITE_PROLOGUE(dev, fs);
+
+    if (out_allocated)
+        *out_allocated = 0;
+    if (length == 0)
+        return EOK;
+
+    int r = txn_begin(fs);
+    if (r != EOK)
+        return r;
+
+    struct ext4_inode_ref ref;
+    r = ext4_fs_get_inode_ref(fs, inode, &ref);
+    if (r != EOK)
+        return txn_finish(dev, fs, r);
+
+    if (ext4_inode_is_type(&fs->sb, ref.inode, EXT4_INODE_MODE_DIRECTORY)) {
+        ext4_fs_put_inode_ref(&ref);
+        return txn_finish(dev, fs, EISDIR);
+    }
+    if (is_immutable(&ref) || is_append_only(&ref)) {
+        ext4_fs_put_inode_ref(&ref);
+        return txn_finish(dev, fs, EPERM);
+    }
+    /* Unwritten extents are an extent-tree concept; an ext2/3 indirect file
+     * has nowhere to record "allocated but not written", and the honest
+     * answer is the one every filesystem without the feature gives. */
+    if (!ext4_inode_has_flag(ref.inode, EXT4_INODE_FLAG_EXTENTS)) {
+        ext4_fs_put_inode_ref(&ref);
+        return txn_finish(dev, fs, ENOTSUP);
+    }
+
+    uint32_t bsize = ext4_sb_get_block_size(&fs->sb);
+    uint64_t first = offset / bsize;
+    uint64_t last  = (offset + length - 1) / bsize;
+    if (last >= UINT32_MAX) {
+        ext4_fs_put_inode_ref(&ref);
+        return txn_finish(dev, fs, EFBIG);
+    }
+
+    uint32_t got = 0;
+    r = ext4_extent_preallocate(&ref, (uint32_t)first,
+                                (uint32_t)(last - first + 1), &got);
+    /* The size does not move: that is the entire point. i_blocks moved with
+     * every allocation (ext4_balloc maintains it), which is what getattr's
+     * alloc_size reports and what makes the space visible. */
+    if (got)
+        ref.dirty = true;
+
+    if (out_allocated)
+        *out_allocated = (uint64_t)got * bsize;
+
+    ext4_fs_put_inode_ref(&ref);
+    return txn_finish(dev, fs, r);
+}
+
+/* Drop preallocated space past EOF -- the trim half of preallocation.
+ * FSKit's contract: space preallocated without the persist flag is released
+ * when the item deactivates. Everything past the size-derived block count is
+ * unwritten preallocation by construction (writes always extend the size),
+ * so removing from there to the end of the tree is exactly the trim. */
+int ext4b_trim_preallocation(ext4b_device *dev, uint32_t inode)
+{
+    WRITE_PROLOGUE(dev, fs);
+
+    int r = txn_begin(fs);
+    if (r != EOK)
+        return r;
+
+    struct ext4_inode_ref ref;
+    r = ext4_fs_get_inode_ref(fs, inode, &ref);
+    if (r != EOK)
+        return txn_finish(dev, fs, r);
+
+    if (!ext4_inode_has_flag(ref.inode, EXT4_INODE_FLAG_EXTENTS)) {
+        ext4_fs_put_inode_ref(&ref);
+        return txn_finish(dev, fs, EOK);   /* nothing to trim, not an error */
+    }
+
+    uint32_t bsize = ext4_sb_get_block_size(&fs->sb);
+    uint64_t fsize = ext4_inode_get_size(&fs->sb, ref.inode);
+    uint32_t keep = (uint32_t)((fsize + bsize - 1) / bsize);
+    r = ext4_extent_remove_space(&ref, keep, EXT_MAX_BLOCKS);
+    if (r == EOK)
+        ref.dirty = true;
 
     ext4_fs_put_inode_ref(&ref);
     return txn_finish(dev, fs, r);

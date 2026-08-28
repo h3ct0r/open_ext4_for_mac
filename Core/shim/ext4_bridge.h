@@ -296,6 +296,9 @@ typedef struct {
     uint64_t physical_offset;  /* byte offset on the device    */
     uint64_t length;           /* bytes                        */
     bool     is_hole;          /* sparse — kernel substitutes zeroes */
+    bool     is_unwritten;     /* allocated but never written: reads as
+                                * zeroes, physical_offset is real. Distinct
+                                * from a hole, which has no blocks at all. */
 } ext4b_extent;
 
 /*
@@ -311,6 +314,27 @@ int ext4b_map_extents(ext4b_device *dev,
                       size_t max_extents,
                       size_t *out_count);
 
+
+/*
+ * Back [offset, offset+length) of `inode` with unwritten extents: allocated,
+ * counted in alloc_size, read back as zeroes, converted to written data by
+ * the first write into them. The file's size does not change. Ranges already
+ * backed by data or by earlier preallocation are skipped and not re-counted.
+ * *out_allocated receives the bytes newly allocated (block-rounded).
+ * Extent-mapped inodes only; ext2/3 indirect files return ENOTSUP.
+ */
+int ext4b_preallocate(ext4b_device *dev,
+                      uint32_t inode,
+                      uint64_t offset,
+                      uint64_t length,
+                      uint64_t *out_allocated);
+
+/*
+ * Release preallocated space past EOF. The trim half of ext4b_preallocate:
+ * FSKit deactivation calls it for items whose preallocation was not flagged
+ * persistent. A no-op on files with no preallocation.
+ */
+int ext4b_trim_preallocation(ext4b_device *dev, uint32_t inode);
 
 /* ============================================================== writing == */
 /*

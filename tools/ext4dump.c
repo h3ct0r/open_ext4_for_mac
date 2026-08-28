@@ -670,7 +670,8 @@ static luks_device *open_luks(file_ctx *fc, const char *keyfile, bool writable,
 
 static bool is_write_cmd(const char *c)
 {
-    static const char *w[] = { "mkdir", "create", "write", "append", "rm",
+    static const char *w[] = { "prealloc",
+                               "mkdir", "create", "write", "append", "rm",
                                "mv", "ln", "symlink", "truncate", "chmod",
                                "chown", "setxattr", "rmxattr", "script",
                                "format", "label", "rm-open", "rm-cycle",
@@ -851,6 +852,17 @@ static int run_write_command(ext4b_device *dev, int argc, char **argv)
         r = ext4b_symlink(dev, parent, name, name_len, argv[3], strlen(argv[3]),
                           (uint32_t)getuid(), (uint32_t)getgid(), &ino);
         if (r != 0) { fprintf(stderr, "symlink: %s\n", ext4b_strerror(r)); rc = 1; }
+
+    } else if (strcmp(cmd, "prealloc") == 0) {
+        if (argc < 6) { fprintf(stderr, "prealloc needs <path> <offset> <bytes>\n"); rc = 2; return rc; }
+        uint32_t ino = resolve(dev, argv[3], NULL);
+        if (!ino) { rc = 1; return rc; }
+        uint64_t off = strtoull(argv[4], NULL, 10);
+        uint64_t len = strtoull(argv[5], NULL, 10);
+        uint64_t got = 0;
+        r = ext4b_preallocate(dev, ino, off, len, &got);
+        if (r != 0) { fprintf(stderr, "prealloc: %s\n", ext4b_strerror(r)); rc = 1; }
+        else printf("preallocated %llu bytes\n", (unsigned long long)got);
 
     } else if (strcmp(cmd, "truncate") == 0) {
         if (argc < 5) { fprintf(stderr, "truncate needs <path> <size>\n"); rc = 2; return rc; }
@@ -1342,19 +1354,26 @@ static int cmd_extents(ext4b_device *dev, const char *path)
 
     ext4b_extent ext[256];
     size_t n = 0;
-    int r = ext4b_map_extents(dev, ino, 0, a.size, ext, 256, &n);
+    /* Map the allocation, not the size: preallocated blocks live past EOF
+     * and are precisely what someone running this command wants to see. */
+    uint64_t span = a.size > a.alloc_size ? a.size : a.alloc_size;
+    if (span == 0)
+        span = 1;
+    int r = ext4b_map_extents(dev, ino, 0, span, ext, 256, &n);
     if (r != 0) {
         fprintf(stderr, "map_extents: %s\n", ext4b_strerror(r));
         return 1;
     }
 
-    printf("%s: size=%" PRIu64 " layout=%s, %zu extent(s)\n",
-           path, a.size, a.uses_extents ? "extents" : "indirect", n);
+    printf("%s: size=%" PRIu64 " alloc=%" PRIu64 " layout=%s, %zu extent(s)\n",
+           path, a.size, a.alloc_size,
+           a.uses_extents ? "extents" : "indirect", n);
     for (size_t i = 0; i < n; i++) {
         printf("  [%2zu] logical %10" PRIu64 "  physical %12" PRIu64
-               "  len %8" PRIu64 "%s\n",
+               "  len %8" PRIu64 "%s%s\n",
                i, ext[i].logical_offset, ext[i].physical_offset,
-               ext[i].length, ext[i].is_hole ? "  (hole)" : "");
+               ext[i].length, ext[i].is_hole ? "  (hole)" : "",
+               ext[i].is_unwritten ? "  (unwritten)" : "");
     }
     return 0;
 }

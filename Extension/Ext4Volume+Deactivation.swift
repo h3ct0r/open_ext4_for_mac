@@ -15,13 +15,18 @@ import Ext4Core
 /// namespace until here.
 extension Ext4Volume: FSVolume.ItemDeactivation {
 
-    /// Only for open-unlinked files. Asking for `.always` would add a round
-    /// trip to every item the kernel finishes with, and we have nothing to do
-    /// for the ordinary case that `reclaimItem` does not already handle.
-    var itemDeactivationPolicy: FSVolume.ItemDeactivationOptions { .forRemovedItems }
+    /// Open-unlinked files, and files carrying non-persistent preallocated
+    /// space -- the two cases with actual work to do here. `.always` would
+    /// add a round trip to every item the kernel finishes with for nothing.
+    var itemDeactivationPolicy: FSVolume.ItemDeactivationOptions {
+        [.forRemovedItems, .forPreallocatedItems]
+    }
 
     func deactivateItem(_ item: FSItem) async throws {
         guard let ext4Item = item as? Ext4Item else { return }
+        // Trim-on-close: space preallocated without the persist flag goes
+        // back when the last user does.
+        await trimIfPending(ext4Item.inode)
         // The point of asking for .forRemovedItems: this is the moment an
         // open-unlinked file's last user goes away, so the inode we held back
         // in removeItem can finally be freed.
