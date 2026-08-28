@@ -208,6 +208,16 @@ round_trip() {  # round_trip <name> <uuid> <label>
   fi
   ok "mounted"
 
+  # D5: deriving from a .pass caches the master key in the keychain and the
+  # passphrase file is single-use -- so once the mount has derived, no
+  # plaintext passphrase or master key is left on disk for this UUID. Red
+  # against a build that wrote a .key and kept the .pass; green after.
+  if [ -f "$KEYDIR/$uuid.pass" ] || [ -f "$KEYDIR/$uuid.key" ]; then
+    bad "plaintext key material for $uuid remained on disk after unlock"
+  else
+    ok "the passphrase file was consumed and no plaintext key was left on disk"
+  fi
+
   # What Linux wrote, read through the cipher.
   local got want
   got=$(cat "$MNT/hello.txt" 2>/dev/null)
