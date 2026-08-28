@@ -448,9 +448,7 @@ app: extension helper $(BUILD)/$(APP_NAME).app/Contents/Info.plist $(BUILD)/$(AP
 # SMAppService, which is why it lives inside the bundle rather than in
 # /Library/LaunchDaemons.
 HELPER_NAME  := ext4barrierd
-HELPER_LABEL := $(BUNDLE_ID).barrier
 HELPER_BIN   := $(BUILD)/$(APP_NAME).app/Contents/MacOS/$(HELPER_NAME)
-HELPER_PLIST := $(BUILD)/$(APP_NAME).app/Contents/Library/LaunchDaemons/$(HELPER_LABEL).plist
 
 # Only the binary goes in the bundle. The daemon's plist lives in
 # Packaging/ and is installed to /Library/LaunchDaemons by install-barrier;
@@ -470,9 +468,6 @@ $(HELPER_BIN): Helper/$(HELPER_NAME).c
 	    -fstack-protector-strong -D_FORTIFY_SOURCE=2 -Wformat -Wformat-security \
 	    -framework Security -framework CoreFoundation $< -o $@
 
-$(HELPER_PLIST): Helper/$(HELPER_LABEL).plist
-	@mkdir -p $(dir $@)
-	@cp $< $@
 
 $(BUILD)/$(APP_NAME).app/Contents/Info.plist: App/Info.plist
 	@mkdir -p $(dir $@)

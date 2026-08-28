@@ -162,10 +162,6 @@ int  ext4b_unmount(ext4b_device *dev);
  * volume whose superblock has needs_recovery set. */
 int  ext4b_journal_recover(ext4b_device *dev);
 
-/* Bracket a set of metadata mutations in a journal transaction. */
-int  ext4b_journal_start(ext4b_device *dev);
-int  ext4b_journal_stop(ext4b_device *dev);
-
 /* Flush the block cache and issue the device-level barrier. */
 int  ext4b_sync(ext4b_device *dev);
 

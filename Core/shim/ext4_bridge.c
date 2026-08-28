@@ -806,33 +806,6 @@ int ext4b_journal_recover(ext4b_device *dev)
     return r;
 }
 
-int ext4b_journal_start(ext4b_device *dev)
-{
-    if (!dev || !dev->mounted)
-        return EINVAL;
-    if (dev->read_only)
-        return EROFS;
-    if (dev->journal_running)
-        return EOK;
-
-    int r = ext4_journal_start(BRIDGE_MOUNT_POINT);
-    if (r == EOK)
-        dev->journal_running = true;
-    return r;
-}
-
-int ext4b_journal_stop(ext4b_device *dev)
-{
-    if (!dev || !dev->mounted)
-        return EINVAL;
-    if (!dev->journal_running)
-        return EOK;
-
-    int r = ext4_journal_stop(BRIDGE_MOUNT_POINT);
-    dev->journal_running = false;
-    return r;
-}
-
 int ext4b_sync(ext4b_device *dev)
 {
     if (!dev || !dev->mounted)

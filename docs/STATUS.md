@@ -26,11 +26,13 @@ both ext2 indirect-block and ext4 extent layouts; logical→physical extent
 mapping; extended attributes. Every content read is compared byte-for-byte
 against `debugfs`, and every fixture is checked with `e2fsck`.
 
-**Extension (builds, not yet loadable):** the full FSKit surface —
+**Extension (signed, installed, loads and mounts):** the full FSKit surface —
 `FSUnaryFileSystem` probe/load/unload, `FSVolume.Operations`,
-`FSVolumeKernelOffloadedIOOperations`, `FSVolume.ReadWriteOperations`,
-`FSVolume.XattrOperations` — plus Info.plist, entitlements and bundle layout
-matching what shipping FSKit modules use.
+`FSVolume.ReadWriteOperations`, `FSVolume.XattrOperations`,
+`FSVolume.PreallocateOperations`, and `FSManageableResourceMaintenanceOperations`
+(format/check) — plus Info.plist, entitlements and bundle layout matching what
+shipping FSKit modules use. (`FSVolumeKernelOffloadedIOOperations` is
+implemented but held out of the build; see below.)
 
 ## It reads and writes
 
@@ -1141,10 +1143,13 @@ What is left, in ascending order of unpleasantness:
   machine in exchange for nothing would have been a poor trade even if it had
   worked.
 - **A privileged helper** holding the device open and issuing the barrier over
-  XPC. No widening of the extension's sandbox, since the helper does the
-  ioctl. Costs a root daemon and an XPC round trip per transaction.
-- **Keep removable media read-only by default**, which is where the driver
-  already stands.
+  XPC — **this is what shipped.** No widening of the extension's sandbox, since
+  the helper does the ioctl. Costs a root daemon and an XPC round trip per
+  transaction. With it installed and approved, removable media mounts
+  read-write once the mount confirms a real barrier on the device; without it,
+  read-only. (Earlier the driver kept removable media read-only by default and
+  a marker file opted in; since the barrier works, that is inverted — the
+  marker is now the *unsafe* override for writing with no barrier at all.)
 
 ### Two ordering holes remain above it
 
