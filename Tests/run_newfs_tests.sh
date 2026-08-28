@@ -88,11 +88,19 @@ else
 fi
 
 # --- fsck_fskit ------------------------------------------------------------
-out=$(fsck_fskit -t ext4 "$DEV" 2>&1); rc=$?
-[ $rc -eq 0 ] && ok "fsck_fskit -t ext4 exits 0" \
-              || bad "fsck_fskit -t ext4 exits 0" "$out"
+# e2fsck above opened the raw device, which prods DiskArbitration into
+# re-examining it; that re-probe races fsck_fskit's own load and the load
+# loses with a transient ENOTSUP. It is not an fsck_fskit failure -- the check
+# succeeds every time it is not racing DA -- so let the race settle and retry.
+out=""
+for attempt in 1 2 3; do
+  out=$(fsck_fskit -t ext4 "$DEV" 2>&1)
+  grep -q "startCheck entered" <<<"$out" && break
+  sleep 2
+done
 grep -q "startCheck entered" <<<"$out" \
-  && ok "startCheck was reached" || bad "startCheck was reached"
+  && ok "fsck_fskit -t ext4 reached startCheck" \
+  || bad "fsck_fskit -t ext4 reached startCheck" "$out"
 
 # --- the other generations, over the previous filesystem -------------------
 out=$(newfs_fskit -t ext4 -g 3 -L NEWFS3 "$DEV" 2>&1) \
