@@ -237,6 +237,23 @@ fsck_target() {   # fsck_target <outfile>
   else e2fsck -fn "$WORK/k.img" > "$1" 2>&1; fi
 }
 
+# The device path runs e2fsck under sudo. In a shell that cannot ask for a
+# password, sudo fails, e2fsck never runs -- and the round then reported
+# "inconsistent after recovery", which is a verdict about the filesystem,
+# for a failure that was about the terminal. Five rounds of that produced a
+# report claiming five recovery failures on a volume that was never checked
+# once. Refuse to start instead: a credential either cached or promptable is
+# a precondition, not something to discover at round one's verdict.
+require_sudo() {
+  [ -n "$DEVICE" ] || return 0
+  if ! sudo -n true 2>/dev/null && ! [ -t 0 ]; then
+    note "this run needs sudo for e2fsck on /dev/$DEVICE, and there is no"
+    note "terminal to ask for a password. Run it from an interactive shell,"
+    note "or pre-authorise with: sudo -v"
+    exit 1
+  fi
+}
+
 # Put the volume back in a known-good state, so the next round measures its own
 # kill and not the last one's wreckage.
 #
@@ -255,6 +272,8 @@ detach_target() {
   DEV=""
   return 0
 }
+
+require_sudo
 
 for round in $(seq 1 "$ROUNDS"); do
   prepare || { bad "round $round: could not prepare the volume"; continue; }
@@ -315,6 +334,14 @@ for round in $(seq 1 "$ROUNDS"); do
     exit 1
   fi
   out=$(cat "$WORK/fsck.out" 2>/dev/null)
+
+  # A verdict requires the check to have actually run. e2fsck output always
+  # carries its own banner; sudo's complaints do not.
+  if ! grep -q "^e2fsck" <<<"$out"; then
+    bad "round $round: e2fsck did not run -- no verdict" \
+        "$(head -1 <<<"$out")"
+    exit 1
+  fi
 
   with_deadline "$FSCK_TIMEOUT" repair_target
   if [ $? -eq 124 ]; then
