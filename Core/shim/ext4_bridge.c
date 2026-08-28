@@ -1524,14 +1524,24 @@ static int txn_begin(struct ext4_fs *fs)
         fs->curr_trans = trans;
         atomic_store(&g_txn_owner, (uintptr_t)pthread_self());
     } else if (fs->jbd_journal) {
-        /* A transaction was already open. Ours if this is a nested mutation,
-         * someone else's if the serialisation upstream has a hole -- and in
-         * that case this call is about to add its changes to a transaction
-         * another thread is going to commit. */
-        uintptr_t me = (uintptr_t)pthread_self();
-        uintptr_t owner = atomic_load(&g_txn_owner);
-        if (owner && owner != me)
-            report_collision("transaction", me, owner);
+        /* A transaction was already open, which is the normal case under
+         * batching: one transaction spans many operations before it commits.
+         *
+         * The owner-thread identity is NOT a concurrency signal here. The
+         * executor serialises every core call onto one serial queue, but GCD
+         * runs those strictly-sequential blocks on whichever pooled thread is
+         * free, so a later op in the same batch legitimately runs on a
+         * different thread than the one that opened the transaction. Comparing
+         * pthread_self() against the batch's opener therefore fires on every
+         * serial hand-off -- a false positive that says nothing about real
+         * concurrency.
+         *
+         * Real concurrent entry -- two threads genuinely inside lwext4 at once
+         * -- is caught by io_enter/io_leave around the block callbacks, which
+         * every operation drives and which clear on leave. So here we simply
+         * take ownership of the ongoing batch; the serial queue guarantees the
+         * previous op has already returned. */
+        atomic_store(&g_txn_owner, (uintptr_t)pthread_self());
     }
 #endif
     return EOK;
