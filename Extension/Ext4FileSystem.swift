@@ -167,28 +167,50 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         // UUID. A dirty journal is replayed before the volume is written.
         //
         //
-        // Removable media is read-only unless somebody has said otherwise.
+        // Removable media is writable exactly when ordering is real.
         //
-        // Not caution for its own sake: there is no write barrier available
-        // here (see BlockDeviceBridge.Mode), so lwext4 issues journal barriers
-        // that nothing carries out. A stick pulled from under a live mount
-        // came back with ext4's own recovery reporting a corrupt transaction
-        // and discarding every later one. A disk image never does, which is
-        // why the interconnect matters rather than the removable flag alone.
+        // The old policy -- read-only unless a marker said otherwise -- dated
+        // from when no write barrier existed here at all, and a stick pulled
+        // from under a live mount came back corrupt five times out of five.
+        // The barrier exists now (the privileged helper), and with it the
+        // same abuse was measured clean: five kill-recovery rounds and a
+        // physical mid-write pull, every one recovered by journal replay.
         //
-        // Reading is untouched. Nothing is written, so nothing can be
-        // reordered, and the common case -- looking at a Linux disk on a Mac
-        // -- keeps working exactly as before.
+        // So ask the helper for an actual barrier on this actual device,
+        // before deciding. It works: mount read-write, the proven-safe
+        // configuration. It does not -- helper missing, unapproved, or denied
+        // by TCC: mount read-only and say why, because unordered writes to a
+        // physical stick are still the measured corruption they always were
+        // (the reorder suite's negative controls keep proving it).
+        //
+        // The marker file remains as a manual override: writes without a
+        // barrier, for someone who accepts the risk knowingly.
+        //
+        // Reading is untouched either way. A disk image is exempt from all of
+        // this -- its writes reach APFS in issue order, which is why the
+        // interconnect matters rather than the removable flag alone.
         //
         let traits = MediaTraits.read(bsdName: device.bsdName)
         var inhibitedForRemovableMedia = false
         if let traits, traits.isPhysicallyDetachable {
-            let allowed = RemovableWritePolicy.directoryFromInsideTheSandbox()
+            let forced = RemovableWritePolicy.directoryFromInsideTheSandbox()
                 .map { RemovableWritePolicy.isEnabled(in: $0) } ?? false
-            inhibitedForRemovableMedia = !allowed
-            Ext4Log.info("\(device.bsdName) is removable (\(traits.interconnect)); "
-                         + (allowed ? "writes allowed by the marker file"
-                                    : "mounting read-only, no write barrier is available"))
+            if forced {
+                Ext4Log.info("\(device.bsdName) is removable (\(traits.interconnect)); "
+                             + "writes forced by the marker file, barrier or not")
+            } else {
+                let probe = BarrierClient(bsdName: device.bsdName)
+                let status = probe?.barrier() ?? EIO
+                probe?.release()
+                if status == 0 {
+                    Ext4Log.info("\(device.bsdName) is removable (\(traits.interconnect)); "
+                                 + "write barrier confirmed, mounting read-write")
+                } else {
+                    inhibitedForRemovableMedia = true
+                    Ext4Log.info("\(device.bsdName) is removable (\(traits.interconnect)); "
+                                 + "no write barrier (status \(status)), mounting read-only")
+                }
+            }
         }
 
         let mediaWritable = device.isWritable && !inhibitedForRemovableMedia

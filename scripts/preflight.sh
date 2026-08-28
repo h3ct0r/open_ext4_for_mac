@@ -78,12 +78,15 @@ else
 fi
 
 # ------------------------------------------------- writes to removable media --
+# Not pass/fail any more: with the barrier-conditional policy, read-write on
+# removable media is granted automatically when the barrier works, and the
+# live-barrier check below is what proves that end to end. The marker only
+# matters as the force-writes-without-barrier override, worth naming when set.
 if [ -x "$APP/Contents/MacOS/Ext4Mac" ]; then
-  if "$APP/Contents/MacOS/Ext4Mac" removable-writes 2>/dev/null | grep -q ALLOWED; then
-    ok "removable media may be mounted read-write"
+  if "$APP/Contents/MacOS/Ext4Mac" removable-writes 2>/dev/null | grep -q FORCED; then
+    ok "removable writes FORCED without barrier (marker set) -- the test below still checks for one"
   else
-    bad "removable media is read-only, so a write test cannot run" \
-        "Ext4Mac removable-writes on"
+    ok "removable writes: automatic, read-write when the barrier works"
   fi
 fi
 

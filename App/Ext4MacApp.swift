@@ -55,8 +55,10 @@ struct Ext4MacApp {
             guard let device = arguments.first else { usage(1) }
             exit(Ext4Mount.command(device))
 
-        // Writing to media that can be unplugged. Off by default; see
-        // RemovableWritePolicy for why.
+        // Writing to media that can be unplugged *without a barrier*.
+        // The normal path needs no toggle: the mount asks the privileged
+        // helper for a real barrier and grants read-write when one is
+        // confirmed. See RemovableWritePolicy.
         case "removable-writes":
             exit(removableWrites(arguments.first))
 
@@ -79,19 +81,21 @@ struct Ext4MacApp {
         switch argument {
         case nil, "status":
             let on = RemovableWritePolicy.isEnabled(in: directory)
-            print("writing to removable media: \(on ? "ALLOWED" : "off")")
+            print("unbarriered writes to removable media: \(on ? "FORCED" : "off (automatic)")")
             if !on {
                 print("")
-                print("Removable volumes mount read-only. FSKit exposes no write")
-                print("barrier that works here, so a volume unplugged while mounted")
-                print("can come back inconsistent -- measured, not theoretical.")
-                print("Reading is unaffected.")
+                print("Automatic mode: a removable volume mounts read-write when the")
+                print("barrier daemon confirms a working write barrier on it, and")
+                print("read-only -- with the reason in the log -- when it cannot.")
+                print("Install the daemon with: make sign && sudo make install-barrier")
                 print("")
-                print("    Ext4Mac removable-writes on     accept that risk")
+                print("    Ext4Mac removable-writes on     force writes with no barrier")
             } else {
                 print("")
-                print("Eject before unplugging. A volume pulled while mounted can")
-                print("come back needing e2fsck.")
+                print("Writes are forced even with no barrier. A volume pulled while")
+                print("mounted can come back corrupt -- measured, not theoretical.")
+                print("")
+                print("    Ext4Mac removable-writes off    return to automatic")
             }
             return 0
         case "on", "off":
@@ -102,8 +106,8 @@ struct Ext4MacApp {
                 FileHandle.standardError.write("Ext4Mac: \(error)\n".data(using: .utf8)!)
                 return 1
             }
-            print(enable ? "removable media may now be mounted read-write"
-                         : "removable media will mount read-only")
+            print(enable ? "unbarriered writes FORCED: removable media mounts read-write with no barrier"
+                         : "automatic: removable media mounts read-write when the barrier works")
             print("takes effect on the next mount")
             return 0
         default:

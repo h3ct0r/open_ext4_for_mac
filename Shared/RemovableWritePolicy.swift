@@ -5,24 +5,22 @@
 
 import Foundation
 
-/// Whether this driver is allowed to write to media somebody can unplug.
+/// Whether removable media may be written *without* a write barrier.
 ///
-/// Off by default, and that default is a consequence of a measured defect
-/// rather than caution for its own sake. FSKit exposes no write barrier that
-/// works here -- `metadataFlush` is the only one it has, and that whole I/O
-/// family fails with `EIO` for reasons not yet understood -- so lwext4 issues
-/// journal barriers that nothing carries out.
+/// This marker used to be the only way to write a USB stick at all, because
+/// no barrier existed and unordered writes were a measured corruption --
+/// `Journal transaction 8 was corrupt, replay was aborted`, a commit block
+/// that outran its own data. The barrier exists now (the privileged helper),
+/// and the mount decides for itself: it asks the helper for a real barrier on
+/// the real device, mounts read-write when one is confirmed -- the
+/// configuration proven by five kill-recovery rounds and a physical
+/// mid-write pull, all clean -- and read-only, with the reason logged, when
+/// none is available.
 ///
-/// On a disk image that costs nothing: writes reach APFS through the page
-/// cache in issue order, and killing the driver mid-write recovers cleanly
-/// five times out of five. On a USB stick it costs the filesystem. Pulled from
-/// under a live mount, one came back with ext4's own recovery reporting
-/// `Journal transaction 8 was corrupt, replay was aborted` -- a commit block
-/// that outran its own data, after which every later transaction is discarded.
-///
-/// So removable media mounts read-only unless somebody says otherwise. Reading
-/// is unaffected and always has been: nothing is written, so nothing can be
-/// reordered.
+/// What remains for this marker is the override: writes with no barrier, for
+/// someone who accepts knowingly what the reorder suite's negative controls
+/// keep demonstrating. Reading is unaffected in every mode: nothing is
+/// written, so nothing can be reordered.
 public enum RemovableWritePolicy {
 
     /// A marker file, in the extension's own container.

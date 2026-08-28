@@ -949,7 +949,18 @@ with the original *Input/output error*.
 
 ## Write ordering is not enforced, and that is not theoretical
 
-**The mounted driver is not crash-safe on removable media.** This was written
+> **This section is history, kept because the measurements in it justify
+> everything that came after.** As of 2026-08-27 write ordering *is*
+> enforced: the privileged helper issues real barriers, lwext4 patches
+> 0014–0021 make the journal use them correctly, and the same abuse
+> described below — kills and pulls on real USB — was measured clean, five
+> rounds plus a mid-write yank. Removable media now mounts **read-write
+> automatically when a working barrier is confirmed on the device**, and
+> read-only, with the reason logged, when none is available; the
+> `removable-writes` marker survives only as the force-writes-without-a-
+> barrier override.
+
+**The mounted driver was not crash-safe on removable media.** This was written
 down as an assumption from the start; a real USB stick falsified it.
 
 lwext4 issues journal barriers faithfully. Nothing enforces them.
