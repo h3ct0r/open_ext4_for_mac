@@ -200,6 +200,12 @@ uint32_t ext4_inodes_in_group_cnt(struct ext4_sblock *s, uint32_t bgid);
  * @return  Standard error code */
 int ext4_sb_write(struct ext4_blockdev *bdev, struct ext4_sblock *s);
 
+/**@brief   Recompute the superblock's own checksum. A no-op unless the
+ *          volume carries metadata_csum. Exported for mkfs, which writes
+ *          superblock copies that never pass through ext4_sb_write().
+ * @param   s superblock*/
+void ext4_sb_set_csum(struct ext4_sblock *s);
+
 /**@brief   Write the superblock through the current journal transaction, so
  *          the update commits atomically with the rest of the transaction.
  *          Callers choose this or ext4_sb_write() explicitly; it is not a

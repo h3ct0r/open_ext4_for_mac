@@ -500,7 +500,7 @@ static ext4_fsblk_t ext4_fs_get_descriptor_block(struct ext4_sblock *s,
  * @param bg   Block group to compute checksum for
  * @return Checksum value
  */
-static uint16_t ext4_fs_bg_checksum(struct ext4_sblock *sb, uint32_t bgid,
+uint16_t ext4_fs_bg_checksum(struct ext4_sblock *sb, uint32_t bgid,
 				    struct ext4_bgroup *bg)
 {
 	/* If checksum not supported, 0 will be returned */

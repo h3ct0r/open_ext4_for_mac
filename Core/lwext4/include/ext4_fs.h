@@ -164,6 +164,17 @@ int ext4_fs_get_block_group_ref(struct ext4_fs *fs, uint32_t bgid,
  */
 int ext4_fs_put_block_group_ref(struct ext4_block_group_ref *ref);
 
+/**@brief   Compute a group descriptor's checksum -- metadata_csum crc32c or
+ *          the older crc16, whichever the superblock's features select.
+ *          Exported for mkfs, whose backup descriptor copies never pass
+ *          through ext4_fs_put_block_group_ref().
+ * @param   sb superblock
+ * @param   bgid block group index
+ * @param   bg the descriptor
+ * @return  checksum value*/
+uint16_t ext4_fs_bg_checksum(struct ext4_sblock *sb, uint32_t bgid,
+			     struct ext4_bgroup *bg);
+
 /**@brief Get reference to i-node specified by index.
  * @param fs    Filesystem to find i-node on
  * @param index Index of i-node to load
