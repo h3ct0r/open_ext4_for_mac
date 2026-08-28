@@ -128,6 +128,25 @@ else
   bad "ext3 is created with a journal"
 fi
 
+# An ext4 volume without metadata_csum is a 2010 filesystem: no CRC between a
+# flipped bit in a group descriptor and silently wrong accounting. mke2fs has
+# enabled it by default for years, and the driver already mounts and writes
+# such volumes -- the seed feature included -- so a volume we format should
+# carry it too. The geometry sweep above is the validity check: with the
+# feature on, its e2fsck run verifies every checksum mkfs wrote, across every
+# size and block size.
+blank "$img" 128
+"$DUMP" "$img" format 4 4096 CSUMVOL >/dev/null 2>&1
+feats=$(dumpe2fs -h "$img" 2>/dev/null | sed -n 's/^Filesystem features: *//p')
+case "$feats" in
+  *metadata_csum*) ok "ext4 is created with metadata_csum" ;;
+  *) bad "ext4 is created with metadata_csum" "features: $feats" ;;
+esac
+case "$feats" in
+  *metadata_csum_seed*) ok "ext4 carries the checksum seed feature" ;;
+  *) bad "ext4 carries the checksum seed feature" "features: $feats" ;;
+esac
+
 # Two volumes formatted back to back must not share a UUID: DiskArbitration
 # keys container identity on it, and lwext4's mkfs writes whatever it is given
 # without generating one.

@@ -1444,44 +1444,32 @@ journaled buffer is not reachable from it. Measured as well as argued: the
 reorder suite is clean at every cut point with the block cache cut from 1024
 entries to 8, which is as much eviction pressure as the code can be given.
 
-**Journal checksums cannot be turned on.** lwext4 implements them — commit
-block, descriptor block and per-block tags, all present in `ext4_journal.c`
-behind `jbd_has_csum` — and `mkfs` simply never sets the feature bit. Setting
-`JBD_FEATURE_INCOMPAT_CSUM_V3` at format time makes `dumpe2fs` report
-`journal_checksum_v3` and `e2fsck` pass on a fresh volume, and then:
+**Journal checksums are on** — and the table this section used to carry, in
+which enabling them corrupted every reordered cut and the kernel refused the
+result outright, was three lwext4 bugs wearing one trenchcoat: the commit
+checksum written host-order (patch 0015), the tag checksums seeded with a
+host-order sequence number (0017), and revoke counts that fabricated a
+phantom entry under checksums (0018). All fixed, all kernel-verified; `mkfs`
+sets `JBD_FEATURE_INCOMPAT_CSUM_V3` (0016) and every torn image in the
+reorder matrix replays clean through the Linux kernel. A checksummed journal
+is the only defence against a drive that reports a cache flush and does not
+perform one, and it costs nothing measurable.
 
-| | recovery after a reordered cut |
-|---|---|
-| without journal checksums | 15/15 clean |
-| with `csum_v3` | **0/20 clean** |
-| with `csum_v3`, replayed by Linux | **the kernel refuses to mount at all** |
-
-So the on-disk result is not a journal Linux will accept. Enabling the feature
-is a compatibility break rather than the defence in depth it looks like, and it
-stays off until lwext4's v3 tag handling is fixed and verified against the
-kernel. That is worth doing — a checksummed journal is the only defence against
-a drive that reports a cache flush and does not perform one — but it is a
-change to lwext4's journal format handling, not a one-line feature bit.
-
-Relatedly, `mkfs` strips `metadata_csum` outright
-(`info->feat_ro_compat &= ~EXT4_FRO_COM_METADATA_CSUM`, alongside `flex_bg`,
-`64bit` and others, under an upstream *"TODO: handle this features some day"*).
-Volumes this driver formats therefore carry no metadata checksums at all, while
-volumes `mke2fs` formats do — and those are read and written correctly, since
-the driver implements checksums for the mounted case. It is a gap in `format`,
-not in the driver.
+**metadata_csum is on at format time too** (patch 0024). `mkfs` used to strip
+it under an upstream *"TODO: handle this features some day"*; the some day
+turned out to need three targeted fixes — self-checksumming superblock
+copies, backup descriptor tables checksummed at build time, the frozen
+`s_checksum_seed` — because everything else mkfs writes already flows
+through the runtime code that maintains checksums on a mounted volume. The
+format suite's geometry sweep now e2fsck-verifies every checksum across
+thirteen sizes × three block sizes × three generations.
 
 ## Not yet done
 - `newfs_fskit` reaches the module but never calls `startFormat`; see below
-- Journal checksums, which need lwext4's `csum_v3` tag handling fixed first;
-  see above. Until then a drive that lies about flushing can still corrupt a
-  volume, and no barrier helps
-- `metadata_csum` on volumes this driver formats: lwext4's `mkfs` strips it
 - A notification when a locked volume appears and the agent is not running;
   today it simply does not show up
 - Reading a LUKS header from media the user does not own — untested against a
   physical stick, where `/dev/diskN` may be `root:operator`
-- Two simultaneous open-unlinks are crash-protected for one of them, not both
 - LUKS detached headers, and ciphers other than `aes-xts-plain64`
 - `FSVolumePreallocateOperations` — deliberately, for now; see below
 - Kernel-offloaded I/O, for reads as well as writes: the conformance is out

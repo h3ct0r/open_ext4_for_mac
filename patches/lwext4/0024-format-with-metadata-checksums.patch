@@ -1,0 +1,166 @@
+Subject: format with metadata checksums
+
+mkfs stripped EXT4_FRO_COM_METADATA_CSUM behind a "handle this some day"
+comment, so every volume it produced was a 2010 filesystem: no CRC between a
+flipped bit in a group descriptor and silently wrong accounting. mke2fs has
+enabled the feature by default for years, and the runtime side of this tree
+already computes and verifies every checksum ext4 defines -- the same code
+that maintains a mke2fs-made volume maintains one of ours.
+
+Turning it on at format time needed less than the comment feared, because
+most of what mkfs writes already passes through that runtime code before the
+format returns: init_bgs() re-initialises every bitmap through
+ext4_fs_init_block_bitmap/inode_bitmap (which set the bitmap checksums),
+rewrites every primary group descriptor through
+ext4_fs_put_block_group_ref (descriptor checksum), and the inodes and
+directories are built by the normal allocation and dirent code (inode,
+dirent-tail, htree and extent checksums). Three gaps were real:
+
+  * the superblock copies: write_sblocks() bypasses ext4_sb_write(), and
+    block_group_index -- stamped per copy -- is inside the checksummed
+    range. Each copy now checksums itself after the stamp. This is also an
+    ordering requirement, not just correctness: ext4_mkfs() re-opens the
+    filesystem mid-format through ext4_fs_init(), which verifies the
+    primary superblock's checksum and would refuse its own half-made volume.
+  * the backup group descriptor tables: write_bgroup_block() copies the raw
+    descriptor buffer into every backup group, and nothing later repairs
+    those copies -- init_bgs() only ever reaches the primary table. The
+    descriptors are checksummed at build time now, so every copy inherits
+    a valid checksum; the primaries are recomputed again afterwards.
+  * the checksum seed: s_checksum_seed is frozen into the superblock and
+    metadata_csum_seed set, as mke2fs does by default -- it is what lets
+    tune2fs -U change the UUID later without rewriting every checksum.
+
+GDT_CSUM stays stripped: ext4 treats it and metadata_csum as mutually
+exclusive. ext4_sb_set_csum() and ext4_fs_bg_checksum() lose their static
+for this; neither needs more than the superblock and a descriptor.
+
+Verified by the format suite's geometry sweep -- e2fsck, which now verifies
+every checksum on every combination of thirteen sizes, three block sizes and
+three generations -- plus the Linux-kernel round trip, and the full
+reorder/orphan/write suites unchanged.
+--- a/src/ext4_mkfs.c
++++ b/src/ext4_mkfs.c
+@@ -278,6 +278,17 @@
+ 
+ 	memcpy(sb->uuid, info->uuid, UUID_SIZE);
+ 
++	/* Freeze the checksum seed into the superblock, as mke2fs does by
++	 * default: metadata_csum_seed is what lets tune2fs -U change the UUID
++	 * later without rewriting every checksum on the volume. The formula
++	 * matches ext4_sb_csum_seed()'s fallback, so the two paths agree. */
++	if (info->feat_ro_compat & EXT4_FRO_COM_METADATA_CSUM) {
++		sb->features_incompatible |=
++			to_le32(EXT4_FINCOM_BG_USE_META_CSUM);
++		sb->checksum_seed = to_le32(ext4_crc32c(EXT4_CRC32_INIT,
++							sb->uuid, UUID_SIZE));
++	}
++
+ 	memset(sb->volume_name, 0, sizeof(sb->volume_name));
+ 	strncpy(sb->volume_name, info->label, sizeof(sb->volume_name));
+ 	memset(sb->last_mounted, 0, sizeof(sb->last_mounted));
+@@ -459,6 +470,15 @@
+ 				 EXT4_BLOCK_GROUP_BLOCK_UNINIT |
+ 				 EXT4_BLOCK_GROUP_INODE_UNINIT);
+ 
++		/* The descriptor is complete; checksum it here, before
++		 * write_bgroup_block() copies this buffer into every backup
++		 * group. The primary copies are recomputed again by
++		 * init_bgs() through ext4_fs_put_block_group_ref(), which
++		 * only ever touches the primary table -- computing at build
++		 * time is what makes the backups valid too. */
++		bg_desc->checksum = to_le16(ext4_fs_bg_checksum(aux_info->sb,
++								i, bg_desc));
++
+ 		sb_free_blk += bg_free_blk;
+ 
+ 		/* Block bitmap: everything past this group's last real block
+@@ -517,6 +537,10 @@
+ 				+ i * info->blocks_per_group);
+ 
+ 			aux_info->sb->block_group_index = to_le16(i);
++			/* Each copy checksums itself, and block_group_index
++			 * is inside the checksummed range -- so per copy,
++			 * after stamping the index, not once for all. */
++			ext4_sb_set_csum(aux_info->sb);
+ 			r = ext4_block_writebytes(bd, offset, aux_info->sb,
+ 						  EXT4_SUPERBLOCK_SIZE);
+ 			if (r != EOK)
+@@ -526,6 +550,7 @@
+ 
+ 	/* write out the primary superblock */
+ 	aux_info->sb->block_group_index = to_le16(0);
++	ext4_sb_set_csum(aux_info->sb);
+ 	return ext4_block_writebytes(bd, 1024, aux_info->sb,
+ 			EXT4_SUPERBLOCK_SIZE);
+ }
+@@ -845,7 +870,11 @@
+ 	info->feat_incompat &= ~EXT4_FINCOM_FLEX_BG;
+ 	info->feat_incompat &= ~EXT4_FINCOM_64BIT;
+ 
+-	info->feat_ro_compat &= ~EXT4_FRO_COM_METADATA_CSUM;
++	/* metadata_csum survives: every structure this mkfs writes is
++	 * checksummed -- most through the same runtime code that maintains
++	 * them on a mounted volume, the superblock and backup descriptor
++	 * copies explicitly below. GDT_CSUM stays stripped; ext4 treats the
++	 * two as mutually exclusive and metadata_csum supersedes it. */
+ 	info->feat_ro_compat &= ~EXT4_FRO_COM_GDT_CSUM;
+ 	info->feat_ro_compat &= ~EXT4_FRO_COM_DIR_NLINK;
+ 	info->feat_ro_compat &= ~EXT4_FRO_COM_EXTRA_ISIZE;
+--- a/src/ext4_super.c
++++ b/src/ext4_super.c
+@@ -133,7 +133,7 @@
+ 	return s->checksum == to_le32(ext4_sb_csum(s));
+ }
+ 
+-static void ext4_sb_set_csum(struct ext4_sblock *s)
++void ext4_sb_set_csum(struct ext4_sblock *s)
+ {
+ 	if (!ext4_sb_feature_ro_com(s, EXT4_FRO_COM_METADATA_CSUM))
+ 		return;
+--- a/include/ext4_super.h
++++ b/include/ext4_super.h
+@@ -199,6 +199,12 @@
+  * @param   s superblock descriptor
+  * @return  Standard error code */
+ int ext4_sb_write(struct ext4_blockdev *bdev, struct ext4_sblock *s);
++
++/**@brief   Recompute the superblock's own checksum. A no-op unless the
++ *          volume carries metadata_csum. Exported for mkfs, which writes
++ *          superblock copies that never pass through ext4_sb_write().
++ * @param   s superblock*/
++void ext4_sb_set_csum(struct ext4_sblock *s);
+ 
+ /**@brief   Write the superblock through the current journal transaction, so
+  *          the update commits atomically with the rest of the transaction.
+--- a/src/ext4_fs.c
++++ b/src/ext4_fs.c
+@@ -500,7 +500,7 @@
+  * @param bg   Block group to compute checksum for
+  * @return Checksum value
+  */
+-static uint16_t ext4_fs_bg_checksum(struct ext4_sblock *sb, uint32_t bgid,
++uint16_t ext4_fs_bg_checksum(struct ext4_sblock *sb, uint32_t bgid,
+ 				    struct ext4_bgroup *bg)
+ {
+ 	/* If checksum not supported, 0 will be returned */
+--- a/include/ext4_fs.h
++++ b/include/ext4_fs.h
+@@ -164,6 +164,17 @@
+  */
+ int ext4_fs_put_block_group_ref(struct ext4_block_group_ref *ref);
+ 
++/**@brief   Compute a group descriptor's checksum -- metadata_csum crc32c or
++ *          the older crc16, whichever the superblock's features select.
++ *          Exported for mkfs, whose backup descriptor copies never pass
++ *          through ext4_fs_put_block_group_ref().
++ * @param   sb superblock
++ * @param   bgid block group index
++ * @param   bg the descriptor
++ * @return  checksum value*/
++uint16_t ext4_fs_bg_checksum(struct ext4_sblock *sb, uint32_t bgid,
++			     struct ext4_bgroup *bg);
++
+ /**@brief Get reference to i-node specified by index.
+  * @param fs    Filesystem to find i-node on
+  * @param index Index of i-node to load
