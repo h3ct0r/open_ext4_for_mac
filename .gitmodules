@@ -1,3 +1,9 @@
 [submodule "Core/lwext4"]
 	path = Core/lwext4
 	url = https://github.com/gkostka/lwext4.git
+	# Always dirty by design: the build applies patches/lwext4/*.patch to the
+	# working tree while the pin stays at upstream. "modified content" in
+	# git status therefore carries no information, and the real guard is
+	# stronger: scripts/check_patches.sh proves tree == pin + patches on
+	# every build, and fails the build when it stops being true.
+	ignore = dirty
