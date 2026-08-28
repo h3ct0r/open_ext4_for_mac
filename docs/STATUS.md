@@ -582,6 +582,17 @@ into the console user's bootstrap context, `sudo -n` to their uid, and the
 enablement that exists is the one consulted. The device stays accessible
 because fskit_helper (root) opens it, not the calling user.
 
+Live-verified, both verbs. `diskutil eraseVolume EXT4 <name> diskN` over an
+existing volume reformats it and DiskArbitration auto-mounts the result
+through this driver, read-write; `diskutil eraseDisk EXT4 <name> GPT diskN`
+on blank media builds the partition map, types the partition `Linux
+Filesystem` (the personality's `FSFormatContentMask`), formats it through
+`startFormat`, and mounts it the same way — e2fsck-clean in both cases, with
+the extension's own task messages visible in diskutil's output. One
+diskutil-ism worth knowing: `eraseVolume` on a *blank* whole-disk fails
+earlier with "Couldn't open disk" (-69879) before any formatter runs — blank
+media wants `eraseDisk`, which is also what Disk Utility's GUI does.
+
 ### `newfs_fskit` works — and what its long failure actually was
 
 `newfs_fskit -t ext4 [-g 2|3|4] [-b size] [-L label] <device>` formats
@@ -1467,9 +1478,6 @@ format suite's geometry sweep now e2fsck-verifies every checksum across
 thirteen sizes × three block sizes × three generations.
 
 ## Not yet done
-- Disk Utility Erase end-to-end: the wrappers' root-to-console-user
-  re-dispatch is written but needs `sudo make install-diskutil` and a live
-  Erase to confirm
 - A notification when a locked volume appears and the agent is not running;
   today it simply does not show up
 - Reading a LUKS header from media the user does not own — untested against a
