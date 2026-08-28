@@ -176,14 +176,20 @@ uint32_t ext4_dmask_get(void);
  * Ending the process instead tears the mount down, gives callers EIO, and
  * leaves a crash report naming the invariant that broke.
  *
+ * The message goes through a host-provided handler rather than printf: a
+ * sandboxed FSKit extension has no stdout anyone can read, so the reason for
+ * the abort was invisible exactly where it mattered most. ext4b_assert_fail
+ * (defined by the shim) routes it to os_log and then abort()s -- still
+ * fail-stop, now with a record. It does not return.
+ *
  * This lives in a function rather than in the macro body because ext4_journal.c
  * has parameters named `abort`, which shadow the libc function at the point of
  * expansion. */
+void ext4b_assert_fail(const char *file, int line);
+
 static inline void ext4_assert_failed(const char *file, int line)
 {
-	printf("assertion failed:\nfile: %s\nline: %d\n", file, line);
-	fflush(stdout);
-	abort();
+	ext4b_assert_fail(file, line);
 }
 
 #define ext4_assert(_v)                                                        \
