@@ -144,6 +144,34 @@ static void ext4_buf_free(struct ext4_buf *buf)
 }
 
 static struct ext4_buf *
+ext4_buf_lookup(struct ext4_bcache *bc, uint64_t lba);
+
+/* Fold a direct device write into the cached copy, when one exists.
+ *
+ * ext4_block_writebytes goes straight to the medium, past this cache. That
+ * was always true and never mattered, because nothing wrote the same bytes
+ * both ways. The journaled superblock changes that: block 0 can now sit in
+ * the cache while mount, unmount and journal start/stop write the superblock
+ * directly. Without this, the cached copy goes stale and the next journaled
+ * superblock update commits old bytes over the new ones.
+ *
+ * Deliberately does not mark the buffer dirty: the bytes are already on the
+ * medium; the cache is only being told about them. */
+void ext4_bcache_update_if_cached(struct ext4_bcache *bc, uint64_t lba,
+				  uint32_t offset, const void *src,
+				  uint32_t len)
+{
+	struct ext4_buf *buf;
+
+	if (!bc)
+		return;
+	buf = ext4_buf_lookup(bc, lba);
+	if (!buf || offset + len > bc->itemsize)
+		return;
+	memcpy(buf->data + offset, src, len);
+}
+
+struct ext4_buf *
 ext4_buf_lookup(struct ext4_bcache *bc, uint64_t lba)
 {
 	struct ext4_buf tmp = {

@@ -249,6 +249,18 @@ void ext4_bcache_invalidate_buf(struct ext4_bcache *bc,
  * @param   bc block cache descriptor
  * @param   from starting lba
  * @param   cnt block counts*/
+/**@brief   Fold a direct (cache-bypassing) device write into the cached copy
+ *          of a block, when one exists. Does not mark the buffer dirty: the
+ *          bytes are already on the medium.
+ * @param   bc block cache descriptor (may be NULL)
+ * @param   lba logical block address
+ * @param   offset byte offset within the block
+ * @param   src bytes just written to the medium
+ * @param   len byte count*/
+void ext4_bcache_update_if_cached(struct ext4_bcache *bc, uint64_t lba,
+				  uint32_t offset, const void *src,
+				  uint32_t len);
+
 void ext4_bcache_invalidate_lba(struct ext4_bcache *bc,
 				uint64_t from,
 				uint32_t cnt);

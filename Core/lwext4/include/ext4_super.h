@@ -200,6 +200,15 @@ uint32_t ext4_inodes_in_group_cnt(struct ext4_sblock *s, uint32_t bgid);
  * @return  Standard error code */
 int ext4_sb_write(struct ext4_blockdev *bdev, struct ext4_sblock *s);
 
+/**@brief   Write the superblock through the current journal transaction, so
+ *          the update commits atomically with the rest of the transaction.
+ *          Callers choose this or ext4_sb_write() explicitly; it is not a
+ *          fallback.
+ * @param   bdev block device
+ * @param   s superblock to write
+ * @return  standard error code*/
+int ext4_sb_write_trans(struct ext4_blockdev *bdev, struct ext4_sblock *s);
+
 /**@brief   Superblock read.
  * @param   bdev block device descriptor.
  * @param   s superblock descriptor

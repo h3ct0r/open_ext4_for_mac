@@ -1250,6 +1250,19 @@ int jbd_recover(struct jbd_fs *jbd_fs)
 		 * they are not needed again. Make the first true before
 		 * stating the second. */
 		(void)ext4_block_barrier(jbd_fs->bdev);
+		/* Replay may have rewritten the superblock's own home --
+		 * journaled superblock updates land as tag 0 on volumes with
+		 * blocks larger than 1 KiB, handled by the dedicated branch
+		 * above, but as an ordinary tagged block on 1 KiB volumes,
+		 * where the superblock is block 1. The dedicated branch
+		 * refreshes the in-memory copy; the ordinary path only writes
+		 * the medium. Reload, or everything after this point -- the
+		 * flag edits below, orphan cleanup, the eventual unmount
+		 * write-back -- runs on a stale superblock and quietly undoes
+		 * what replay restored. Measured: a replayed orphan-list head
+		 * vanished at exactly this seam and stranded its inode. */
+		(void)ext4_sb_read(jbd_fs->inode_ref.fs->bdev,
+				   &jbd_fs->inode_ref.fs->sb);
 		/* If we successfully replay the journal,
 		 * clear EXT4_FINCOM_RECOVER flag on the
 		 * ext4 superblock, and set the start of

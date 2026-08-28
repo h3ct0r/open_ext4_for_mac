@@ -46,6 +46,8 @@
 #include <ext4_debug.h>
 
 #include <ext4_super.h>
+#include <ext4_trans.h>
+#include <ext4_bcache.h>
 #include <ext4_crc32.h>
 
 uint32_t ext4_block_group_cnt(struct ext4_sblock *s)
@@ -141,9 +143,57 @@ static void ext4_sb_set_csum(struct ext4_sblock *s)
 
 int ext4_sb_write(struct ext4_blockdev *bdev, struct ext4_sblock *s)
 {
+	int r;
 	ext4_sb_set_csum(s);
-	return ext4_block_writebytes(bdev, EXT4_SUPERBLOCK_OFFSET, s,
-				     EXT4_SUPERBLOCK_SIZE);
+	r = ext4_block_writebytes(bdev, EXT4_SUPERBLOCK_OFFSET, s,
+				  EXT4_SUPERBLOCK_SIZE);
+	if (r != EOK)
+		return r;
+
+	/* writebytes goes straight to the medium, past the block cache --
+	 * and the superblock's block can be *in* that cache now, because
+	 * journaled superblock updates (ext4_sb_write_trans) put it there.
+	 * Tell the cached copy, or the next journaled update commits stale
+	 * bytes over what was just written. */
+	ext4_bcache_update_if_cached(bdev->bc,
+			(bdev->lg_bsize > EXT4_SUPERBLOCK_OFFSET) ? 0 : 1,
+			EXT4_SUPERBLOCK_OFFSET % bdev->lg_bsize,
+			s, EXT4_SUPERBLOCK_SIZE);
+	return EOK;
+}
+
+/* The same write, through the journal.
+ *
+ * The direct form above makes a superblock change durable on its own, with
+ * no relation to any transaction -- which is exactly wrong for a field like
+ * s_last_orphan, whose value only makes sense together with the inode change
+ * it points at. This form updates the superblock's home block through the
+ * cache and marks it dirty in the current transaction, so the field commits
+ * atomically with everything else in it or not at all.
+ *
+ * Replay already understands the result: jbd tags the block by number, the
+ * commit path emits tag 0 for the superblock's block, and recovery has a
+ * dedicated branch for tag 0 that restores bytes 1024..2047. That branch
+ * existed upstream, unreachable, waiting for a writer.
+ *
+ * With no journal or no open transaction this is not a fallback for the
+ * direct form; callers choose explicitly. */
+int ext4_sb_write_trans(struct ext4_blockdev *bdev, struct ext4_sblock *s)
+{
+	struct ext4_block b = EXT4_BLOCK_ZERO();
+	uint32_t off = EXT4_SUPERBLOCK_OFFSET % bdev->lg_bsize;
+	int r;
+
+	ext4_sb_set_csum(s);
+	r = ext4_block_get_sb(bdev, &b);
+	if (r != EOK)
+		return r;
+
+	memcpy((uint8_t *)b.data + off, s, EXT4_SUPERBLOCK_SIZE);
+	r = ext4_trans_set_block_dirty(b.buf);
+
+	ext4_block_set(bdev, &b);
+	return r;
 }
 
 int ext4_sb_read(struct ext4_blockdev *bdev, struct ext4_sblock *s)
