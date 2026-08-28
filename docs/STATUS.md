@@ -1265,6 +1265,23 @@ started. What it costs is stated rather than buried:
   would discard work that succeeded, so a failure with siblings commits the
   batch and returns the error.
 
+**Verified on real hardware** (Kingston DataTraveler, USB): five rounds of
+kill-recovery with genuine e2fsck verdicts, all clean; a physical mid-write
+pull — 3,750 files into a write flood — replayed to a volume e2fsck passes
+untouched; the write barrier observed live on the device through the
+privileged helper; and the durability window measured directly — a file
+written with no sync survived a SIGKILL minutes later, so macOS's periodic
+sync drains idle batches and no timer is needed. The pull also found patch
+0021's bug: unmount asserting on I/O errors from a device that is gone.
+
+One issue is Apple's, documented rather than fixed: after repeated
+kill/pull abuse, DiskArbitration can wedge — the module mounts, activates,
+and is deactivated 2 ms later with DA status 0x204, while direct
+`mount -F` works perfectly. A replug sometimes clears it; SIP forbids
+kicking the daemons; a reboot resets it. First-run guidance should say: if
+the volume stops appearing, unplug and reinsert, then reboot before
+suspecting the driver.
+
 Crash consistency under batching has a history worth keeping. The first
 version of this feature shipped, was caught corrupting volumes under write
 reordering the same afternoon, and was turned off. The mechanism was not

@@ -1,0 +1,91 @@
+Subject: a failed checkpoint read is not an invariant violation
+
+jbd_journal_flush_trans read each log block back with
+ext4_assert(r == EOK). Pull the medium out from under a live mount and that
+assert is reachable: unmount flushes checkpoints, the reads hit a device
+that no longer exists, and the abort takes the whole driver down in the
+middle of teardown. Measured -- a USB stick yanked during a write flood
+produced exactly this crash, SIGABRT in jbd_journal_purge_cp_trans via
+jbd_journal_stop.
+
+An I/O failure is an answer, not a broken invariant. The flush now returns
+an error, and the purge loop stops instead of retrying a transaction that
+can never complete -- the naive fix, breaking out of the flush alone, turns
+the crash into an infinite loop, because the purge re-selects the same
+unfinished transaction forever.
+
+Leaving the transaction unflushed is correct, not merely survivable: the
+staged tail has not moved past it, the superblock still says the log covers
+it, and the next mount replays it. That is what recovery is for -- and it is
+what actually happened: the pulled stick came back, replayed, and e2fsck
+found nothing to say.
+--- a/src/ext4_journal.c
++++ b/src/ext4_journal.c
+@@ -1332,13 +1332,15 @@
+ 
+ /*
+  * This routine is only suitable to committed transactions. */
+-static void jbd_journal_flush_trans(struct jbd_trans *trans)
++static int jbd_journal_flush_trans(struct jbd_trans *trans)
+ {
+ 	struct jbd_buf *jbd_buf, *tmp;
+ 	struct jbd_journal *journal = trans->journal;
+ 	struct ext4_fs *fs = journal->jbd_fs->inode_ref.fs;
++	int rc = EOK;
+ 	void *tmp_data = ext4_malloc(journal->block_size);
+-	ext4_assert(tmp_data);
++	if (!tmp_data)
++		return ENOMEM;
+ 
+ 	TAILQ_FOREACH_SAFE(jbd_buf, &trans->buf_queue, buf_node,
+ 			tmp) {
+@@ -1354,7 +1356,23 @@
+ 			r = jbd_block_get(journal->jbd_fs,
+ 						&jbd_block,
+ 						jbd_buf->jbd_lba);
+-			ext4_assert(r == EOK);
++			/* Asserting here aborted the whole driver when the
++			 * medium disappeared under a live mount -- unmount
++			 * flushes checkpoints, the reads hit a device that is
++			 * gone, and SIGABRT took the process down mid-
++			 * teardown (measured: a USB stick pulled during a
++			 * write flood). Failure is an answer, not an
++			 * invariant violation: stop flushing and leave the
++			 * transaction on the checkpoint queue. The staged
++			 * tail has not moved past it, so the superblock still
++			 * says the log covers it, and the next mount replays
++			 * it -- which is exactly what recovery is for, and
++			 * what happened when the pulled stick came back
++			 * clean. */
++			if (r != EOK) {
++				rc = r;
++				break;
++			}
+ 			memcpy(tmp_data, jbd_block.data,
+ 					journal->block_size);
+ 			ext4_block_set(fs->bdev, &jbd_block);
+@@ -1369,6 +1387,7 @@
+ 	}
+ 
+ 	ext4_free(tmp_data);
++	return rc;
+ }
+ 
+ static void
+@@ -1424,7 +1443,15 @@
+ 				jbd_journal_write_sb(journal);
+ 				break;
+ 			} else {
+-				jbd_journal_flush_trans(trans);
++				/* A flush that cannot read its own log --
++				 * the medium is gone or failing -- must not
++				 * be retried forever: the transaction never
++				 * completes, so this loop would spin on it.
++				 * Stop purging. The staged tail still covers
++				 * everything unflushed, so the next mount
++				 * replays it. */
++				if (jbd_journal_flush_trans(trans) != EOK)
++					break;
+ 				flushed = true;
+ 			}
+ 		}
