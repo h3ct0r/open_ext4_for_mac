@@ -28,6 +28,8 @@
 #include <string.h>
 #include <errno.h>
 #include <stdio.h>
+#include <stdarg.h>
+#include <time.h>
 #include <pthread.h>
 #include <stdatomic.h>
 
@@ -82,6 +84,27 @@ static void bridge_log(int level, const char *msg)
 {
     if (g_log_fn)
         g_log_fn(g_log_ctx, level, msg);
+}
+
+/* The formatted variant. The mount path's log lines used to carry no numbers
+ * at all -- "replaying journal", "recovery failed" -- and a hardware-only
+ * failure then cost an iteration per missing fact. Every failure line gets
+ * its errno; every phase that can be slow gets its duration. */
+static void bridge_logf(int level, const char *fmt, ...)
+{
+    char msg[256];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+    bridge_log(level, msg);
+}
+
+static uint64_t mono_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
 }
 
 /*
@@ -707,6 +730,14 @@ int ext4b_mount(ext4b_device *dev, bool read_only)
     dev->mounted   = true;
     dev->read_only = read_only || dev->read_only;
 
+    if (dev->read_only && info.needs_recovery) {
+        /* No replay on a read-only mount, so no way to show the committed
+         * state: every file predates the crash. Without this line, "the
+         * files look old" is unattributable in the field. */
+        bridge_log(2, "read-only mount of an unreplayed journal: "
+                      "contents predate the last crash");
+    }
+
     if (!dev->read_only) {
         /*
          * Replay before touching anything. lwext4 lists RECOVER under
@@ -715,14 +746,19 @@ int ext4b_mount(ext4b_device *dev, bool read_only)
          */
         if (info.needs_recovery) {
             bridge_log(1, "replaying journal");
+            uint64_t t0 = mono_ms();
             r = ext4_recover(BRIDGE_MOUNT_POINT);
             if (r != EOK) {
-                bridge_log(3, "journal recovery failed; refusing read-write mount");
+                bridge_logf(3, "journal recovery failed (errno %d) after "
+                               "%llu ms; refusing read-write mount",
+                            r, (unsigned long long)(mono_ms() - t0));
                 ext4_umount(BRIDGE_MOUNT_POINT);
                 ext4_device_unregister(BRIDGE_DEV_NAME);
                 dev->mounted = false;
                 return r;
             }
+            bridge_logf(1, "journal replayed in %llu ms",
+                        (unsigned long long)(mono_ms() - t0));
         }
 
         /*
@@ -734,7 +770,8 @@ int ext4b_mount(ext4b_device *dev, bool read_only)
         if (info.has_journal) {
             r = ext4_journal_start(BRIDGE_MOUNT_POINT);
             if (r != EOK) {
-                bridge_log(3, "could not start journal; refusing read-write mount");
+                bridge_logf(3, "could not start journal (errno %d); "
+                               "refusing read-write mount", r);
                 ext4_umount(BRIDGE_MOUNT_POINT);
                 ext4_device_unregister(BRIDGE_DEV_NAME);
                 dev->mounted = false;
@@ -750,19 +787,22 @@ int ext4b_mount(ext4b_device *dev, bool read_only)
          * freeing blocks and that has to be a transaction like any other.
          */
         uint32_t freed = 0, dropped = 0;
+        uint64_t t0 = mono_ms();
         int orphan_r = dev->skip_orphan_cleanup
                      ? EOK
                      : ext4b_orphan_cleanup(dev, &freed, &dropped);
         if (orphan_r != EOK) {
-            bridge_log(3, "orphan-list cleanup failed; the volume is usable "
-                          "but some space may still be unreclaimed");
+            bridge_logf(3, "orphan-list cleanup failed (errno %d) after "
+                           "reclaiming %u and dropping %u in %llu ms; the "
+                           "volume is usable but some space may still be "
+                           "unreclaimed",
+                        orphan_r, freed, dropped,
+                        (unsigned long long)(mono_ms() - t0));
         } else if (freed || dropped) {
-            char msg[128];
-            snprintf(msg, sizeof(msg),
-                     "orphan list: reclaimed %u interrupted delete(s), "
-                     "dropped %u stale entry/entries",
-                     freed, dropped);
-            bridge_log(1, msg);
+            bridge_logf(1, "orphan list: reclaimed %u interrupted delete(s), "
+                           "dropped %u stale entry/entries in %llu ms",
+                        freed, dropped,
+                        (unsigned long long)(mono_ms() - t0));
         }
     }
 
@@ -774,22 +814,37 @@ int ext4b_unmount(ext4b_device *dev)
     if (!dev || !dev->mounted)
         return EINVAL;
 
+    /* Teardown always runs to the end -- a device left half-registered is
+     * worse than any single failed step -- but the FIRST failure is the one
+     * reported. Four layers each dropped their own error here, and a stick
+     * that failed its final write-back ejected "clean". */
+    int r = EOK;
+
     /* Before the journal stops. A transaction still open here is a set of
      * mutations the caller was told had succeeded, and stopping the journal
      * underneath it discards them. */
-    (void)txn_drain(dev);
+    int step = txn_drain(dev);
+    if (r == EOK)
+        r = step;
 
     if (dev->journal_running) {
-        ext4_journal_stop(BRIDGE_MOUNT_POINT);
+        step = ext4_journal_stop(BRIDGE_MOUNT_POINT);
+        if (r == EOK)
+            r = step;
         dev->journal_running = false;
     }
 
-    int r = ext4_umount(BRIDGE_MOUNT_POINT);
+    step = ext4_umount(BRIDGE_MOUNT_POINT);
+    if (r == EOK)
+        r = step;
     ext4_device_unregister(BRIDGE_DEV_NAME);
     dev->mounted = false;
 
-    if (dev->flush_fn)
-        dev->flush_fn(dev->ctx);
+    if (dev->flush_fn) {
+        step = dev->flush_fn(dev->ctx) == 0 ? EOK : EIO;
+        if (r == EOK)
+            r = step;
+    }
     return r;
 }
 
@@ -802,7 +857,9 @@ int ext4b_journal_recover(ext4b_device *dev)
 
     int r = ext4_recover(BRIDGE_MOUNT_POINT);
     if (r == EOK && dev->flush_fn)
-        dev->flush_fn(dev->ctx);
+        /* The claim "replayed the journal" is the claim that the replay is
+         * on the medium; a discarded flush made fsck report it anyway. */
+        r = dev->flush_fn(dev->ctx) == 0 ? EOK : EIO;
     return r;
 }
 
@@ -1181,7 +1238,11 @@ int ext4b_read(ext4b_device *dev,
     }
 
     ext4_fs_put_inode_ref(&ref);
-    return (*out_read > 0) ? EOK : r;
+    /* count was clamped to EOF above, so a loop that stopped short stopped on
+     * an error -- and a short count with rc 0 is indistinguishable from EOF
+     * to the caller. `cp` off a failing stick was producing silently
+     * truncated files this way. *out_read still says how far we got. */
+    return r;
 }
 
 int ext4b_readlink(ext4b_device *dev,
@@ -1293,7 +1354,10 @@ int ext4b_map_extents(ext4b_device *dev,
         }
         *out_count = n;
         ext4_fs_put_inode_ref(&ref);
-        return (n > 0) ? EOK : r;
+        /* Both normal exits (gap to EOF, out[] full) leave r == EOK; a
+         * nonzero r is a probe that failed mid-file, and a silently
+         * truncated map is a wrong map. */
+        return r;
     }
 #endif
 
@@ -1337,7 +1401,9 @@ int ext4b_map_extents(ext4b_device *dev,
 
     *out_count = n;
     ext4_fs_put_inode_ref(&ref);
-    return (n > 0) ? EOK : r;
+    /* Same contract as the extent path above: nonzero r means the map
+     * stopped on an error, not at EOF. */
+    return r;
 }
 
 /* ------------------------------------------------------- xattr namespaces -- */
@@ -1649,10 +1715,13 @@ static int txn_finish(ext4b_device *dev, struct ext4_fs *fs, int r)
             txn_abort(fs);
             return r;
         }
-        /* Siblings in the batch did nothing wrong. */
-        (void)txn_commit(fs);
+        /* Siblings in the batch did nothing wrong -- but if the commit that
+         * carries them ALSO fails, that failure must not hide behind the
+         * original error: the original was one operation, the commit is the
+         * whole batch. Report the commit's. */
+        int cr = txn_commit(fs);
         dev->txn_ops = 0;
-        return r;
+        return (cr != EOK) ? cr : r;
     }
 
     dev->txn_ops++;
@@ -1662,9 +1731,12 @@ static int txn_finish(ext4b_device *dev, struct ext4_fs *fs, int r)
     r = txn_commit(fs);
     dev->txn_ops = 0;
     if (r == EOK) {
-        ext4_block_cache_flush(&dev->bdev);
-        if (dev->flush_fn && !dev->journal_running)
-            dev->flush_fn(dev->ctx);
+        /* These two are the durability of everything just committed on a
+         * journal-less volume, and of the checkpoint write-back on a
+         * journalled one. fsync(2) used to return 0 over their failures. */
+        r = ext4_block_cache_flush(&dev->bdev);
+        if (r == EOK && dev->flush_fn && !dev->journal_running)
+            r = dev->flush_fn(dev->ctx) == 0 ? EOK : EIO;
     }
     return r;
 }
@@ -1680,7 +1752,7 @@ static int txn_drain(ext4b_device *dev)
     int r = txn_commit(fs);
     dev->txn_ops = 0;
     if (r == EOK)
-        ext4_block_cache_flush(&dev->bdev);
+        r = ext4_block_cache_flush(&dev->bdev);
     return r;
 }
 
@@ -2452,8 +2524,20 @@ int ext4b_orphan_cleanup(ext4b_device *dev, uint32_t *out_freed,
          * further, in which case there is nothing left to do but drop the
          * entry. Freeing it a second time would corrupt the group counters. */
         bool in_use = true;
-        if (inode_in_use(fs, ino, &in_use) != EOK)
-            in_use = true;   /* if we cannot tell, do not touch it */
+        r = inode_in_use(fs, ino, &in_use);
+        if (r != EOK) {
+            /* Cannot tell. Both guesses are destructive: freeing an
+             * already-freed inode corrupts the group counters, and dropping
+             * a still-allocated one leaks it beyond anything but e2fsck.
+             * The head has not moved yet, so stopping leaves the whole list
+             * for the next mount, which the caller already treats as
+             * "usable; some space may be unreclaimed". The old fallback
+             * guessed in_use=true -- which routed an unreadable bitmap into
+             * truncate-and-free, the exact double-free the comment above
+             * promises to avoid. */
+            ext4_fs_put_inode_ref(&ref);
+            return txn_finish(dev, fs, r);
+        }
 
         r = orphan_publish_head(dev, fs, next);
         if (r != EOK) {
@@ -2990,7 +3074,10 @@ int ext4b_write(ext4b_device *dev,
         *out_written += chunk;
     }
 
-    ext4_block_cache_write_back(&dev->bdev, 0);
+    /* Leaving write-back mode is what issues the queued metadata writes; a
+     * discarded failure here meant blocks the caller was told about never
+     * landed. */
+    int flush_r = ext4_block_cache_write_back(&dev->bdev, 0);
 
     /* Growing the file is only visible once i_size says so. */
     if (*out_written > 0) {
@@ -3001,9 +3088,14 @@ int ext4b_write(ext4b_device *dev,
     }
 
     /* A partial write that made progress is still a success; the caller sees
-     * how far it got. Report an error only when nothing was written. */
+     * how far it got. Report an error only when nothing was written -- that
+     * is POSIX's short write, and ENOSPC mid-loop is its ordinary cause. A
+     * failed flush is different: it invalidates the count already reported,
+     * so it wins over the short-write rule. */
     if (*out_written > 0)
         r = EOK;
+    if (flush_r != EOK)
+        r = flush_r;
 
     ext4_fs_put_inode_ref(&ref);
     return txn_finish(dev, fs, r);

@@ -364,10 +364,21 @@ final class BlockDeviceBridge {
 
     // MARK: - The two I/O families
 
+    // A short count from the resource is a failure here, not a partial
+    // success: the core asked for exactly the blocks it needs, a short read
+    // leaves the tail of the buffer stale, and a short write was reported to
+    // the journal as durable. Both used to be discarded with `_ =`.
+    private struct ShortIO: Error {}
+
     private func readRaw(into buf: UnsafeMutableRawBufferPointer,
                          at offset: off_t, length: Int) throws {
         switch mode {
-        case .direct:        _ = try resource.read(into: buf, startingAt: offset, length: length)
+        case .direct:
+            let got = try resource.read(into: buf, startingAt: offset, length: length)
+            guard got == length else {
+                Ext4Log.io.error("short read: \(got, privacy: .public) of \(length, privacy: .public) at \(offset, privacy: .public)")
+                throw ShortIO()
+            }
         case .metadataCache: try resource.metadataRead(into: buf, startingAt: offset, length: length)
         }
     }
@@ -376,7 +387,11 @@ final class BlockDeviceBridge {
                           at offset: off_t, length: Int) throws {
         switch mode {
         case .direct:
-            _ = try resource.write(from: buf, startingAt: offset, length: length)
+            let put = try resource.write(from: buf, startingAt: offset, length: length)
+            guard put == length else {
+                Ext4Log.io.error("short write: \(put, privacy: .public) of \(length, privacy: .public) at \(offset, privacy: .public)")
+                throw ShortIO()
+            }
         case .metadataCache:
             // Delayed so the kernel can coalesce; ordering is imposed by
             // flush() at journal commit points.
