@@ -79,32 +79,22 @@ instead of failing — plus several of our own. See
 [docs/STATUS.md](docs/STATUS.md) and
 [patches/lwext4/README.md](patches/lwext4/README.md).
 
-> **Removable media is writable when the write barrier is real, read-only
-> when it is not.** FSKit's own barrier, `metadataFlush`, fails with `EIO`
-> here, so the driver gets its barrier from a tiny privileged helper instead.
-> At mount time it asks that helper for a real cache-flush on the actual
-> device: if one is confirmed, the volume mounts read-write — the
-> configuration proven by five kill-recovery rounds and a physical mid-write
-> pull, all clean; if no barrier is available (helper not installed, not
-> approved, or denied), it mounts read-only and logs why.
+> **Everything writable mounts read-write — USB sticks included — and that
+> is a measured decision.** The driver's earliest write path corrupted a
+> pulled stick five times out of five, so for a while removable media was
+> read-only unless a privileged helper daemon confirmed a device cache-flush.
+> Then the question was remeasured on the current direct-I/O write path, as
+> an A/B with that daemon as the control arm: twenty mid-write pulls across
+> five drives — USB-2 sticks through an NVMe SSD behind a bridge chip,
+> fenced and under sustained load — recovered by journal replay to an
+> `e2fsck`-clean filesystem every time, barriered and unbarriered alike
+> ([Tests/run_pull_tests.sh](Tests/run_pull_tests.sh)). The daemon is gone.
 >
-> Why it matters: without an enforced barrier, a stick pulled mid-write can
-> come back corrupt — a disk image recovers cleanly five times out of five, a
-> bare USB stick was damaged five of five, because a stick reorders its own
-> write cache. On one occasion ext4's recovery said so directly — *"Journal
-> transaction 8 was corrupt, replay was aborted"*.
->
-> Reading is never affected. Disk images and internal disks are always
-> read-write (their writes reach APFS in issue order). The one manual knob is
-> the **unsafe override** — force unbarriered writes, for someone who accepts
-> the risk knowingly:
->
-> ```bash
-> Ext4Mac removable-writes on
-> ```
->
-> **Eject before unplugging.** Details in [docs/STATUS.md](docs/STATUS.md).
-> Keep a backup.
+> **Eject before unplugging** anyway: a pull mid-write can panic macOS
+> itself (an `IOMediaBSDClient` busy timeout in Apple's storage stack,
+> observed once during that sweep), and the last seconds of unsynced writes
+> are only as durable as any filesystem's. Details in
+> [docs/STATUS.md](docs/STATUS.md). Keep a backup.
 
 ## Requirements
 
@@ -118,10 +108,8 @@ To *mount* volumes, additionally:
 - A **paid Apple Developer Program** membership — FSKit's
   `com.apple.developer.fskit.fsmodule` is a restricted entitlement and needs a
   provisioning profile to authorise it
-- To write to **removable** media, a root daemon with Full Disk Access, because
-  no barrier is otherwise reachable from the sandbox
 
-Both are covered under [Building](#building). Neither is needed to build the
+That is covered under [Building](#building). It is not needed to build the
 driver or to run any of the test suites.
 
 ## Building
@@ -175,60 +163,36 @@ a module that is merely disabled. `make sign` runs
 the ones the embedded profile actually authorises, precisely because this
 failure has no other symptom. See [docs/SIGNING.md](docs/SIGNING.md).
 
-### Writing to removable media needs the barrier daemon
+### Removable media, pulled sticks, and the retired barrier daemon
 
-Removable media mounts **read-write when a write barrier is confirmed on it,
-read-only when none is available**. A journal is a claim about write ordering,
-and FSKit exposes no way for a third-party module to enforce it: `metadataFlush`
-— the only write barrier in the whole `FSResource` API — fails with `EIO` here,
-and the device-level call underneath it, `DKIOCSYNCHRONIZECACHE`, is denied to
-the sandbox by name. A USB stick pulled from under an *unbarriered* read-write
-mount came back structurally damaged five times out of five.
+Removable media mounts **read-write like everything else**. A journal is a
+claim about write ordering, and FSKit exposes no way for a third-party module
+to flush a drive's cache: `metadataFlush` — the only write barrier in the
+whole `FSResource` API — fails with `EIO` here, and the device-level call
+underneath it, `DKIOCSYNCHRONIZE`, is denied to the sandbox by name. For a
+while that gap was closed by `ext4barrierd`, a root daemon with one verb
+(flush this disk's cache), and removable media was read-only without it.
 
-The barrier therefore has to be issued from outside the sandbox, by a small
-root daemon that knows exactly one verb: flush this disk's cache. It never
-reads a byte, never writes one, and issues no other ioctl. Install it and the
-mount asks it for a real barrier at mount time — succeeds, and the volume is
-read-write; without the daemon, removable media stays read-only.
+The daemon was retired after the question was remeasured on the current
+write path, which hands every write synchronously to the device through
+FSKit's raw descriptor. A five-drive pull-test sweep — twenty mid-write
+pulls, fenced and under sustained load, with the daemon as the A/B control
+arm — recovered identically with and without barriers: `e2fsck` found
+nothing to fix, and no synced file was lost
+([Tests/run_pull_tests.sh](Tests/run_pull_tests.sh), results in
+[docs/STATUS.md](docs/STATUS.md)). The sweep also showed the old policy
+never covered the drives most likely to cache: large sticks and USB SSDs
+report themselves as *fixed* media, so they wrote unbarriered all along.
 
-```bash
-make sign                       # the daemon must carry your Developer ID
-sudo make install-barrier       # /Library/PrivilegedHelperTools + /Library/LaunchDaemons
-```
-
-Then grant it **Full Disk Access**, which cannot be automated and is not
-optional:
-
-> **System Settings → Privacy & Security → Full Disk Access → +**
-> press **⌘⇧G**, enter `/Library/PrivilegedHelperTools`, and add **`ext4barrierd`**
-
-Being root is not enough to open removable media — that is gated by TCC, and a
-daemon has no UI, so it is never prompted, only denied. Two consequences follow
-that are easy to lose an afternoon to:
-
-- The grant is tied to the binary's **code identity and path**, so an ad-hoc
-  signature cannot hold it across a reinstall, and moving the binary needs a
-  fresh grant. `install-barrier` refuses an unsigned binary for that reason.
-- If you re-grant against a *rebuilt* daemon, remove the old Full Disk Access
-  entry first and add it again.
-
-With the daemon installed and approved, removable media is read-write
-automatically. The one manual knob is the **unsafe override** — force writes
-with no barrier at all, for someone who accepts the risk knowingly:
+If a machine still has the daemon from an earlier build:
 
 ```bash
-Ext4Mac removable-writes on     # unsafe: writes without an enforced barrier
-make preflight EXT4_KILL_DEVICE=diskNs1
+sudo make uninstall-barrier
 ```
 
-`make preflight` refuses to let a test run start until it has **observed a live
-barrier on that device** — not merely confirmed that the pieces which should
-produce one are installed. Three consecutive five-round runs against real
-hardware once completed, reported results, and measured nothing, because the
-barrier was silently absent each time.
-
-Without the daemon the driver still works; removable media simply stays
-read-only, and disk images are unaffected either way.
+For pull-testing real media, `make preflight EXT4_KILL_DEVICE=diskNs1`
+verifies the hand-granted switches and proves the driver owns the volume
+before a run spends your time measuring nothing.
 
 ## Documentation
 

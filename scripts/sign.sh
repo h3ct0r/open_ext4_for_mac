@@ -66,22 +66,7 @@ elif [ "$IDENTITY" != "-" ]; then
   echo "         the extension will likely fail to load; see docs/SIGNING.md" >&2
 fi
 
-# Sign inside-out: the helper and the extension first, then the app.
-#
-# The helper is a bare Mach-O in Contents/MacOS rather than a bundle, so
-# codesign will not reach it on its own -- it would be sealed as a resource and
-# left unsigned, and launchd refuses to run an unsigned LaunchDaemon from a
-# bundle. It carries no entitlements: it runs as root outside the sandbox,
-# which is the entire reason it exists, and it needs nothing granted on top.
-HELPER="$APP/Contents/MacOS/ext4barrierd"
-if [ -f "$HELPER" ]; then
-  echo "signing barrier helper..."
-  codesign --force --timestamp --options runtime \
-           "${KEYCHAIN_ARG[@]}" \
-           --sign "$IDENTITY" \
-           "$HELPER"
-fi
-
+# Sign inside-out: the extension first, then the app that contains it.
 echo "signing extension..."
 codesign --force --timestamp --options runtime \
          --entitlements "$ENTITLEMENTS" \

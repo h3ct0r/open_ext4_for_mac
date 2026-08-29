@@ -57,12 +57,15 @@ final class BlockDeviceBridge {
     /// it and reads directly, as we do. So the API works in production, and
     /// nothing observable from here explains why it is closed to us.
     ///
-    /// The consequence is not performance. `metadataFlush` is the **only**
-    /// write barrier in the whole `FSResource` API, so with `.direct` there is
-    /// no barrier at all and `flush()` below is a no-op: lwext4 issues its
-    /// journal barriers faithfully and nothing carries them out. A real USB
-    /// stick, pulled from under a live mount, came back with half a
-    /// transaction. See docs/STATUS.md.
+    /// The consequence: `metadataFlush` is the **only** write barrier in the
+    /// whole `FSResource` API, so with `.direct` there is no device-cache
+    /// flush at all and `flush()` below is a no-op -- lwext4 issues its
+    /// journal barriers faithfully and they stop at the drive's doorstep.
+    /// Measured, twice: the driver's earliest write path lost half a
+    /// transaction to a pulled stick, and the current direct path survived
+    /// twenty mid-write pulls across five drives without e2fsck finding a
+    /// thing -- which is why the privileged barrier daemon that once closed
+    /// this gap was retired. See docs/STATUS.md.
     ///
     enum Mode {
         case direct
@@ -107,37 +110,8 @@ final class BlockDeviceBridge {
         // require sector (physicalBlockSize) addressed operations" -- and this
         // bridge has always aligned to blockSize. That is a candidate
         // explanation for metadataRead failing with EIO here, which is why
-        // .direct is what runs and why there is no write barrier.
+        // .direct is what runs.
         Ext4Log.io.info("device \(resource.bsdName, privacy: .public): blockSize=\(resource.blockSize) physicalBlockSize=\(resource.physicalBlockSize) blocks=\(resource.blockCount)")
-
-        // Look for the barrier before building anything on top of it, and say
-        // so either way: a journal running without one is not a slower driver,
-        // it is a driver that can lose a volume.
-        //
-        // Asked even for a read-only mount, where it will not be used. Whether
-        // this medium could be written safely is worth knowing before anyone
-        // decides to write to it, and answering it read-only costs one ioctl
-        // and touches nothing.
-        Self.probeMetadataFamily(resource)
-        self.barrierFD = Self.findBarrierDescriptor(bsdName: resource.bsdName)
-
-        // Connect to the helper now; let the first commit be what exercises it.
-        //
-        // This is a design choice, not a limitation: loadResource has already
-        // asked this same helper for a real barrier on this same device a
-        // moment earlier, to decide read-write vs read-only on removable media,
-        // and that probe works (hardware-verified: "write barrier confirmed").
-        // So the bridge need not re-prove it at construction -- it just holds a
-        // connection ready, and the journal's first real barrier both uses it
-        // and logs the outcome once.
-        self.barrierHelper = isWritable ? BarrierClient(bsdName: resource.bsdName) : nil
-
-        if isWritable && barrierFD == nil && barrierHelper == nil {
-            Ext4Log.io.error("""
-                no write barrier for \(resource.bsdName, privacy: .public); \
-                journal ordering cannot be enforced
-                """)
-        }
 
         let ctx = Unmanaged.passUnretained(self).toOpaque()
         guard let dev = ext4b_device_create(ctx, bs, resource.blockCount,
@@ -146,92 +120,6 @@ final class BlockDeviceBridge {
             return nil
         }
         self.device = dev
-    }
-
-    /// The descriptor FSKit does the I/O through, if it can be found.
-    ///
-    /// Not opened here -- `open("/dev/rdiskN")` from inside the sandbox is
-    /// refused, as it should be. This is FSKit's own descriptor, discovered by
-    /// walking this process's descriptor table, and it is the only route to a
-    /// write barrier that this module has. Nil means the journal is committing
-    /// with nothing enforcing order beneath it, which is a correctness
-    /// problem and is reported as one.
-    private let barrierFD: Int32?
-
-    /// The privileged helper, when it is reachable. This is the barrier that
-    /// actually works; `barrierFD` above is the one the sandbox refuses, kept
-    /// so that refusal is measured on every mount rather than remembered.
-    private let barrierHelper: BarrierClient?
-
-    /// Said once each, on the first commit that settles the question. Every
-    /// journal commit calls flush(), and a line per commit would bury the log
-    /// in the answer to a question asked once.
-    private var announcedBarrier = false
-    private var warnedNoBarrier = false
-
-    /// Find the open descriptor for `bsdName` among this process's own.
-    ///
-    /// FSKit performs the resource's I/O inside the extension, so it has to
-    /// hold the device open somewhere; in practice that is fd 3 on
-    /// `/dev/rdiskN`. Nothing documents this and nothing promises it will
-    /// stay true, so the search is by path rather than by number and a miss
-    /// is handled rather than assumed away.
-    private static func findBarrierDescriptor(bsdName: String) -> Int32? {
-        var path = [CChar](repeating: 0, count: Int(MAXPATHLEN))
-        let limit = Int32(min(getdtablesize(), 1024))
-
-        for fd in 0..<limit where fcntl(fd, F_GETPATH, &path) == 0 {
-            let p = String(cString: path)
-            guard p == "/dev/\(bsdName)" || p == "/dev/r\(bsdName)" else { continue }
-            var report = ext4b_barrier_report()
-            let rc = ext4b_barrier_fd_verbose(fd, &report)
-            if rc == 0 {
-                Ext4Log.io.info("write barrier available on \(p, privacy: .public) (fd \(fd, privacy: .public))")
-                return fd
-            }
-            var deviceBlockSize: UInt32 = 0
-            let reach = ext4b_probe_disk_ioctl(fd, &deviceBlockSize)
-            func why(_ e: Int32) -> String { e == 0 ? "ok" : String(cString: strerror(e)) }
-            let reachText = reach == 0
-                ? "DKIOCGETBLOCKSIZE ok (\(deviceBlockSize)), so disk ioctls do reach this descriptor"
-                : "DKIOCGETBLOCKSIZE \(why(reach)), so no disk ioctl reaches this descriptor"
-            Ext4Log.io.error("""
-                \(p, privacy: .public) supports no write barrier -- \
-                DKIOCSYNCHRONIZE: \(why(report.sync_barrier), privacy: .public); \
-                DKIOCSYNCHRONIZECACHE: \(why(report.sync_cache), privacy: .public); \
-                F_FULLFSYNC: \(why(report.fullfsync), privacy: .public); \
-                \(reachText, privacy: .public)
-                """)
-        }
-        return nil
-    }
-
-    /// Ask the metadata I/O family one question and write down the answer.
-    ///
-    /// Log-only: nothing here changes what the driver does. It exists because
-    /// the family's unavailability is the reason this module has no write
-    /// barrier, and "still EIO" needs to be a measurement taken on the build
-    /// in front of us rather than a fact remembered from a previous one --
-    /// especially while entitlements are being changed to try to open it.
-    ///
-    /// One page at offset 0: aligned to `blockSize` and `physicalBlockSize`
-    /// alike, a length the documentation cannot object to, and a region every
-    /// volume has.
-    static func probeMetadataFamily(_ resource: FSBlockDeviceResource) {
-        let length = 4096
-        let buf = UnsafeMutableRawBufferPointer.allocate(byteCount: length,
-                                                        alignment: 4096)
-        defer { buf.deallocate() }
-
-        do {
-            try resource.metadataRead(into: buf, startingAt: 0, length: length)
-            Ext4Log.io.info("metadata family: metadataRead OK -- the write barrier is available")
-        } catch {
-            Ext4Log.io.error("""
-                metadata family: metadataRead \
-                \(error.localizedDescription, privacy: .public)
-                """)
-        }
     }
 
     deinit {
@@ -444,19 +332,22 @@ final class BlockDeviceBridge {
         }
     }
 
-    /// The write barrier the journal asks for at every commit point.
+    /// The barrier hook the journal calls at every commit point -- and, with
+    /// `.direct`, deliberately a no-op.
     ///
-    /// With `.direct` the bytes have already been handed to the drive, but
-    /// handed over is not committed: the drive may still be holding them in
-    /// volatile cache, free to write them in whatever order it likes. That is
-    /// the difference between a disk image, which reaches APFS through the
-    /// page cache in issue order and survives every crash test, and a USB
-    /// stick, which does not and did not.
-    ///
-    /// `metadataFlush` would be the sanctioned way to do this and is closed to
-    /// this module, so the barrier goes to the device directly through the
-    /// descriptor FSKit holds. If there is no descriptor there is no barrier,
-    /// and the honest answer is to say so rather than to report success.
+    /// With `.direct` the bytes have already been handed to the device
+    /// synchronously through FSKit's raw descriptor; the only cache left
+    /// between the journal and the medium is the drive's own. There is no way
+    /// to flush that one from this sandbox (`metadataFlush` fails with EIO
+    /// for this module, and the sandbox denies every disk ioctl by name), and
+    /// remeasurement says it does not matter on this write path: twenty
+    /// mid-write pulls across five drives -- including an NVMe SSD behind a
+    /// bridge chip, and with a privileged helper daemon issuing real
+    /// DKIOCSYNCHRONIZE barriers as the control arm -- all recovered by
+    /// journal replay to an e2fsck-clean filesystem, barriered and
+    /// unbarriered alike. That daemon was removed on the strength of the
+    /// measurement; Tests/run_pull_tests.sh is how to repeat it, and
+    /// docs/STATUS.md holds the numbers.
     fileprivate func flush() -> Int32 {
         guard isWritable else { return 0 }
 
@@ -467,49 +358,6 @@ final class BlockDeviceBridge {
                 Ext4Log.io.error("metadata flush failed: \(error.localizedDescription, privacy: .public)")
                 return EIO
             }
-        }
-
-        // The helper first: in this sandbox it is the only one of the two that
-        // can actually reach the device.
-        if let barrierHelper {
-            let rc = barrierHelper.barrier()
-            if rc == 0 {
-                // Once, on the first one that works, so the log says plainly
-                // whether this mount is ordered or only hoping to be.
-                if !announcedBarrier {
-                    announcedBarrier = true
-                    // Named, because something reads this back to decide
-                    // whether a run is worth starting, and an unqualified
-                    // "barrier active" matches any volume that happened to be
-                    // mounted recently -- including a disk image from another
-                    // test. That false pass is exactly what the check exists
-                    // to prevent.
-                    Ext4Log.io.info("""
-                        write barrier active via the privileged helper on \
-                        \(self.resource.bsdName, privacy: .public)
-                        """)
-                }
-                return 0
-            }
-            // Not EIO: refusing every operation is worse than proceeding
-            // without ordering, and the read-only-by-default policy is what
-            // stands between an unbarriered volume and a user who did not
-            // choose that. Say so loudly, once, and carry on.
-            if !warnedNoBarrier {
-                warnedNoBarrier = true
-                Ext4Log.io.error("""
-                    write barrier unavailable: \(String(cString: strerror(rc)), privacy: .public) \
-                    -- journal ordering is not enforced on this mount
-                    """)
-            }
-            return 0
-        }
-
-        guard let barrierFD else { return 0 }
-        let rc = ext4b_barrier_fd(barrierFD)
-        if rc != 0 {
-            Ext4Log.io.error("write barrier failed: \(String(cString: strerror(rc)), privacy: .public)")
-            return EIO
         }
         return 0
     }

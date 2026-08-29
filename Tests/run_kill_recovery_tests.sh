@@ -17,7 +17,10 @@
 #
 # So on an image this suite proves the journal and its recovery are correct.
 # Pointed at a physical disk -- EXT4_KILL_DEVICE=diskN, which ERASES it -- it
-# becomes the detector for the write barrier this driver does not have.
+# exercises real media with real caches -- the configuration the pull-test
+# sweep measured clean, twenty pulls across five drives, which is what
+# retired the barrier daemon (docs/STATUS.md). Tests/run_pull_tests.sh is
+# the harsher sibling: it pulls the device instead of killing the process.
 #
 # Needs the extension signed, installed and enabled. Writes a report to
 # build/kill-recovery-report.txt.

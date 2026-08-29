@@ -249,55 +249,26 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         // UUID. A dirty journal is replayed before the volume is written.
         //
         //
-        // Removable media is writable exactly when ordering is real.
+        // Removable media gets the same contract, and that is a measured
+        // decision, twice over. The read-only-unless-barriered policy that
+        // used to live here (behind a privileged helper daemon issuing
+        // DKIOCSYNCHRONIZE) guarded against a corruption measured on the
+        // driver's earliest write path; on the current direct-I/O path the
+        // hazard did not survive remeasurement. Five drives -- USB-2 sticks
+        // through an NVMe SSD behind a bridge chip -- took twenty mid-write
+        // pulls, fenced and under sustained load, and every one recovered by
+        // journal replay to a filesystem e2fsck found nothing to fix
+        // (Tests/run_pull_tests.sh; results in docs/STATUS.md). The policy
+        // also never covered the drives most likely to cache: anything
+        // claiming fixed media on an external bus -- large sticks, USB SSDs
+        // -- reported non-removable and wrote unbarriered all along.
         //
-        // The old policy -- read-only unless a marker said otherwise -- dated
-        // from when no write barrier existed here at all, and a stick pulled
-        // from under a live mount came back corrupt five times out of five.
-        // The barrier exists now (the privileged helper), and with it the
-        // same abuse was measured clean: five kill-recovery rounds and a
-        // physical mid-write pull, every one recovered by journal replay.
+        // Eject before unplugging remains the advice, for a reason no policy
+        // here could reach: a mid-write pull can panic macOS itself (an
+        // IOMediaBSDClient busy timeout in the storage stack, observed once
+        // during the sweep).
         //
-        // So ask the helper for an actual barrier on this actual device,
-        // before deciding. It works: mount read-write, the proven-safe
-        // configuration. It does not -- helper missing, unapproved, or denied
-        // by TCC: mount read-only and say why, because unordered writes to a
-        // physical stick are still the measured corruption they always were
-        // (the reorder suite's negative controls keep proving it).
-        //
-        // The marker file remains as a manual override: writes without a
-        // barrier, for someone who accepts the risk knowingly.
-        //
-        // Reading is untouched either way. A disk image is exempt from all of
-        // this -- its writes reach APFS in issue order, which is why the media
-        // class matters rather than the removable flag alone. And a device we
-        // cannot read from the IORegistry is treated as detachable, not as
-        // fixed: fail closed, so a lookup failure cannot open the door to an
-        // unbarriered write.
-        //
-        let mediaClass = MediaTraits.classify(bsdName: device.bsdName)
-        var inhibitedForRemovableMedia = false
-        if mediaClass.requiresBarrier {
-            let markerPresent = RemovableWritePolicy.directoryFromInsideTheSandbox()
-                .map { RemovableWritePolicy.isEnabled(in: $0) } ?? false
-            var barrierConfirmed = false
-            if !markerPresent {
-                let probe = BarrierClient(bsdName: device.bsdName)
-                barrierConfirmed = (probe?.barrier() ?? EIO) == 0
-                probe?.release()
-            }
-            inhibitedForRemovableMedia = RemovableWritePolicy.inhibitsWrites(
-                requiresBarrier: true,
-                markerPresent: markerPresent,
-                barrierConfirmed: barrierConfirmed)
-
-            let how = markerPresent ? "writes forced by the marker file, barrier or not"
-                    : barrierConfirmed ? "write barrier confirmed, mounting read-write"
-                    : "no write barrier, mounting read-only"
-            Ext4Log.info("\(device.bsdName) needs a barrier (\(mediaClass)); \(how)")
-        }
-
-        let mediaWritable = device.isWritable && !inhibitedForRemovableMedia
+        let mediaWritable = device.isWritable
         let readOnly = !mediaWritable
 
         guard let bridge = BlockDeviceBridge(resource: device, forceReadOnly: readOnly),

@@ -1,9 +1,8 @@
 open_ext4 for Mac — First-Run Guide
 ===================================
 
-A native ext2/ext3/ext4 driver for macOS, built on FSKit. Reading a Linux
-disk works out of the box; writing and the optional pieces take a couple of
-one-time steps.
+A native ext2/ext3/ext4 driver for macOS, built on FSKit. Two steps and
+your Linux disks read and write like any other volume.
 
 
 1. Install the app
@@ -20,36 +19,11 @@ macOS ships file-system extensions disabled until you approve them:
   System Settings  →  General  →  Login Items & Extensions
     →  File System Extensions  →  turn on "open_ext4 (ext2/3/4)"
 
-Plug in an ext4 disk (or open a disk image) and it mounts read-only
-immediately. That is all most people need.
+Plug in an ext4 disk (or open a disk image) and it mounts read-write
+immediately. That is all there is.
 
 
-3. (Optional) Writing to USB sticks — the barrier daemon
---------------------------------------------------------
-
-A journal is a claim about write ordering, and macOS gives a third-party
-driver no way to enforce it on removable media. Without an enforced write
-barrier, a stick pulled mid-write can come back corrupt — so removable media
-mounts read-only until a tiny privileged helper is installed to issue the
-barrier. Disk images and internal disks are always read-write and need none
-of this.
-
-To enable writing to USB sticks, from a checkout of the project in Terminal:
-
-    make sign
-    sudo make install-barrier
-
-Then grant the helper Full Disk Access (it cannot be automated):
-
-  System Settings  →  Privacy & Security  →  Full Disk Access  →  +
-    press  ⌘⇧G,  enter  /Library/PrivilegedHelperTools,
-    add  ext4barrierd
-
-With that in place, removable media mounts read-write whenever the driver
-confirms a real barrier on the device.
-
-
-4. (Optional) Formatting from Disk Utility
+3. (Optional) Formatting from Disk Utility
 ------------------------------------------
 
     sudo make install-diskutil

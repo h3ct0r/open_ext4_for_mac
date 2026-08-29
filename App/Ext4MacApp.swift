@@ -55,64 +55,11 @@ struct Ext4MacApp {
             guard let device = arguments.first else { usage(1) }
             exit(Ext4Mount.command(device))
 
-        // Writing to media that can be unplugged *without a barrier*.
-        // The normal path needs no toggle: the mount asks the privileged
-        // helper for a real barrier and grants read-write when one is
-        // confirmed. See RemovableWritePolicy.
-        case "removable-writes":
-            exit(removableWrites(arguments.first))
-
-        // The privileged helper that issues the write barrier the sandbox
-        // will not let the extension issue itself.
-        case "barrier":
-            exit(Ext4Barrier.command(arguments.first))
-
         case "help", "-h", "--help":
             usage(0)
         default:
             FileHandle.standardError.write("Ext4Mac: unknown command '\(command)'\n".data(using: .utf8)!)
             usage(1)
-        }
-    }
-
-    /// Report or change whether removable media may be written.
-    static func removableWrites(_ argument: String?) -> Int32 {
-        let directory = RemovableWritePolicy.directoryFromOutside()
-        switch argument {
-        case nil, "status":
-            let on = RemovableWritePolicy.isEnabled(in: directory)
-            print("unbarriered writes to removable media: \(on ? "FORCED" : "off (automatic)")")
-            if !on {
-                print("")
-                print("Automatic mode: a removable volume mounts read-write when the")
-                print("barrier daemon confirms a working write barrier on it, and")
-                print("read-only -- with the reason in the log -- when it cannot.")
-                print("Install the daemon with: make sign && sudo make install-barrier")
-                print("")
-                print("    Ext4Mac removable-writes on     force writes with no barrier")
-            } else {
-                print("")
-                print("Writes are forced even with no barrier. A volume pulled while")
-                print("mounted can come back corrupt -- measured, not theoretical.")
-                print("")
-                print("    Ext4Mac removable-writes off    return to automatic")
-            }
-            return 0
-        case "on", "off":
-            let enable = argument == "on"
-            do {
-                try RemovableWritePolicy.set(enable, in: directory)
-            } catch {
-                FileHandle.standardError.write("Ext4Mac: \(error)\n".data(using: .utf8)!)
-                return 1
-            }
-            print(enable ? "unbarriered writes FORCED: removable media mounts read-write with no barrier"
-                         : "automatic: removable media mounts read-write when the barrier works")
-            print("takes effect on the next mount")
-            return 0
-        default:
-            FileHandle.standardError.write("Ext4Mac: expected on, off or status\n".data(using: .utf8)!)
-            return 1
         }
     }
 
@@ -126,10 +73,6 @@ struct Ext4MacApp {
         Ext4Mac list                which volumes are unlocked
         Ext4Mac mount /dev/diskN    mount a volume whose key is stored
         Ext4Mac menu                watch for encrypted volumes and ask
-        Ext4Mac removable-writes [on|off]
-                                    allow writing to media you can unplug
-        Ext4Mac barrier [on|off]    install the helper that gives the journal
-                                    a real write barrier
 
         Or mount anything ext4 with:
           mount -F -t ext4 <disk> <mountpoint>

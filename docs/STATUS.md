@@ -965,15 +965,18 @@ with the original *Input/output error*.
 ## Write ordering is not enforced, and that is not theoretical
 
 > **This section is history, kept because the measurements in it justify
-> everything that came after.** As of 2026-08-27 write ordering *is*
-> enforced: the privileged helper issues real barriers, lwext4 patches
-> 0014–0021 make the journal use them correctly, and the same abuse
-> described below — kills and pulls on real USB — was measured clean, five
-> rounds plus a mid-write yank. Removable media now mounts **read-write
-> automatically when a working barrier is confirmed on the device**, and
-> read-only, with the reason logged, when none is available; the
-> `removable-writes` marker survives only as the force-writes-without-a-
-> barrier override.
+> everything that came after — and it now has two endings.** As of
+> 2026-08-27 write ordering *was* enforced: a privileged helper daemon
+> (`ext4barrierd`) issued real `DKIOCSYNCHRONIZE` barriers, lwext4 patches
+> 0014–0021 made the journal use them correctly, and the same abuse
+> described below — kills and pulls on real USB — was measured clean.
+> Then, on 2026-08-29, the question was remeasured as a five-drive A/B with
+> the daemon as the control arm, and the unbarriered arm recovered exactly
+> as cleanly as the barriered one — the hazard below is a property of the
+> old cached write path, not the current direct one. **The daemon and the
+> read-only policy are gone**; removable media mounts read-write like
+> everything else. The full verdict is in
+> [the retirement section](#the-barrier-daemon-is-retired-a-five-drive-verdict).
 
 **The mounted driver was not crash-safe on removable media.** This was written
 down as an assumption from the start; a real USB stick falsified it.
@@ -1143,13 +1146,14 @@ What is left, in ascending order of unpleasantness:
   machine in exchange for nothing would have been a poor trade even if it had
   worked.
 - **A privileged helper** holding the device open and issuing the barrier over
-  XPC — **this is what shipped.** No widening of the extension's sandbox, since
-  the helper does the ioctl. Costs a root daemon and an XPC round trip per
-  transaction. With it installed and approved, removable media mounts
-  read-write once the mount confirms a real barrier on the device; without it,
-  read-only. (Earlier the driver kept removable media read-only by default and
-  a marker file opted in; since the barrier works, that is inverted — the
-  marker is now the *unsafe* override for writing with no barrier at all.)
+  XPC — **this is what shipped**, for a while. No widening of the extension's
+  sandbox, since the helper does the ioctl. It cost a root daemon, an XPC
+  round trip per transaction, a manual Full Disk Access grant no installer
+  can automate — and, once, a trust-boundary bug: the caller check passed
+  static-validation flags to `SecCodeCheckValidity`, which refuses them
+  (-67070), so the daemon refused every caller and nothing noticed until a
+  physical stick asked. It was retired on 2026-08-29 by the remeasurement
+  below; `sudo make uninstall-barrier` removes an installed copy.
 
 ### Two ordering holes remain above it
 
@@ -1216,12 +1220,64 @@ future value above zero is a bug rather than a statistic.
 
 ### What this means in practice
 
-Until a barrier is confirmed working on physical media, an ext4 volume written
-by this driver and then disconnected without being ejected can come back
-structurally inconsistent —
-recoverable by `e2fsck`, but inconsistent. **Eject before unplugging**, which
-flushes and closes the journal cleanly, and run `e2fsck` if a volume is ever
-pulled live.
+**Eject before unplugging**, which flushes and closes the journal cleanly.
+Not because of the driver — the sweep below could not hurt it — but because
+the last seconds of unsynced writes are only as durable as on any
+filesystem, and because a mid-write pull can panic macOS itself: xnu's 60 s
+busy-timeout watchdog fires when a drive's bridge chip hangs its in-flight
+commands on surprise removal and the media object cannot finish terminating
+(`busy timeout ... 'IOMediaBSDClient'`, panicked task `watchdogd`; observed
+once during the sweep). That lives in Apple's storage stack, below anything
+a filesystem can reach.
+
+### The barrier daemon is retired: a five-drive verdict
+
+The write-ordering hazard above was measured on the driver's earliest write
+path, which buffered in the host. The current path hands every write
+synchronously to the device through FSKit's raw descriptor — the only cache
+left between the journal and the medium is the drive's own. Whether *that*
+cache reorders enough to hurt is a question for hardware, so it was put to
+hardware: `Tests/run_pull_tests.sh` formats a stick, runs a
+rename-heavy load with sha256 manifests and `sync` fences (or, `HARSH=1`,
+sustained 1–2 MB writes with no fences at all), has the operator physically
+pull the stick mid-write, and autopsies the reinserted corpse — `e2fsck` on
+a dd image for consistency, `debugfs rdump` against the manifest for
+durability.
+
+Twenty pulls, five drives, two of them run first as an A/B against the
+daemon's real barriers:
+
+| drive | media class | rounds (fenced + harsh) | e2fsck | synced files lost |
+|---|---|---|---|---|
+| DataTraveler 3.0, 15 GB | physicallyDetachable | 2 + 2 | clean | 0 |
+| DataTraveler 3.0, 31 GB | physicallyDetachable | 2 + 2 | clean | 0 |
+| Flash Drive FIT, 128 GB | physicallyDetachable | 2 + 2 | clean | 0 |
+| DataTraveler Max, 256 GB | fixed (self-reported) | 2 + 2 | clean | 0 |
+| RTL9210 NVMe enclosure, 1 TB | fixed (self-reported) | 2 + 2 | clean | 0 |
+
+Every round replayed its journal on remount (verified in the logs — these
+were genuine mid-transaction interruptions) and recovered to a filesystem
+`e2fsck -fn` found nothing wrong with; `e2fsck -fy` on a clone had zero
+repairs to make; ~7,500 sync-fenced files verified bit-for-bit.
+
+Two findings beyond the zeros made the decision:
+
+- **The policy never covered the drives most likely to cache.** Large
+  sticks, USB SSDs and enclosures report *fixed, non-ejectable* media on the
+  USB bus, so the removability-keyed policy classed them exempt and they
+  wrote unbarriered all along — including the NVMe enclosure, the one device
+  here with real DRAM behind the bridge. The daemon guarded exactly the
+  subset of drives that the measurement says do not need it, and could not
+  be extended to the rest without making every external SSD read-only.
+- **The worst outcome was never reachable by a daemon.** The one casualty of
+  the sweep was the kernel panic above, in Apple's stack, on the teardown
+  path — barriers have no say there.
+
+So the daemon, its LaunchDaemon plist, the `BarrierClient`, the
+removable-write policy and its marker are gone; `BlockDeviceBridge.flush()`
+is a documented no-op again, and the harness stays in the tree as the
+regression instrument — if a future change to the write path re-widens the
+reorder window, the pull test is the thing that can say so.
 
 ### It is the medium, and that is now a controlled result
 

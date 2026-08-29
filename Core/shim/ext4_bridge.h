@@ -54,8 +54,10 @@ typedef int (*ext4b_read_fn)(void *ctx, void *buf, uint64_t offset, size_t count
 typedef int (*ext4b_write_fn)(void *ctx, const void *buf, uint64_t offset, size_t count);
 
 /* Flush any buffered writes to stable storage. Return 0 or an errno.
- * This is the journal barrier; correctness of the write path depends on it
- * genuinely reaching the medium. */
+ * The journal calls this at every commit point. A host whose writes reach
+ * the medium synchronously (the shipping extension writes through FSKit's
+ * raw descriptor) may make it a no-op; the offline test tools implement it
+ * for real, because their simulated write cache is the crash model. */
 typedef int (*ext4b_flush_fn)(void *ctx);
 
 typedef struct ext4b_device ext4b_device;
@@ -162,7 +164,7 @@ int  ext4b_unmount(ext4b_device *dev);
  * volume whose superblock has needs_recovery set. */
 int  ext4b_journal_recover(ext4b_device *dev);
 
-/* Flush the block cache and issue the device-level barrier. */
+/* Flush the block cache and call the device flush hook. */
 int  ext4b_sync(ext4b_device *dev);
 
 /*
@@ -521,26 +523,6 @@ void ext4b_set_logger(ext4b_log_fn fn, void *ctx);
  * correctness bug upstream of the bridge, not a statistic. Always zero if the
  * caller is single-threaded, as the tools are. */
 unsigned ext4b_core_collisions(void);
-
-/* Ask the medium behind `fd` to commit everything it has been given, and not
- * to reorder across this point. Returns 0, or an errno if the descriptor
- * supports no barrier at all. See device_barrier.c for why this takes a raw
- * descriptor rather than going through the resource. */
-int ext4b_barrier_fd(int fd);
-
-/* What each of the three barrier calls said. Zero means that call worked. */
-typedef struct {
-    int sync_barrier;   /* DKIOCSYNCHRONIZE, DK_SYNCHRONIZE_OPTION_BARRIER */
-    int sync_cache;     /* DKIOCSYNCHRONIZECACHE */
-    int fullfsync;      /* F_FULLFSYNC */
-} ext4b_barrier_report;
-
-int ext4b_barrier_fd_verbose(int fd, ext4b_barrier_report *out);
-
-/* Whether disk ioctls reach anything through `fd` at all, which is what tells
- * a medium that has no barrier apart from a descriptor that cannot ask for
- * one. Returns 0 and fills in the device's block size, or an errno. */
-int ext4b_probe_disk_ioctl(int fd, uint32_t *block_size);
 
 /* Human-readable description of a bridge/errno code. */
 const char *ext4b_strerror(int err);

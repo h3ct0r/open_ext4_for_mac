@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
-# Physical pull test -- a hardware verdict on the write-barrier daemon.
-#
-# Same build, same journal, same transaction batching; one variable:
-#
-#   ARM=barrier   marker off, daemon loaded     -> rw, every commit barriered
-#   ARM=naked     marker on,  daemon booted out -> rw, no barrier at all
+# Physical pull test -- can a mid-write pull hurt this driver?
 #
 # Each round: format the stick fresh, mount, run a metadata-heavy write load,
 # tell the operator to PULL THE STICK mid-write, reinsert, let the driver
@@ -15,17 +10,22 @@
 #   durability    every batch that had been through sync(2) before the pull is
 #                 present bit for bit (sha256 manifest kept on the internal
 #                 disk, checked with debugfs rdump). Informational: sync(2) on
-#                 macOS reports success without proof, so read it comparatively
-#                 across the two arms rather than as an absolute.
+#                 macOS reports success without proof, so a boundary batch can
+#                 legitimately be in flight.
 #
-# The barrier arm has a pass bar. The naked arm is the measurement it is
-# compared against -- history says 5/5 sticks damaged without a barrier, clean
-# with one, but the core has changed since (batching), hence this suite.
+# This suite is what retired the write-barrier daemon. Run as an A/B -- a
+# privileged helper issuing real DKIOCSYNCHRONIZE barriers against the same
+# build with no barrier at all -- twenty pulls across five drives (USB-2
+# sticks through an NVMe SSD behind a bridge chip, fenced and under sustained
+# load) recovered identically: e2fsck-clean, nothing lost. The daemon went;
+# this harness stays, because the result is a property of the direct-I/O
+# write path, and a future change to that path needs a test that can
+# contradict it. History says what failure looks like: the earliest write
+# path lost half a transaction to one pull. See docs/STATUS.md.
 #
 # Usage (interactive: the pulls need hands):
 #
-#   DEVICE=diskN ARM=barrier bash Tests/run_pull_tests.sh
-#   DEVICE=diskN ARM=naked   bash Tests/run_pull_tests.sh
+#   DEVICE=diskN bash Tests/run_pull_tests.sh
 #
 #   ROUNDS=3 (default)   EXT4_SIZE=2g (default; must fit the stick)
 #   KEEP_CORPSE=1        keep the dd image even when the round is clean
@@ -35,8 +35,8 @@
 #                        is the whole measurement. Pull under full load.
 #
 # This ERASES the stick, repeatedly -- use one you can lose. Repeated hot
-# pulls can also wedge DiskArbitration until a reboot; run the barrier arm
-# first while the machine is fresh, and expect to reboot after the naked arm.
+# pulls can also wedge DiskArbitration until a reboot; expect to reboot after
+# a long session of them.
 #
 # A pull can even panic the whole machine: if the drive's bridge chip hangs
 # the in-flight commands on surprise removal, the media object cannot finish
@@ -52,15 +52,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$ROOT/Tests/lib.sh"
 
 DEVICE="${DEVICE:-}"
-ARM="${ARM:-}"
 ROUNDS="${ROUNDS:-3}"
 EXT4_SIZE="${EXT4_SIZE:-2g}"
 LABEL="EXT4PULL"
 WARMUP="${WARMUP:-10}"
 
-APP_BIN="/Applications/Ext4Mac.app/Contents/MacOS/Ext4Mac"
-BARRIER_LABEL="dev.h3ct0r.ext4mac.barrier"
-BARRIER_PLIST="/Library/LaunchDaemons/$BARRIER_LABEL.plist"
 # One results directory per drive, so a four-drive sweep does not overwrite
 # itself: TAG defaults to the media name plus the byte size, because two
 # sticks of the same model are two different drives.
@@ -71,27 +67,25 @@ if [ -z "${TAG:-}" ]; then
   _bytes=$(sed -n 's/.*Disk Size:.*(\([0-9]*\) Bytes.*/\1/p' <<<"$_info" | head -1)
   TAG="${_name:-unnamed}${_bytes:+-$_bytes}"
 fi
-OUT="$ROOT/build/pulltest/$TAG-$ARM"
+OUT="$ROOT/build/pulltest/$TAG-pull"
 [ "${HARSH:-0}" = 1 ] && OUT="$OUT-harsh"
 
 die() { echo "error: $*" >&2; exit 1; }
 
 # ------------------------------------------------------------- preconditions
 
-[ -n "$DEVICE" ] || die "no device. Usage: DEVICE=diskN ARM=barrier|naked bash Tests/run_pull_tests.sh"
-case "$ARM" in barrier|naked) ;; *) die "ARM must be 'barrier' or 'naked'" ;; esac
+[ -n "$DEVICE" ] || die "no device. Usage: DEVICE=diskN bash Tests/run_pull_tests.sh"
 DEVICE="${DEVICE%s[0-9]*}"
 
 command -v e2fsck  >/dev/null || die "e2fsck not on PATH (brew install e2fsprogs)"
 command -v debugfs >/dev/null || die "debugfs not on PATH (brew install e2fsprogs)"
-[ -x "$APP_BIN" ] || die "missing $APP_BIN (install the app)"
 [ -d /Library/Filesystems/ext4.fs ] || die "missing /Library/Filesystems/ext4.fs (sudo make install-diskutil)"
 diskutil info "$DEVICE" >/dev/null 2>&1 || die "$DEVICE is not a disk this machine knows about"
 
 # Internal-vs-External is the safety line, not the removable bit: large
-# sticks and USB SSDs claim "Fixed" media on an external bus (and the driver
-# then classes them .fixed -- no barrier requirement -- which makes them
-# test targets worth having, not targets to refuse).
+# sticks and USB SSDs claim "Fixed" media on an external bus, and drives
+# with real caches behind bridge chips are the test targets most worth
+# having, not targets to refuse.
 INFO=$(diskutil info "$DEVICE" 2>/dev/null)
 LOCATION=$(sed -n 's/.*Device Location: *//p' <<<"$INFO" | head -1)
 REMOVABLE=$(sed -n 's/.*Removable Media: *//p' <<<"$INFO" | head -1)
@@ -108,12 +102,7 @@ if ! pluginkit -m -i dev.h3ct0r.ext4mac.Ext4FS 2>/dev/null | grep -q '^+'; then
   echo "         File System Extensions, or nothing below will mount."
 fi
 
-daemon_loaded() {
-  launchctl print "system/$BARRIER_LABEL" >/dev/null 2>&1 && return 0
-  sudo launchctl print "system/$BARRIER_LABEL" >/dev/null 2>&1
-}
-
-echo "about to run the $ARM arm: $ROUNDS round(s), erasing /dev/$DEVICE each time"
+echo "about to run $ROUNDS pull round(s), erasing /dev/$DEVICE each time"
 echo "    $(sed -n 's/.*Device \/ Media Name: */name  /p' <<<"$INFO" | head -1)"
 echo "    $(sed -n 's/.*Disk Size: */size  /p' <<<"$INFO" | head -1)"
 echo ""
@@ -121,39 +110,7 @@ printf "type ERASE to continue: "
 read -r answer
 [ "$answer" = "ERASE" ] || die "not confirmed"
 
-sudo -v || die "needs sudo for format, dd, and launchctl"
-
-# ---------------------------------------------------------------- arm setup
-
-RESTORE_DAEMON=no
-cleanup() {
-  "$APP_BIN" removable-writes off >/dev/null 2>&1
-  if [ "$RESTORE_DAEMON" = yes ]; then
-    sudo launchctl bootstrap system "$BARRIER_PLIST" 2>/dev/null \
-      && echo "restored: barrier daemon bootstrapped back"
-  fi
-}
-trap cleanup EXIT
-
-if [ "$ARM" = barrier ]; then
-  "$APP_BIN" removable-writes off >/dev/null 2>&1
-  daemon_loaded || die "barrier arm needs the daemon: sudo make install-barrier (and Full Disk Access for /Library/PrivilegedHelperTools/ext4barrierd)"
-  # The caller check once shipped with API flags SecCodeCheckValidity refuses
-  # (-67070), which silently refused every caller; only a physical stick
-  # surfaced it. Refuse to measure through a daemon that cannot say yes.
-  if ! /Library/PrivilegedHelperTools/ext4barrierd --selfcheck 2>/dev/null \
-       | grep -q "selfcheck: ok"; then
-    die "installed daemon fails --selfcheck (or predates it, which means the broken caller check): make sign && sudo make install-barrier"
-  fi
-else
-  if daemon_loaded; then
-    sudo launchctl bootout "system/$BARRIER_LABEL" || die "could not boot the daemon out"
-    RESTORE_DAEMON=yes
-    echo "daemon booted out for the naked arm (restored on exit)"
-  fi
-  "$APP_BIN" removable-writes on >/dev/null 2>&1
-  "$APP_BIN" removable-writes | grep -q FORCED || die "could not set the removable-writes marker"
-fi
+sudo -v || die "needs sudo for format and dd"
 
 mkdir -p "$OUT"
 
@@ -251,7 +208,7 @@ for r in $(seq 1 "$ROUNDS"); do
   RD="$OUT/round$r"
   rm -rf "$RD"; mkdir -p "$RD"
   echo ""
-  echo "================ $ARM round $r/$ROUNDS ================"
+  echo "================ pull round $r/$ROUNDS ================"
 
   sudo -v
   echo "  formatting (takes a while; newfs runs during partitioning)..."
@@ -277,10 +234,10 @@ for r in $(seq 1 "$ROUNDS"); do
     fi
   fi
   MP="$(vol_mp)"
-  if vol_ro; then
-    [ "$ARM" = barrier ] && die "mounted read-only: the daemon did not confirm a barrier (FDA missing?). See the log."
-    die "mounted read-only despite the marker; investigate before pulling"
-  fi
+  # Nothing inhibits writes any more; read-only here means the probe demoted
+  # the volume (or the media is), and a pull test of a read-only mount
+  # measures nothing.
+  vol_ro && die "mounted read-only; investigate before pulling (see the driver log)"
   echo "  mounted read-write at $MP"
   MOUNT_OK=rw
 
@@ -371,33 +328,23 @@ for r in $(seq 1 "$ROUNDS"); do
 
   echo -e "$r\t$MOUNT_OK\t$REMOUNT\t$RCN\t$RCY\t$DUR\t$SHA_BAD" >> "$SUMMARY"
 
-  if [ "$ARM" = barrier ]; then
-    if [ "$REMOUNT" != no ] && [ "$RCN" -eq 0 ]; then
-      ok "round $r: recovered to an e2fsck-clean filesystem"
-    else
-      bad "round $r: remount=$REMOUNT, e2fsck -fn exit $RCN -- see $RD/"
-    fi
-    [ "$SHA_BAD" != n/a ] && [ "$SHA_BAD" != 0 ] \
-      && bad "round $r: $SHA_BAD synced file(s) lost or corrupt"
+  if [ "$REMOUNT" != no ] && [ "$RCN" -eq 0 ]; then
+    ok "round $r: recovered to an e2fsck-clean filesystem"
   else
-    echo "  recorded (naked arm measures; it has no pass bar)"
+    bad "round $r: remount=$REMOUNT, e2fsck -fn exit $RCN -- see $RD/"
   fi
+  [ "$SHA_BAD" != n/a ] && [ "$SHA_BAD" != 0 ] \
+    && bad "round $r: $SHA_BAD synced file(s) lost or corrupt"
 done
 
 # -------------------------------------------------------------------- report
 
 echo ""
-echo "================ $ARM arm: $ROUNDS round(s) ================"
+echo "================ $ROUNDS pull round(s) ================"
 column -t -s $'\t' "$SUMMARY" | sed 's/^/  /'
 echo ""
 echo "  fsck_fn: 0 = the driver's recovery left nothing for e2fsck to fix"
 echo "  fsck_fy: 0/1 = none/minor repairs on a clone; >=4 = real damage"
 echo "  results in $OUT/"
 
-if [ "$ARM" = barrier ]; then
-  finish
-else
-  echo ""
-  echo "compare against the barrier arm's summary to reach the verdict."
-  exit 0
-fi
+finish

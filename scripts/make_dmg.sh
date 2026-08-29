@@ -2,8 +2,8 @@
 # Build a distributable disk image: the signed app, an Applications symlink to
 # drag it onto, and the first-run guide.
 #
-# The DMG carries only the app. The barrier daemon and the Disk Utility bundle
-# install with sudo, which a drag-install cannot do -- the guide covers those.
+# The DMG carries only the app. The optional Disk Utility bundle installs
+# with sudo, which a drag-install cannot do -- the guide covers it.
 #
 # Usage: make_dmg.sh <app-path> <out.dmg> [volname]
 set -euo pipefail
