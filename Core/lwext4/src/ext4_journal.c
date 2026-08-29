@@ -80,6 +80,12 @@ struct recover_info {
 	/**@brief  No of transactions went through.*/
 	uint32_t trans_cnt;
 
+	/**@brief  Revoke blocks the scan pass saw. The scan walks at
+	 *         least as far as the revoke pass will; if it saw none,
+	 *         the revoke pass would re-read every header block of the
+	 *         log to build an empty tree, and is skipped. */
+	uint32_t revoke_block_cnt;
+
 	/**@brief  RB-Tree storing revoke entries.*/
 	RB_HEAD(jbd_revoke, revoke_entry) revoke_root;
 
@@ -1478,9 +1484,10 @@ static int jbd_iterate_log(struct jbd_fs *jbd_fs,
 	/* We start iterating valid blocks in the whole journal.*/
 	start_trans_id = this_trans_id = jbd_get32(sb, sequence);
 	start_block = this_block = jbd_get32(sb, start);
-	if (action == ACTION_SCAN)
+	if (action == ACTION_SCAN) {
 		info->trans_cnt = 0;
-	else if (!info->trans_cnt)
+		info->revoke_block_cnt = 0;
+	} else if (!info->trans_cnt)
 		log_end = true;
 
 	ext4_dbg(DEBUG_JBD, "Start of journal at trans id: %" PRIu32 "\n",
@@ -1622,6 +1629,8 @@ static int jbd_iterate_log(struct jbd_fs *jbd_fs,
 			ext4_dbg(DEBUG_JBD, "Revoke block: %" PRIu32", "
 					    "trans_id: %" PRIu32"\n",
 					    this_block, this_trans_id);
+			if (action == ACTION_SCAN)
+				info->revoke_block_cnt++;
 			if (action == ACTION_REVOKE) {
 				info->this_trans_id = this_trans_id;
 				jbd_build_revoke_tree(jbd_fs,
@@ -1673,9 +1682,13 @@ int jbd_recover(struct jbd_fs *jbd_fs)
 	if (r != EOK)
 		return r;
 
-	r = jbd_iterate_log(jbd_fs, &info, ACTION_REVOKE);
-	if (r != EOK)
-		return r;
+	/* Walking the whole log again to build an empty tree is pure
+	 * per-command cost on the media where recovery is already slow. */
+	if (info.revoke_block_cnt) {
+		r = jbd_iterate_log(jbd_fs, &info, ACTION_REVOKE);
+		if (r != EOK)
+			return r;
+	}
 
 	jbd_replay_wnd_init(jbd_fs, &info);
 	jbd_replay_wb_init(jbd_fs, &info);
