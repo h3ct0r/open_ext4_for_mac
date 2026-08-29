@@ -1,0 +1,345 @@
+Replay write-back is sorted, deduplicated and coalesced
+
+The other half of the recovery hang: every replayed block went through the
+block cache and was flushed on release, one device command per block, in
+log order -- random order, as the medium sees it. Worse than the command
+count is the multiplier: a hot metadata block logged in two hundred
+transactions was written two hundred times, each copy overwritten by the
+next moments later. The incident sample had 43% of replay wall-time inside
+ext4_bcache_free -> ext4_block_flush_buf.
+
+Collect replayed blocks in a 4 MiB batch instead. At flush, sort by target
+block with arrival order as the tie-break, keep only the newest copy of
+each block -- the state sequential replay would have ended with -- and
+write each physically-contiguous run with a single device command. The
+batch is also the memory bound: it flushes when full, so a journal of any
+size replays in 4 MiB installments.
+
+Like the read window, the batch bypasses the block cache: during recovery
+nothing else is writing. The one exception is a block already resident --
+the journal inode's own metadata, group descriptors read while opening the
+journal -- where a stale cached copy released dirty would later be flushed
+over the replayed data. Those residents are rewritten in place and marked
+clean before the direct write lands.
+
+Errors change shape too, for the better. The old path lost write errors
+entirely: the tag callback returns void and the flush inside the cache
+release swallowed its result, so recovery would clear a journal whose
+contents never reached the medium. Batched flushes report; a failed flush
+now fails jbd_recover(), EXT4_FINCOM_RECOVER stays set, and the next mount
+tries again.
+
+Measured on the incident's shape: replay writes fall from 29k device
+commands (120 MB) to 2k (29 MB).
+
+diff --git a/src/ext4_journal.c b/src/ext4_journal.c
+--- a/src/ext4_journal.c
++++ b/src/ext4_journal.c
+@@ -86,6 +86,16 @@ struct recover_info {
+ 	/**@brief  Read-ahead window over the journal region; NULL outside
+ 	 *         the recovery pass, and when memory was not available. */
+ 	struct jbd_replay_wnd *wnd;
++
++	/**@brief  Write-back batch for replayed blocks; NULL outside the
++	 *         recovery pass, and when memory was not available. */
++	struct jbd_replay_wb *wb;
++
++	/**@brief  First error the tag-replay callback hit. The iteration
++	 *         API returns void, and losing a write error here means
++	 *         clearing a journal whose contents never reached the
++	 *         medium. */
++	int rc;
+ };
+ 
+ /**@brief  Journal replay internal arguments.*/
+@@ -235,6 +245,221 @@ static void jbd_replay_wnd_fini(struct recover_info *info)
+ 	info->wnd = NULL;
+ }
+ 
++/**@brief  Write-back batch for replayed blocks.
++ *
++ * Replay used to push every replayed block through the block cache and
++ * flush it on release: one device command per block, in log order, which
++ * is target-random -- and a hot block logged in two hundred transactions
++ * was written two hundred times. This batch collects replayed copies and
++ * writes them out sorted, deduplicated (last logged copy wins, which is
++ * what sequential replay also ends with), and coalesced into one command
++ * per physically-contiguous run.
++ *
++ * It bypasses the block cache for the same reason the read window does:
++ * during recovery nothing else is writing. The one wrinkle is a block
++ * that is *already resident* -- the journal inode's own metadata, group
++ * descriptors read while opening the journal -- where a stale cached
++ * copy would outlive our direct write and could later be flushed over
++ * it. jbd_replay_wb_sync_bcache() rewrites those residents in place. */
++struct jbd_replay_wb {
++	/**@brief  Replayed payload, arrival order, @cap blocks. */
++	uint8_t *data;
++
++	/**@brief  Target block of data[i]. */
++	uint64_t *lba;
++
++	/**@brief  Scratch for assembling one contiguous run. */
++	uint8_t *gather;
++
++	/**@brief  Blocks collected so far. */
++	uint32_t cnt;
++
++	/**@brief  Batch capacity, blocks. */
++	uint32_t cap;
++};
++
++/**@brief  How much replayed data may wait for write-back. The batch is
++ *         also the dedup horizon: a block re-logged within this much
++ *         journal is written once, not once per transaction. */
++#define JBD_REPLAY_WB_BYTES (4 * 1024 * 1024)
++
++/**@brief  Sort key for the flush: by target block, ties broken by
++ *         arrival so the newest copy of a block sorts last. */
++struct jbd_wb_sort {
++	uint64_t lba;
++	uint32_t idx;
++};
++
++static int jbd_wb_cmp(const void *__a, const void *__b)
++{
++	const struct jbd_wb_sort *a = __a;
++	const struct jbd_wb_sort *b = __b;
++	if (a->lba != b->lba)
++		return a->lba < b->lba ? -1 : 1;
++	return a->idx < b->idx ? -1 : 1;
++}
++
++/**@brief  Bring a cache-resident copy of @lba in line with the bytes
++ *         replay is about to put on the medium. Rare -- only blocks the
++ *         journal machinery itself had reason to read are resident
++ *         during recovery -- but a stale resident copy is worse than
++ *         slow: released dirty, it would be flushed over the replayed
++ *         data afterwards. */
++static void jbd_replay_wb_sync_bcache(struct ext4_blockdev *bdev,
++				      uint64_t lba, const void *data)
++{
++	struct ext4_block b;
++	struct ext4_buf *buf = ext4_bcache_find_get(bdev->bc, &b, lba);
++	if (!buf)
++		return;
++
++	memcpy(buf->data, data, bdev->lg_bsize);
++	ext4_bcache_set_flag(buf, BC_UPTODATE);
++	/* The medium is about to match: whatever dirt the buffer carried
++	 * is superseded by the replayed copy being written directly. */
++	ext4_bcache_clear_flag(buf, BC_DIRTY);
++	ext4_block_set(bdev, &b);
++}
++
++/**@brief  Write the batch out: newest copy per block, ascending block
++ *         order, one device command per contiguous run.
++ * @param  jbd_fs jbd filesystem
++ * @param  wb     the batch
++ * @return standard error code*/
++static int jbd_replay_wb_flush(struct jbd_fs *jbd_fs,
++			       struct jbd_replay_wb *wb)
++{
++	struct ext4_blockdev *bdev = jbd_fs->bdev;
++	uint32_t bs = bdev->lg_bsize;
++	struct jbd_wb_sort *order;
++	uint32_t i, n = 0;
++	int rc = EOK;
++
++	if (!wb->cnt)
++		return EOK;
++
++	order = ext4_malloc((size_t)wb->cnt * sizeof(*order));
++	if (!order)
++		return ENOMEM;
++
++	for (i = 0; i < wb->cnt; i++) {
++		order[i].lba = wb->lba[i];
++		order[i].idx = i;
++	}
++	qsort(order, wb->cnt, sizeof(*order), jbd_wb_cmp);
++
++	/* Equal blocks now sit together, newest last. Keep only that
++	 * one: it is the state sequential replay would have ended with. */
++	for (i = 0; i < wb->cnt; i++) {
++		if (i + 1 < wb->cnt && order[i + 1].lba == order[i].lba)
++			continue;
++		order[n++] = order[i];
++	}
++
++	for (i = 0; i < n;) {
++		uint32_t j = i + 1, k;
++
++		while (j < n && order[j].lba == order[i].lba + (j - i))
++			j++;
++
++		for (k = i; k < j; k++) {
++			const void *src =
++				wb->data + (size_t)order[k].idx * bs;
++			memcpy(wb->gather + (size_t)(k - i) * bs, src, bs);
++			jbd_replay_wb_sync_bcache(bdev, order[k].lba, src);
++		}
++
++		rc = ext4_blocks_set_direct(bdev, wb->gather,
++					    order[i].lba, j - i);
++		if (rc != EOK)
++			break;
++
++		i = j;
++	}
++
++	ext4_free(order);
++	wb->cnt = 0;
++	return rc;
++}
++
++/**@brief  Add one replayed block to the batch, flushing first if it is
++ *         full.
++ * @param  jbd_fs jbd filesystem
++ * @param  wb     the batch
++ * @param  lba    target block
++ * @param  data   the logged copy
++ * @param  is_escape restore the escaped magic number
++ * @return standard error code*/
++static int jbd_replay_wb_record(struct jbd_fs *jbd_fs,
++				struct jbd_replay_wb *wb,
++				uint64_t lba, const void *data,
++				bool is_escape)
++{
++	uint32_t bs = jbd_fs->bdev->lg_bsize;
++	uint8_t *slot;
++	int rc;
++
++	if (wb->cnt == wb->cap) {
++		rc = jbd_replay_wb_flush(jbd_fs, wb);
++		if (rc != EOK)
++			return rc;
++	}
++
++	slot = wb->data + (size_t)wb->cnt * bs;
++	memcpy(slot, data, bs);
++	if (is_escape)
++		((struct jbd_bhdr *)slot)->magic = to_be32(JBD_MAGIC_NUMBER);
++
++	wb->lba[wb->cnt] = lba;
++	wb->cnt++;
++	return EOK;
++}
++
++/**@brief  Set up the write-back batch. Best-effort, like the window: no
++ *         memory means the slow per-block path, not a failed mount.
++ * @param  jbd_fs jbd filesystem
++ * @param  info   journal replay info*/
++static void jbd_replay_wb_init(struct jbd_fs *jbd_fs,
++			       struct recover_info *info)
++{
++	uint32_t bs = jbd_fs->bdev->lg_bsize;
++	uint32_t cap = JBD_REPLAY_WB_BYTES / bs;
++	struct jbd_replay_wb *wb;
++
++	info->wb = NULL;
++	if (cap == 0)
++		return;
++
++	wb = ext4_calloc(1, sizeof(*wb));
++	if (!wb)
++		return;
++
++	wb->data = ext4_malloc((size_t)cap * bs);
++	wb->lba = ext4_malloc((size_t)cap * sizeof(*wb->lba));
++	wb->gather = ext4_malloc((size_t)cap * bs);
++	if (!wb->data || !wb->lba || !wb->gather) {
++		ext4_free(wb->data);
++		ext4_free(wb->lba);
++		ext4_free(wb->gather);
++		ext4_free(wb);
++		return;
++	}
++
++	wb->cap = cap;
++	info->wb = wb;
++}
++
++static void jbd_replay_wb_fini(struct recover_info *info)
++{
++	if (!info->wb)
++		return;
++	ext4_free(info->wb->data);
++	ext4_free(info->wb->lba);
++	ext4_free(info->wb->gather);
++	ext4_free(info->wb);
++	info->wb = NULL;
++}
++
+ /* Make sure we wrap around the log correctly! */
+ #define wrap(sb, var)						\
+ do {									\
+@@ -1065,8 +1290,10 @@ static void jbd_replay_block_tags(struct jbd_fs *jbd_fs,
+ 	if (info->wnd) {
+ 		r = jbd_replay_wnd_read(jbd_fs, info->wnd, *this_block,
+ 					&jdata);
+-		if (r != EOK)
++		if (r != EOK) {
++			info->rc = r;
+ 			return;
++		}
+ 	} else {
+ 		r = jbd_block_get(jbd_fs, &journal_block, *this_block);
+ 		if (r != EOK)
+@@ -1077,6 +1304,15 @@ static void jbd_replay_block_tags(struct jbd_fs *jbd_fs,
+ 
+ 	/* We need special treatment for ext4 superblock. */
+ 	if (tag_info->block) {
++		if (info->wb) {
++			r = jbd_replay_wb_record(jbd_fs, info->wb,
++						 tag_info->block, jdata,
++						 tag_info->is_escape);
++			if (r != EOK)
++				info->rc = r;
++			goto out;
++		}
++
+ 		r = ext4_block_get_noread(fs->bdev, &ext4_block, tag_info->block);
+ 		if (r != EOK)
+ 			goto out;
+@@ -1338,6 +1574,16 @@ static int jbd_iterate_log(struct jbd_fs *jbd_fs,
+ 
+ 				jbd_replay_descriptor_block(jbd_fs,
+ 						header, &replay_arg);
++
++				/* The tag callback cannot return errors;
++				 * it parks them here. Replay that lost a
++				 * write must not finish as if it had not:
++				 * finishing clears the journal, and the
++				 * lost write was the journal's to keep. */
++				if (info->rc != EOK) {
++					r = info->rc;
++					log_end = true;
++				}
+ 			} else
+ 				jbd_debug_descriptor_block(jbd_fs,
+ 						header, &this_block);
+@@ -1420,6 +1666,8 @@ int jbd_recover(struct jbd_fs *jbd_fs)
+ 
+ 	RB_INIT(&info.revoke_root);
+ 	info.wnd = NULL;
++	info.wb = NULL;
++	info.rc = EOK;
+ 
+ 	r = jbd_iterate_log(jbd_fs, &info, ACTION_SCAN);
+ 	if (r != EOK)
+@@ -1430,8 +1678,14 @@ int jbd_recover(struct jbd_fs *jbd_fs)
+ 		return r;
+ 
+ 	jbd_replay_wnd_init(jbd_fs, &info);
++	jbd_replay_wb_init(jbd_fs, &info);
+ 	r = jbd_iterate_log(jbd_fs, &info, ACTION_RECOVER);
++	/* Whatever the batch still holds has to land before the barrier
++	 * below claims the replay writes are on the medium. */
++	if (r == EOK && info.wb)
++		r = jbd_replay_wb_flush(jbd_fs, info.wb);
+ 	jbd_replay_wnd_fini(&info);
++	jbd_replay_wb_fini(&info);
+ 	if (r == EOK) {
+ 		/* The replay writes were issued; the superblock below says
+ 		 * they are not needed again. Make the first true before

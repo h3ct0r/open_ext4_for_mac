@@ -56,6 +56,26 @@ typedef struct {
     size_t         pending_cap;
     size_t         pending_bytes;
     size_t         cache_bytes;      /* 0 disables the model entirely */
+
+    /*
+     * Media model and meter, for measuring I/O shape rather than bytes.
+     *
+     * A disk image reaches APFS through the page cache, where a 4 KiB read
+     * costs about the same as a 512 KiB one -- which hides exactly the
+     * pathology that matters on a USB stick, where every command has a fixed
+     * setup cost and the transfer itself is comparatively cheap. The journal
+     * replay hang was invisible on images for this reason.
+     *
+     * EXT4DUMP_IO_LATENCY_US charges that fixed cost per read/write call, and
+     * EXT4DUMP_IO_BW_MBS charges for the bytes, so a file behaves like the
+     * medium that produced the incident. EXT4DUMP_IO_STATS=1 prints op and
+     * byte counts at exit; the counters tell the suite whether an access
+     * pattern changed, with no timing flakiness involved.
+     */
+    uint64_t reads, read_bytes;
+    uint64_t write_ops, write_bytes;
+    uint32_t latency_us;             /* per-op fixed cost; 0 disables */
+    uint32_t bw_mbs;                 /* transfer rate; 0 means infinite */
     uint32_t       reorder_seed;
     uint32_t       rng;             /* seeded; drives eviction and the crash */
     int            reorder_drop;     /* percent of the pending queue lost */
@@ -359,9 +379,28 @@ static void cache_overlay(file_ctx *c, void *buf, uint64_t off, size_t len)
     }
 }
 
+/* Charge one command's worth of media time: the fixed per-command cost plus
+ * the transfer. usleep() has ~1 ms granularity jitter, so accumulate the debt
+ * and sleep only when it is big enough to be paid accurately. */
+static void media_charge(file_ctx *c, size_t len)
+{
+    static uint64_t debt_us;
+    if (c->latency_us)
+        debt_us += c->latency_us;
+    if (c->bw_mbs)
+        debt_us += (uint64_t)len / c->bw_mbs;   /* bytes / (MB/s) == us */
+    if (debt_us >= 2000) {
+        usleep((useconds_t)debt_us);
+        debt_us = 0;
+    }
+}
+
 static int file_read(void *ctx, void *buf, uint64_t off, size_t len)
 {
     file_ctx *c = ctx;
+    c->reads++;
+    c->read_bytes += len;
+    media_charge(c, len);
     ssize_t n = pread(c->fd, buf, len, (off_t)off);
     if (n != (ssize_t)len)
         return EIO;
@@ -374,6 +413,9 @@ static int file_read(void *ctx, void *buf, uint64_t off, size_t len)
 static int file_write(void *ctx, const void *buf, uint64_t off, size_t len)
 {
     file_ctx *c = ctx;
+    c->write_ops++;
+    c->write_bytes += len;
+    media_charge(c, len);
 
     if (c->fail_after >= 0 && c->writes >= c->fail_after) {
         /* The instant of power loss, once. Whatever the drive was holding is
@@ -439,6 +481,20 @@ static int file_flush(void *ctx)
         return EIO;
 
     return fsync(c->fd) == 0 ? 0 : EIO;
+}
+
+/* EXT4DUMP_IO_STATS: one machine-readable line on exit, whatever the path out.
+ * atexit() because the command handlers return through several doors. */
+static file_ctx *io_stats_ctx;
+static void io_stats_report(void)
+{
+    file_ctx *c = io_stats_ctx;
+    if (!c)
+        return;
+    fprintf(stderr,
+            "IOSTATS reads=%" PRIu64 " read_bytes=%" PRIu64
+            " writes=%" PRIu64 " write_bytes=%" PRIu64 "\n",
+            c->reads, c->read_bytes, c->write_ops, c->write_bytes);
 }
 
 static void logger(void *ctx, int level, const char *msg)
@@ -985,6 +1041,18 @@ int main(int argc, char **argv)
     const char *fail_env = getenv("EXT4DUMP_FAIL_AFTER");
     if (fail_env)
         fc.fail_after = strtol(fail_env, NULL, 10);
+
+    /* Media model and meter; see file_ctx. */
+    const char *lat_env = getenv("EXT4DUMP_IO_LATENCY_US");
+    if (lat_env)
+        fc.latency_us = (uint32_t)strtoul(lat_env, NULL, 10);
+    const char *bw_env = getenv("EXT4DUMP_IO_BW_MBS");
+    if (bw_env)
+        fc.bw_mbs = (uint32_t)strtoul(bw_env, NULL, 10);
+    if (getenv("EXT4DUMP_IO_STATS")) {
+        io_stats_ctx = &fc;
+        atexit(io_stats_report);
+    }
 
     /* EXT4DUMP_TRACE_WRITES was the old name for the stderr form. */
     const char *trace_env = getenv("EXT4DUMP_TRACE");

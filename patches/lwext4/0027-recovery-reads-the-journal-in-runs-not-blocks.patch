@@ -1,0 +1,370 @@
+Recovery reads the journal in runs, not blocks
+
+Journal replay fetched the log through the block cache one 4 KiB block per
+device command. On a disk image that is invisible; on a USB stick, where
+every command carries a fixed setup cost, it priced a 128 MiB journal at
+minutes -- a real drive took over eight of them, DiskArbitration gave up at
+twenty seconds (0x3C ETIMEDOUT), and the volume never mounted. A sample of
+the wedged extension put the time squarely in jbd_iterate_log ->
+jbd_replay_block_tags: one pread per block, through the LUKS layer.
+
+The recovery pass is the one reader that knows its pattern: a strictly
+forward sweep of the log area. Give it a read-ahead window that fetches the
+journal in physically-contiguous runs (1 MiB at a time, found by walking
+the journal inode's mapping) with a single device command each, and serve
+replay from that window. The scan and revoke passes keep the per-block
+path: they hop between the few header blocks and skip the data between
+them, so sequential read-ahead would cost more bytes than it saves in
+commands.
+
+The window bypasses the block cache deliberately -- nothing writes journal
+blocks between jbd_recover()'s first read and its last, so there is no
+fresher copy a cache could hold. Two structural consequences: the
+descriptor block being replayed is copied aside before its tags are
+walked, because replaying those tags refills the window under it; and
+jbd_replay_block_tags() releases its journal-block cache reference through
+a single exit path now, which also closes the reference leak the old early
+return on a failed superblock write left behind.
+
+Fallback is the old path: if the window cannot be allocated, replay runs
+per-block as before -- slow, and correct.
+
+Measured on the incident's shape (128 MiB journal, ~1700 transactions,
+LUKS2 underneath): recovery reads fall from 43k device commands to 10k.
+Tests/run_replay_speed_tests.sh prices the whole mount like the medium
+that produced the incident and holds it inside DiskArbitration's budget.
+
+diff --git a/src/ext4_journal.c b/src/ext4_journal.c
+--- a/src/ext4_journal.c
++++ b/src/ext4_journal.c
+@@ -82,6 +82,10 @@ struct recover_info {
+ 
+ 	/**@brief  RB-Tree storing revoke entries.*/
+ 	RB_HEAD(jbd_revoke, revoke_entry) revoke_root;
++
++	/**@brief  Read-ahead window over the journal region; NULL outside
++	 *         the recovery pass, and when memory was not available. */
++	struct jbd_replay_wnd *wnd;
+ };
+ 
+ /**@brief  Journal replay internal arguments.*/
+@@ -96,6 +100,141 @@ struct replay_arg {
+ 	uint32_t this_trans_id;
+ };
+ 
++/**@brief  Read-ahead window over the journal region.
++ *
++ * The recovery pass walks the log strictly forward, yet fetched it through
++ * the block cache one block at a time: one device command per 4 KiB. On a
++ * medium with a fixed per-command cost -- every USB stick -- that priced a
++ * large journal at minutes, and DiskArbitration abandons a mount long before
++ * that. Replay is the one caller that knows its access pattern is a linear
++ * sweep, so it reads the region in physically-contiguous runs into this
++ * window and serves blocks from memory.
++ *
++ * The window bypasses the block cache deliberately: nothing writes journal
++ * blocks between jbd_recover()'s first read and its last, so there is no
++ * newer copy a cache could hold. */
++struct jbd_replay_wnd {
++	/**@brief  The window: up to @cap journal blocks, contiguous. */
++	uint8_t *data;
++
++	/**@brief  Stable copy of the descriptor block being replayed.
++	 *         Tag replay refills the window mid-iteration; the
++	 *         descriptor it is iterating must not move under it. */
++	uint8_t *desc;
++
++	/**@brief  Journal block index of data[0]. */
++	uint32_t first;
++
++	/**@brief  Valid blocks in the window; 0 means empty. */
++	uint32_t cnt;
++
++	/**@brief  Window capacity, blocks. */
++	uint32_t cap;
++};
++
++/**@brief  How much journal one device command may fetch during replay.
++ *         Large enough to amortise the per-command cost, small enough
++ *         that a mount never holds more than this much read-ahead. */
++#define JBD_REPLAY_WND_BYTES (1024 * 1024)
++
++/**@brief  Serve one journal block from the read-ahead window, refilling
++ *         it with the longest physically-contiguous run starting at the
++ *         requested block when it misses.
++ * @param  jbd_fs jbd filesystem
++ * @param  w      the window
++ * @param  iblock journal block index to read
++ * @param  data   out: pointer into the window, valid until the next call
++ * @return standard error code*/
++static int jbd_replay_wnd_read(struct jbd_fs *jbd_fs,
++			       struct jbd_replay_wnd *w,
++			       uint32_t iblock,
++			       void **data)
++{
++	uint32_t bs = jbd_fs->bdev->lg_bsize;
++	int rc;
++
++	if (!(w->cnt && iblock >= w->first && iblock - w->first < w->cnt)) {
++		/* Refill. The sweep never reads past the end of the log
++		 * area within one transaction -- wrap() sends the caller
++		 * back to `first` and the next request misses here -- so
++		 * a fill never wraps either. */
++		uint32_t want = jbd_get32(&jbd_fs->sb, maxlen) - iblock;
++		ext4_fsblk_t fblock;
++		uint32_t run = 1;
++
++		if (want > w->cap)
++			want = w->cap;
++		if (want == 0)
++			return EINVAL;
++
++		rc = jbd_inode_bmap(jbd_fs, iblock, &fblock);
++		if (rc != EOK)
++			return rc;
++
++		while (run < want) {
++			ext4_fsblk_t next;
++			rc = jbd_inode_bmap(jbd_fs, iblock + run, &next);
++			if (rc != EOK || next != fblock + run)
++				break;
++			run++;
++		}
++
++		rc = ext4_blocks_get_direct(jbd_fs->bdev, w->data,
++					    fblock, run);
++		if (rc != EOK)
++			return rc;
++
++		w->first = iblock;
++		w->cnt = run;
++	}
++
++	*data = w->data + (size_t)(iblock - w->first) * bs;
++	return EOK;
++}
++
++/**@brief  Set up the recovery read-ahead window. Best-effort: on memory
++ *         pressure recovery falls back to per-block reads, which are
++ *         slow and correct.
++ * @param  jbd_fs jbd filesystem
++ * @param  info   journal replay info*/
++static void jbd_replay_wnd_init(struct jbd_fs *jbd_fs,
++				struct recover_info *info)
++{
++	uint32_t bs = jbd_fs->bdev->lg_bsize;
++	uint32_t cap = JBD_REPLAY_WND_BYTES / bs;
++	struct jbd_replay_wnd *w;
++
++	info->wnd = NULL;
++	if (cap == 0)
++		return;
++
++	w = ext4_calloc(1, sizeof(*w));
++	if (!w)
++		return;
++
++	w->data = ext4_malloc((size_t)cap * bs);
++	w->desc = ext4_malloc(bs);
++	if (!w->data || !w->desc) {
++		ext4_free(w->data);
++		ext4_free(w->desc);
++		ext4_free(w);
++		return;
++	}
++
++	w->cap = cap;
++	info->wnd = w;
++}
++
++static void jbd_replay_wnd_fini(struct recover_info *info)
++{
++	if (!info->wnd)
++		return;
++	ext4_free(info->wnd->data);
++	ext4_free(info->wnd->desc);
++	ext4_free(info->wnd);
++	info->wnd = NULL;
++}
++
+ /* Make sure we wrap around the log correctly! */
+ #define wrap(sb, var)						\
+ do {									\
+@@ -902,6 +1041,8 @@ static void jbd_replay_block_tags(struct jbd_fs *jbd_fs,
+ 	struct revoke_entry *revoke_entry;
+ 	struct ext4_block journal_block, ext4_block;
+ 	struct ext4_fs *fs = jbd_fs->inode_ref.fs;
++	void *jdata;
++	bool have_block = false;
+ 
+ 	(*this_block)++;
+ 	wrap(&jbd_fs->sb, *this_block);
+@@ -917,20 +1058,31 @@ static void jbd_replay_block_tags(struct jbd_fs *jbd_fs,
+ 		 "Replaying block in block_tag: %" PRIu64 "\n",
+ 		 tag_info->block);
+ 
+-	r = jbd_block_get(jbd_fs, &journal_block, *this_block);
+-	if (r != EOK)
+-		return;
++	/* The logged copy, from the read-ahead window when there is one:
++	 * replay sweeps the log linearly, and fetching that sweep one
++	 * cached block at a time is what made large recoveries take
++	 * minutes on media with a per-command cost. */
++	if (info->wnd) {
++		r = jbd_replay_wnd_read(jbd_fs, info->wnd, *this_block,
++					&jdata);
++		if (r != EOK)
++			return;
++	} else {
++		r = jbd_block_get(jbd_fs, &journal_block, *this_block);
++		if (r != EOK)
++			return;
++		jdata = journal_block.data;
++		have_block = true;
++	}
+ 
+ 	/* We need special treatment for ext4 superblock. */
+ 	if (tag_info->block) {
+ 		r = ext4_block_get_noread(fs->bdev, &ext4_block, tag_info->block);
+-		if (r != EOK) {
+-			jbd_block_set(jbd_fs, &journal_block);
+-			return;
+-		}
++		if (r != EOK)
++			goto out;
+ 
+ 		memcpy(ext4_block.data,
+-			journal_block.data,
++			jdata,
+ 			jbd_get32(&jbd_fs->sb, blocksize));
+ 
+ 		if (tag_info->is_escape)
+@@ -945,21 +1097,25 @@ static void jbd_replay_block_tags(struct jbd_fs *jbd_fs,
+ 		state = ext4_get16(&fs->sb, state);
+ 
+ 		memcpy(&fs->sb,
+-			journal_block.data + EXT4_SUPERBLOCK_OFFSET,
++			(uint8_t *)jdata + EXT4_SUPERBLOCK_OFFSET,
+ 			EXT4_SUPERBLOCK_SIZE);
+ 
+ 		/* Mark system as mounted */
+ 		ext4_set16(&fs->sb, state, state);
+ 		r = ext4_sb_write(fs->bdev, &fs->sb);
+ 		if (r != EOK)
+-			return;
++			goto out;
+ 
+ 		/*Update mount count*/
+ 		ext4_set16(&fs->sb, mount_count, mount_count);
+ 	}
+ 
+-	jbd_block_set(jbd_fs, &journal_block);
+-	
++out:
++	/* Always through here: the early sb_write return used to leak the
++	 * journal block's cache reference. */
++	if (have_block)
++		jbd_block_set(jbd_fs, &journal_block);
++
+ 	return;
+ }
+ 
+@@ -1097,6 +1253,7 @@ static int jbd_iterate_log(struct jbd_fs *jbd_fs,
+ 	while (!log_end) {
+ 		struct ext4_block block;
+ 		struct jbd_bhdr *header;
++		bool from_wnd = false;
+ 		/* If we are not scanning for the last
+ 		 * valid transaction in the journal,
+ 		 * we will stop when we reach the end of
+@@ -1107,15 +1264,31 @@ static int jbd_iterate_log(struct jbd_fs *jbd_fs,
+ 				continue;
+ 			}
+ 
+-		r = jbd_block_get(jbd_fs, &block, this_block);
+-		if (r != EOK)
+-			break;
++		/* The recovery pass reads every block of the log; the scan
++		 * and revoke passes hop between the few header blocks and
++		 * skip the data between them. Sequential read-ahead pays
++		 * for itself only in the first case, so only that pass
++		 * reads through the window. */
++		if (action == ACTION_RECOVER && info->wnd) {
++			void *jdata;
++			r = jbd_replay_wnd_read(jbd_fs, info->wnd,
++						this_block, &jdata);
++			if (r != EOK)
++				break;
++			header = (struct jbd_bhdr *)jdata;
++			from_wnd = true;
++		} else {
++			r = jbd_block_get(jbd_fs, &block, this_block);
++			if (r != EOK)
++				break;
++			header = (struct jbd_bhdr *)block.data;
++		}
+ 
+-		header = (struct jbd_bhdr *)block.data;
+ 		/* This block does not have a valid magic number,
+ 		 * so we have reached the end of the journal.*/
+ 		if (jbd_get32(header, magic) != JBD_MAGIC_NUMBER) {
+-			jbd_block_set(jbd_fs, &block);
++			if (!from_wnd)
++				jbd_block_set(jbd_fs, &block);
+ 			log_end = true;
+ 			continue;
+ 		}
+@@ -1129,7 +1302,8 @@ static int jbd_iterate_log(struct jbd_fs *jbd_fs,
+ 			if (action != ACTION_SCAN)
+ 				r = EIO;
+ 
+-			jbd_block_set(jbd_fs, &block);
++			if (!from_wnd)
++				jbd_block_set(jbd_fs, &block);
+ 			log_end = true;
+ 			continue;
+ 		}
+@@ -1153,6 +1327,15 @@ static int jbd_iterate_log(struct jbd_fs *jbd_fs,
+ 				replay_arg.this_block = &this_block;
+ 				replay_arg.this_trans_id = this_trans_id;
+ 
++				/* Replaying the tags refills the window;
++				 * iterate a copy that cannot move. */
++				if (from_wnd) {
++					memcpy(info->wnd->desc, header,
++					       jbd_fs->bdev->lg_bsize);
++					header = (struct jbd_bhdr *)
++							info->wnd->desc;
++				}
++
+ 				jbd_replay_descriptor_block(jbd_fs,
+ 						header, &replay_arg);
+ 			} else
+@@ -1203,7 +1386,8 @@ static int jbd_iterate_log(struct jbd_fs *jbd_fs,
+ 			log_end = true;
+ 			break;
+ 		}
+-		jbd_block_set(jbd_fs, &block);
++		if (!from_wnd)
++			jbd_block_set(jbd_fs, &block);
+ 		this_block++;
+ 		wrap(sb, this_block);
+ 		if (this_block == start_block)
+@@ -1235,6 +1419,7 @@ int jbd_recover(struct jbd_fs *jbd_fs)
+ 		return EOK;
+ 
+ 	RB_INIT(&info.revoke_root);
++	info.wnd = NULL;
+ 
+ 	r = jbd_iterate_log(jbd_fs, &info, ACTION_SCAN);
+ 	if (r != EOK)
+@@ -1244,7 +1429,9 @@ int jbd_recover(struct jbd_fs *jbd_fs)
+ 	if (r != EOK)
+ 		return r;
+ 
++	jbd_replay_wnd_init(jbd_fs, &info);
+ 	r = jbd_iterate_log(jbd_fs, &info, ACTION_RECOVER);
++	jbd_replay_wnd_fini(&info);
+ 	if (r == EOK) {
+ 		/* The replay writes were issued; the superblock below says
+ 		 * they are not needed again. Make the first true before

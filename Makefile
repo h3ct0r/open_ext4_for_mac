@@ -95,7 +95,7 @@ ARGON2_CFLAGS := $(CFLAGS) -Wno-everything -I$(ARGON2_DIR)
 CORE_LIB      := $(BUILD)/lib/$(CONFIG)/libext4core.a
 CORE_TEST_LIB := $(BUILD)/lib/$(CONFIG)/libext4core-test.a
 
-.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-reorder test-crypto test-orphan test-luks test-mount-crash test-mount-luks test-kill-recovery check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple
+.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-reorder test-crypto test-orphan test-luks test-mount-crash test-mount-luks test-replay-speed test-kill-recovery check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple
 
 all: app
 
@@ -324,6 +324,12 @@ test-luks: tools
 # macOS writes is handed back to cryptsetup and the Linux kernel to read.
 test-mount-luks:
 	@bash Tests/run_mount_luks_tests.sh
+
+# Journal replay priced like the medium that produced the incident: a deep
+# dirty journal inside LUKS, replayed against a modelled USB stick, inside
+# DiskArbitration's ~20s mount budget.
+test-replay-speed: tools
+	@bash Tests/run_replay_speed_tests.sh
 
 # What a killed driver leaves behind, and whether the journal recovers it.
 # Passes on a disk image; EXT4_KILL_DEVICE=diskN points it at real media,
