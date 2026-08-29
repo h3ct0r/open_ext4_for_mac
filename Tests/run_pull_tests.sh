@@ -88,10 +88,18 @@ command -v debugfs >/dev/null || die "debugfs not on PATH (brew install e2fsprog
 [ -d /Library/Filesystems/ext4.fs ] || die "missing /Library/Filesystems/ext4.fs (sudo make install-diskutil)"
 diskutil info "$DEVICE" >/dev/null 2>&1 || die "$DEVICE is not a disk this machine knows about"
 
+# Internal-vs-External is the safety line, not the removable bit: large
+# sticks and USB SSDs claim "Fixed" media on an external bus (and the driver
+# then classes them .fixed -- no barrier requirement -- which makes them
+# test targets worth having, not targets to refuse).
 INFO=$(diskutil info "$DEVICE" 2>/dev/null)
-case "$(sed -n 's/.*Removable Media: *//p' <<<"$INFO" | head -1)" in
-  *emovable*) ;;
-  *) die "$DEVICE does not report removable media; refusing" ;;
+LOCATION=$(sed -n 's/.*Device Location: *//p' <<<"$INFO" | head -1)
+REMOVABLE=$(sed -n 's/.*Removable Media: *//p' <<<"$INFO" | head -1)
+case "$LOCATION:$REMOVABLE" in
+  Internal:*) die "$DEVICE is an internal disk; refusing" ;;
+  External:*) ;;
+  *:*emovable*) ;;
+  *) die "$DEVICE reports neither External nor Removable (location '${LOCATION:-none}', media '${REMOVABLE:-none}'); refusing" ;;
 esac
 
 if ! pluginkit -m -i dev.h3ct0r.ext4mac.Ext4FS 2>/dev/null | grep -q '^+'; then

@@ -65,11 +65,15 @@ INTERNAL=$(sed -n 's/.*Device Location: *//p' <<<"$INFO" | head -1)
 SIZE=$(sed -n 's/.*Disk Size: *//p' <<<"$INFO" | head -1)
 NAME=$(sed -n 's/.*Device \/ Media Name: *//p' <<<"$INFO" | head -1)
 
-case "$REMOVABLE" in
-  Removable|*emovable*) ;;
-  *) die "$DEVICE does not report removable media (got '${REMOVABLE:-nothing}'). Refusing." ;;
-esac
+# Internal-vs-External is the safety line, not the removable bit: large
+# sticks and USB SSDs claim "Fixed" media while hanging off an external bus.
 [ "$INTERNAL" = "Internal" ] && die "$DEVICE is an internal disk. Refusing."
+case "$INTERNAL:$REMOVABLE" in
+  External:*emovable*) ;;
+  External:*) echo "note: $DEVICE claims fixed media on an external bus (large sticks do)" ;;
+  *:*emovable*) ;;
+  *) die "$DEVICE reports neither External nor Removable (location '${INTERNAL:-nothing}', media '${REMOVABLE:-nothing}'). Refusing." ;;
+esac
 
 echo "about to erase:"
 echo "    device    /dev/$DEVICE"
