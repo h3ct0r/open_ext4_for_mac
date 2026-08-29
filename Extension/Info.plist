@@ -167,9 +167,12 @@
 
 		<!--
 		    Media this module will be offered. The GPT type GUID for a Linux
-		    filesystem, the MBR 0x83 content hint ("Linux"), and whole
-		    unpartitioned devices, which is how a raw-formatted USB stick or a
-		    disk image attached with hdiutil appears.
+		    filesystem, the GPT type GUID for a LUKS container (GNOME Disks
+		    stamps that one on the partitions it encrypts -- a LUKS drive made
+		    on Ubuntu is invisible to this module without it), the MBR 0x83
+		    content hint ("Linux"), and whole unpartitioned devices, which is
+		    how a raw-formatted USB stick or a disk image attached with
+		    hdiutil appears.
 		-->
 		<key>FSMediaTypes</key>
 		<dict>
@@ -179,6 +182,16 @@
 				<dict>
 					<key>Content Hint</key>
 					<string>0FC63DAF-8483-4772-8E79-3D69D8477DE4</string>
+					<key>Leaf</key>
+					<true/>
+				</dict>
+			</dict>
+			<key>CA7D7CCB-63ED-4C53-861C-1742536059CC</key>
+			<dict>
+				<key>FSMediaProperties</key>
+				<dict>
+					<key>Content Hint</key>
+					<string>CA7D7CCB-63ED-4C53-861C-1742536059CC</string>
 					<key>Leaf</key>
 					<true/>
 				</dict>
