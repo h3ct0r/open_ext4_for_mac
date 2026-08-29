@@ -62,14 +62,17 @@ UUID2=""
 cleanup() {
   umount "$MNT" 2>/dev/null
   [ -n "$DEV" ] && hdiutil detach "$DEV" -force >/dev/null 2>&1
-  # Never leave a passphrase behind in the extension's container.
-  for k in "${PLACED_KEYS[@]:-}"; do [ -n "$k" ] && rm -f "$KEYDIR/$k".*; done
+  # Never leave a passphrase behind in the extension's container. Backgrounded
+  # and disowned: when the container's write policy is wedged (see the probe
+  # below) these unlinks hang exactly like the creates, and a cleanup that
+  # hangs at EXIT holds the whole suite hostage.
+  for k in "${PLACED_KEYS[@]:-}"; do [ -n "$k" ] && { rm -f "$KEYDIR/$k".* 2>/dev/null & disown; }; done
   # And anything the app stored, wherever it put it.
   APP="/Applications/Ext4Mac.app/Contents/MacOS/Ext4Mac"
   for u in "${UUID1:-}" "${UUID2:-}"; do
-    [ -n "$u" ] && { rm -f "$KEYDIR/$u".*; [ -x "$APP" ] && "$APP" forget "$u" >/dev/null 2>&1; }
+    [ -n "$u" ] && { rm -f "$KEYDIR/$u".* 2>/dev/null & disown; [ -x "$APP" ] && "$APP" forget "$u" >/dev/null 2>&1; }
   done
-  rmdir "$KEYDIR" 2>/dev/null
+  { rmdir "$KEYDIR" 2>/dev/null & disown; }
   return 0
 }
 trap cleanup EXIT
@@ -94,14 +97,29 @@ rm -rf "$WORK"; mkdir -p "$WORK" "$KEYDIR" 2>/dev/null; mkdir -p "$MNT"
 # the OS enforcing the sandbox, and it is exactly why D5 moved key material to
 # the keychain. Stage 5 exercises the real app -> keychain -> extension flow and
 # is the authoritative coverage; the file path is a fallback the OS now hides.
+# Watchdogged, because this open() can do worse than fail: after the appex
+# is deregistered and re-registered, the container's write-policy upcall can
+# wedge and the open blocks forever -- it cost a 900 s stage timeout once.
+# A hang and an EPERM mean the same thing here: keys cannot be placed.
 CAN_PLACE_KEYS=1
-if ! ( : > "$KEYDIR/.probe" ) 2>/dev/null; then
+( : > "$KEYDIR/.probe" ) 2>/dev/null &
+probe_pid=$!
+probe_hung=0
+for _ in 1 2 3 4 5; do kill -0 "$probe_pid" 2>/dev/null || break; sleep 1; done
+if kill -0 "$probe_pid" 2>/dev/null; then
+  kill -9 "$probe_pid" 2>/dev/null
+  probe_hung=1
+  CAN_PLACE_KEYS=0
+  note "  note: writing into the extension container HANGS (container write"
+  note "        policy wedged; a reboot clears it). Direct key-file stages"
+  note "        are skipped. Stage 5 covers the real keychain flow."
+elif ! wait "$probe_pid"; then
   CAN_PLACE_KEYS=0
   note "  note: the extension container is OS-protected (Data Vault); the"
   note "        direct key-file stages are skipped. Stage 5 covers the real"
   note "        keychain flow."
 else
-  rm -f "$KEYDIR/.probe"
+  rm -f "$KEYDIR/.probe" 2>/dev/null
 fi
 
 if ! docker image inspect "$DOCKER_IMAGE" >/dev/null 2>&1; then
