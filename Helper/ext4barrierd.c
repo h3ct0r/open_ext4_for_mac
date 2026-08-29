@@ -283,6 +283,42 @@ static int synchronize(int fd)
 
 /* ------------------------------------------------------------ authorisation */
 
+/*
+ * The two validation stages, shared by the trust boundary and --selfcheck.
+ *
+ * They are separate because the API insists: SecCodeCheckValidity judges a
+ * *live* process and accepts only the default flags. Handing it the static
+ * flags below returns errSecCSInvalidFlags (-67070) -- refusing every caller
+ * while looking exactly like a signature mismatch in the log. That shipped
+ * once, and only a physical USB stick surfaced it, because disk images are
+ * exempt from the barrier and no image-backed test ever asks. --selfcheck
+ * exists so it cannot ship twice.
+ *
+ * The strict flags still run where they are legal: on the static code behind
+ * the process, where kSecCSStrictValidate rejects signatures the default
+ * flags tolerate and kSecCSCheckAllArchitectures covers every slice of a fat
+ * binary rather than the one that happens to be running.
+ */
+static OSStatus dynamic_ok(SecCodeRef code, SecRequirementRef req)
+{
+    return SecCodeCheckValidity(code, kSecCSDefaultFlags, req);
+}
+
+static OSStatus static_ok(SecCodeRef code, SecRequirementRef req)
+{
+    SecStaticCodeRef disk = NULL;
+    OSStatus rc = SecCodeCopyStaticCode(code, kSecCSDefaultFlags, &disk);
+    if (rc != errSecSuccess || !disk)
+        return rc != errSecSuccess ? rc : errSecCSInternalError;
+    rc = SecStaticCodeCheckValidity(disk,
+                                    kSecCSDefaultFlags
+                                    | kSecCSStrictValidate
+                                    | kSecCSCheckAllArchitectures,
+                                    req);
+    CFRelease(disk);
+    return rc;
+}
+
 static bool peer_is_trusted(xpc_connection_t peer)
 {
     audit_token_t token;
@@ -319,14 +355,13 @@ static bool peer_is_trusted(xpc_connection_t peer)
         return false;
     }
 
-    /* Strict, and every architecture: the default flags accept a signature
-     * that strict validation would reject, and on a fat binary they would
-     * check only the running slice. This is the whole trust boundary for a
-     * root daemon, so it pays the stricter check. */
-    SecCSFlags check = kSecCSDefaultFlags
-                     | kSecCSStrictValidate
-                     | kSecCSCheckAllArchitectures;
-    rc = SecCodeCheckValidity(code, check, requirement);
+    /* Both stages: the live process must satisfy the requirement, and so
+     * must every architecture of the binary behind it, strictly validated.
+     * This is the whole trust boundary for a root daemon, so it pays the
+     * stricter check -- in the one place the API permits it. */
+    rc = dynamic_ok(code, requirement);
+    if (rc == errSecSuccess)
+        rc = static_ok(code, requirement);
     CFRelease(requirement);
     CFRelease(code);
 
@@ -447,8 +482,94 @@ static void handle_connection(xpc_connection_t peer)
     xpc_connection_resume(peer);
 }
 
-int main(void)
+/* ---------------------------------------------------------------- selfcheck */
+
+static int expect(const char *what, OSStatus got, OSStatus want)
 {
+    if (got == want) {
+        printf("  ok    %s (%d)\n", what, (int)got);
+        return 0;
+    }
+    printf("  FAIL  %s: got %d, wanted %d%s\n", what, (int)got, (int)want,
+           got == errSecCSInvalidFlags
+               ? " -- invalid API flags: the daemon would refuse every caller"
+               : "");
+    return 1;
+}
+
+/*
+ * Prove the validation calls are legal API before they guard anything.
+ *
+ * Runs the exact production stages twice: against this binary's own
+ * designated requirement, which must pass -- exercising both flag sets end
+ * to end -- and against the extension requirement, which must fail with
+ * errSecCSReqFailed, the healthy refusal. Any other outcome, -67070 above
+ * all, means the check itself is broken, and broken in the direction that
+ * silently disables the barrier on every removable mount.
+ *
+ * Needs the signed binary; an unsigned build has no designated requirement.
+ */
+static int selfcheck(void)
+{
+    SecCodeRef self = NULL;
+    SecStaticCodeRef disk = NULL;
+    SecRequirementRef own = NULL;
+    SecRequirementRef ext = NULL;
+    int failures = 0;
+
+    if (SecCodeCopySelf(kSecCSDefaultFlags, &self) != errSecSuccess || !self) {
+        fprintf(stderr, "selfcheck: cannot identify self\n");
+        return 1;
+    }
+    if (SecCodeCopyStaticCode(self, kSecCSDefaultFlags, &disk) != errSecSuccess
+        || SecCodeCopyDesignatedRequirement(disk, kSecCSDefaultFlags, &own)
+               != errSecSuccess) {
+        fprintf(stderr,
+                "selfcheck: no designated requirement -- unsigned build? "
+                "run make sign first\n");
+        CFRelease(self);
+        if (disk) CFRelease(disk);
+        return 1;
+    }
+
+    failures += expect("dynamic check, own requirement",
+                       dynamic_ok(self, own), errSecSuccess);
+    failures += expect("static check, own requirement",
+                       static_ok(self, own), errSecSuccess);
+
+    CFStringRef text = CFStringCreateWithCString(NULL, CALLER_REQUIREMENT,
+                                                 kCFStringEncodingUTF8);
+    if (!text
+        || SecRequirementCreateWithString(text, kSecCSDefaultFlags, &ext)
+               != errSecSuccess) {
+        printf("  FAIL  extension requirement does not parse\n");
+        failures++;
+    } else {
+        failures += expect("dynamic check, extension requirement refused",
+                           dynamic_ok(self, ext), errSecCSReqFailed);
+        failures += expect("static check, extension requirement refused",
+                           static_ok(self, ext), errSecCSReqFailed);
+    }
+
+    if (text) CFRelease(text);
+    if (ext) CFRelease(ext);
+    CFRelease(own);
+    CFRelease(disk);
+    CFRelease(self);
+
+    printf(failures ? "selfcheck: FAIL\n" : "selfcheck: ok\n");
+    return failures ? 1 : 0;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc > 1 && strcmp(argv[1], "--selfcheck") == 0)
+        return selfcheck();
+    if (argc > 1) {
+        fprintf(stderr, "usage: ext4barrierd [--selfcheck]\n");
+        return 2;
+    }
+
     /* Same subsystem as the app and extension (dev.h3ct0r.ext4), so the one
      * documented `log stream --predicate 'subsystem == "dev.h3ct0r.ext4"'`
      * shows the daemon too -- it used to log under a subsystem that predicate
