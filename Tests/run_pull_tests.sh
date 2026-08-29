@@ -37,6 +37,15 @@
 # This ERASES the stick, repeatedly -- use one you can lose. Repeated hot
 # pulls can also wedge DiskArbitration until a reboot; run the barrier arm
 # first while the machine is fresh, and expect to reboot after the naked arm.
+#
+# A pull can even panic the whole machine: if the drive's bridge chip hangs
+# the in-flight commands on surprise removal, the media object cannot finish
+# terminating and xnu's 60 s busy-timeout watchdog panics rather than leak it
+# ("busy timeout ... 'IOMediaBSDClient'", panicked task watchdogd). That is
+# Apple's storage stack, not this driver, and it is drive-dependent -- one
+# DataTraveler survived a dozen pulls, another drive panicked the Mac. Save
+# your work before each round, and record which drive was in when it happens:
+# a bridge that hangs on removal is a result, not a nuisance.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
