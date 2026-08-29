@@ -21,11 +21,15 @@
 # What works is diskutil's own EXT4 personality, registered by the .fs bundle
 # that `sudo make install-diskutil` installs. Its FSFormatContentMask is the
 # Linux filesystem type GUID, so diskutil sets that type when it creates the
-# partition. Its formatter (newfs_fskit) is expected to fail; that does not
-# matter, because the partition and its type are what we need and ext4dump does
-# the format.
+# partition. Its formatter is newfs_fskit, and startFormat works now
+# (validation stage 12), so a clean partitionDisk leaves a formatted volume;
+# ext4dump remains the fallback for a partitionDisk that fails or overruns
+# its bound.
 #
 #   sudo make prepare-device DEVICE=diskN
+#
+# EXT4_SIZE bounds the partition (default 100%): the pull-test autopsy dd's
+# the whole partition to a file for e2fsck, which wants it small.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -86,13 +90,24 @@ echo "partitioning..."
 diskutil unmountDisk force "$DEVICE" >/dev/null 2>&1
 sleep 1
 
-# The formatter is expected to fail; the partition and its type are the point.
-# Bounded, because newfs_fskit reaching the module and never calling
-# startFormat is a known open problem and a hang here would be indistinguishable
-# from a slow format.
-( diskutil partitionDisk "$DEVICE" GPT EXT4 "$LABEL" 100% >/dev/null 2>&1 ) &
+# newfs_fskit formats the volume during partitionDisk now, so the normal path
+# is simply letting it finish. Still bounded, because a wedged DiskArbitration
+# can hang partitionDisk and a hang must not look like a slow format -- but
+# generously: a 15 GB stick over USB 2 needs well over the old 90 s, which was
+# learned the hard way when the kill landed mid-write, the partition table
+# flipped under a format already in flight, and the result probed as nothing.
+SIZE="${EXT4_SIZE:-100%}"
+if [ "$SIZE" = "100%" ]; then
+  ( diskutil partitionDisk "$DEVICE" GPT EXT4 "$LABEL" 100% >/dev/null 2>&1 ) &
+else
+  ( diskutil partitionDisk "$DEVICE" GPT EXT4 "$LABEL" "$SIZE" FREE Rest R >/dev/null 2>&1 ) &
+fi
 pd=$!
-for _ in $(seq 1 90); do kill -0 $pd 2>/dev/null || break; sleep 1; done
+PD_OK=no
+for _ in $(seq 1 300); do
+  if ! kill -0 $pd 2>/dev/null; then wait $pd && PD_OK=yes; break; fi
+  sleep 1
+done
 kill -9 $pd 2>/dev/null
 sleep 2
 
@@ -100,7 +115,8 @@ PART="${DEVICE}s2"
 diskutil list "$DEVICE" 2>/dev/null | grep -q "${DEVICE}s2" || PART="${DEVICE}s1"
 
 TYPE=$(diskutil info "$PART" 2>/dev/null | sed -n 's/.*Partition Type: *//p' | head -1)
-echo "  partition $PART, type ${TYPE:-unknown}"
+PSIZE=$(diskutil info "$PART" 2>/dev/null | sed -n 's/.*Disk Size: *//p' | head -1 | cut -d'(' -f1)
+echo "  partition $PART, type ${TYPE:-unknown}, ${PSIZE:-size unknown}"
 if [ "$TYPE" != "$LINUX_FS_GUID" ] && [ "$TYPE" != "Linux Filesystem" ]; then
   echo ""
   echo "warning: the partition type is not the Linux filesystem GUID."
@@ -111,12 +127,32 @@ if [ "$TYPE" != "$LINUX_FS_GUID" ] && [ "$TYPE" != "Linux Filesystem" ]; then
 fi
 
 # ----------------------------------------------------------------- format --
-echo "formatting $PART as ext4..."
-diskutil unmountDisk force "$DEVICE" >/dev/null 2>&1
-"$DUMP" "/dev/$PART" format 4 || die "format failed"
-[ -n "${EXT4_LABEL:-}" ] && "$DUMP" "/dev/$PART" label "$LABEL" >/dev/null 2>&1
+format_directly() {
+  echo "formatting $PART as ext4 directly..."
+  diskutil unmountDisk force "$DEVICE" >/dev/null 2>&1
+  sleep 1
+  "$DUMP" "/dev/$PART" format 4 || die "format failed"
+  "$DUMP" "/dev/$PART" label "$LABEL" >/dev/null 2>&1
+}
 
+if [ "$PD_OK" = yes ]; then
+  echo "formatted by newfs_fskit during partitioning"
+else
+  echo "partitionDisk did not finish cleanly; falling back"
+  format_directly
+fi
+
+# Trust nothing above. The one postcondition that matters is that the
+# driver's own probe recognises what is on the partition *now* -- a format
+# has claimed success onto a table that changed underneath it before.
 sleep 2
+if ! "$DUMP" "/dev/$PART" probe >/dev/null 2>&1; then
+  echo "  probe rejects $PART after formatting; retrying once"
+  format_directly
+  sleep 2
+  "$DUMP" "/dev/$PART" probe >/dev/null 2>&1 \
+    || die "the freshly formatted $PART does not probe as ext4"
+fi
 echo ""
 echo "ready:"
 diskutil list "$DEVICE" 2>/dev/null | head -6
