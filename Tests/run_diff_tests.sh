@@ -14,6 +14,22 @@
 # Runs unattended. Writes a report to build/diff-report.txt.
 set -uo pipefail
 
+# bash 3.2 -- the /bin/bash macOS ships -- has no associative arrays, and it
+# does not fail here so much as degrade: under `set -u` without `-e` the
+# failed `declare -A` leaves every lookup empty and the suite keeps walking,
+# which once turned this stage into cut images that were never cut (a false
+# FAIL) and a sibling suite into a 2-second false PASS. Re-exec into a real
+# bash, or refuse to pretend.
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+  for _b in /opt/homebrew/bin/bash /opt/local/bin/bash /usr/local/bin/bash; do
+    [ -x "$_b" ] && "$_b" -c '[ "${BASH_VERSINFO[0]}" -ge 4 ]' 2>/dev/null \
+      && exec "$_b" "$0" "$@"
+  done
+  echo "this suite needs bash >= 4 (associative arrays); brew install bash" >&2
+  exit 1
+fi
+
+
 export PATH="/opt/homebrew/opt/e2fsprogs/sbin:/opt/homebrew/opt/e2fsprogs/bin:$PATH"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
