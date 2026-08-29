@@ -62,11 +62,16 @@ APP_BIN="/Applications/Ext4Mac.app/Contents/MacOS/Ext4Mac"
 BARRIER_LABEL="dev.h3ct0r.ext4mac.barrier"
 BARRIER_PLIST="/Library/LaunchDaemons/$BARRIER_LABEL.plist"
 # One results directory per drive, so a four-drive sweep does not overwrite
-# itself: TAG defaults to the media name, slugged.
-TAG="${TAG:-$(diskutil info "${DEVICE%s[0-9]*}" 2>/dev/null \
-      | sed -n 's|.*Device / Media Name: *||p' | head -1 \
-      | tr 'A-Z ' 'a-z-' | tr -cd 'a-z0-9-')}"
-OUT="$ROOT/build/pulltest/${TAG:-unnamed}-$ARM"
+# itself: TAG defaults to the media name plus the byte size, because two
+# sticks of the same model are two different drives.
+if [ -z "${TAG:-}" ]; then
+  _info=$(diskutil info "${DEVICE%s[0-9]*}" 2>/dev/null)
+  _name=$(sed -n 's|.*Device / Media Name: *||p' <<<"$_info" | head -1 \
+          | tr 'A-Z ' 'a-z-' | tr -cd 'a-z0-9-')
+  _bytes=$(sed -n 's/.*Disk Size:.*(\([0-9]*\) Bytes.*/\1/p' <<<"$_info" | head -1)
+  TAG="${_name:-unnamed}${_bytes:+-$_bytes}"
+fi
+OUT="$ROOT/build/pulltest/$TAG-$ARM"
 [ "${HARSH:-0}" = 1 ] && OUT="$OUT-harsh"
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -300,12 +305,25 @@ for r in $(seq 1 "$ROUNDS"); do
       --style compact > "$RD/oslog.txt" 2>/dev/null
   grep -iE 'recover|replay|journal|barrier' "$RD/oslog.txt" | tail -5 | sed 's/^/    | /'
 
-  diskutil unmountDisk force "/dev/$CUR" >/dev/null 2>&1
-  sleep 1
+  # The replay-fresh volume can refuse the first force unmount while journal
+  # recovery and the mount-time sync are still churning; dd on the raw node
+  # of a mounted volume then dies with nothing but "Resource busy". Insist,
+  # and verify, before imaging.
+  for i in $(seq 1 10); do
+    vol_mounted || break
+    diskutil unmountDisk force "/dev/$CUR" >/dev/null 2>&1
+    sleep 3
+  done
+  vol_mounted && die "cannot unmount /dev/$CUR for the autopsy"
+  [ -e "/dev/r$PART" ] || die "/dev/r$PART vanished before the autopsy; replug and rerun the round"
 
   echo "  autopsy: imaging /dev/r$PART ..."
   CORPSE="$RD/corpse.img"
-  sudo dd if="/dev/r$PART" of="$CORPSE" bs=4194304 2>/dev/null || die "dd failed"
+  sudo -v
+  if ! sudo dd if="/dev/r$PART" of="$CORPSE" bs=4194304 2>"$RD/dd-err.txt"; then
+    grep -v records "$RD/dd-err.txt" | sed 's/^/    | /'
+    die "dd failed"
+  fi
   sudo chown "$(id -un)" "$CORPSE"
 
   # fn on the corpse: the state the driver's own recovery left behind.
