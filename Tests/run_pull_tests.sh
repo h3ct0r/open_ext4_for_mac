@@ -52,7 +52,12 @@ WARMUP="${WARMUP:-10}"
 APP_BIN="/Applications/Ext4Mac.app/Contents/MacOS/Ext4Mac"
 BARRIER_LABEL="dev.h3ct0r.ext4mac.barrier"
 BARRIER_PLIST="/Library/LaunchDaemons/$BARRIER_LABEL.plist"
-OUT="$ROOT/build/pulltest/$ARM"
+# One results directory per drive, so a four-drive sweep does not overwrite
+# itself: TAG defaults to the media name, slugged.
+TAG="${TAG:-$(diskutil info "${DEVICE%s[0-9]*}" 2>/dev/null \
+      | sed -n 's|.*Device / Media Name: *||p' | head -1 \
+      | tr 'A-Z ' 'a-z-' | tr -cd 'a-z0-9-')}"
+OUT="$ROOT/build/pulltest/${TAG:-unnamed}-$ARM"
 [ "${HARSH:-0}" = 1 ] && OUT="$OUT-harsh"
 
 die() { echo "error: $*" >&2; exit 1; }
