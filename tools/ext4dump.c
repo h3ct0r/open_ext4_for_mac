@@ -74,8 +74,30 @@ typedef struct {
      */
     uint64_t reads, read_bytes;
     uint64_t write_ops, write_bytes;
+    uint64_t flushes;
     uint32_t latency_us;             /* per-op fixed cost; 0 disables */
     uint32_t bw_mbs;                 /* transfer rate; 0 means infinite */
+
+    /*
+     * EIO injection: the opposite failure model from fail_after. That one is
+     * a power cut -- writes vanish while reporting success, because a real
+     * cut hands the filesystem no errno. This one is a *failing* medium: the
+     * N-th read or write call answers EIO, once, or forever after with
+     * `sticky` (a stick that died mid-session). Both are needed: the journal
+     * protects against the first, and the error-propagation paths -- the ones
+     * that historically returned success over a failed write -- are only
+     * testable with the second.
+     *
+     * Ordinals are 1-based counts of read/write calls (the same counters the
+     * meter reports). ext4dump is single-threaded, so for a fixed fixture and
+     * command the N-th call is always the same block: run once with
+     * EXT4DUMP_TRACE to map ordinal to offset, then aim. Every injection
+     * prints an EIO-INJECT line so a suite can assert the fault actually
+     * fired -- a red test whose fault was never reached proves nothing.
+     */
+    uint64_t eio_read_at;            /* 0 disables */
+    uint64_t eio_write_at;           /* 0 disables */
+    bool     eio_sticky;
     uint32_t       reorder_seed;
     uint32_t       rng;             /* seeded; drives eviction and the crash */
     int            reorder_drop;     /* percent of the pending queue lost */
@@ -400,6 +422,15 @@ static int file_read(void *ctx, void *buf, uint64_t off, size_t len)
     file_ctx *c = ctx;
     c->reads++;
     c->read_bytes += len;
+    trace_ev(c, "TRC R seq=%llu off=%llu len=%zu",
+             (unsigned long long)(c->reads - 1), (unsigned long long)off, len);
+    if (c->eio_read_at &&
+        (c->reads == c->eio_read_at ||
+         (c->eio_sticky && c->reads >= c->eio_read_at))) {
+        fprintf(stderr, "EIO-INJECT read #%llu off=%llu len=%zu\n",
+                (unsigned long long)c->reads, (unsigned long long)off, len);
+        return EIO;
+    }
     media_charge(c, len);
     ssize_t n = pread(c->fd, buf, len, (off_t)off);
     if (n != (ssize_t)len)
@@ -415,6 +446,15 @@ static int file_write(void *ctx, const void *buf, uint64_t off, size_t len)
     file_ctx *c = ctx;
     c->write_ops++;
     c->write_bytes += len;
+    /* Before the power-cut and cache models: a write the medium refused
+     * never entered anyone's queue. */
+    if (c->eio_write_at &&
+        (c->write_ops == c->eio_write_at ||
+         (c->eio_sticky && c->write_ops >= c->eio_write_at))) {
+        fprintf(stderr, "EIO-INJECT write #%llu off=%llu len=%zu\n",
+                (unsigned long long)c->write_ops, (unsigned long long)off, len);
+        return EIO;
+    }
     media_charge(c, len);
 
     if (c->fail_after >= 0 && c->writes >= c->fail_after) {
@@ -460,6 +500,11 @@ static int file_write(void *ctx, const void *buf, uint64_t off, size_t len)
 static int file_flush(void *ctx)
 {
     file_ctx *c = ctx;
+    /* Counted and priced like any command: on a real stick the cache flush is
+     * one of the most expensive things a driver can ask for, and a change
+     * that trades writes for barriers must not read as an improvement. */
+    c->flushes++;
+    media_charge(c, 0);
     if (c->crashed)
         return 0;           /* a flush after the cut reaches nothing */
 
@@ -493,8 +538,10 @@ static void io_stats_report(void)
         return;
     fprintf(stderr,
             "IOSTATS reads=%" PRIu64 " read_bytes=%" PRIu64
-            " writes=%" PRIu64 " write_bytes=%" PRIu64 "\n",
-            c->reads, c->read_bytes, c->write_ops, c->write_bytes);
+            " writes=%" PRIu64 " write_bytes=%" PRIu64
+            " flushes=%" PRIu64 "\n",
+            c->reads, c->read_bytes, c->write_ops, c->write_bytes,
+            c->flushes);
 }
 
 static void logger(void *ctx, int level, const char *msg)
@@ -1053,6 +1100,15 @@ int main(int argc, char **argv)
         io_stats_ctx = &fc;
         atexit(io_stats_report);
     }
+
+    /* EIO injection; see file_ctx. */
+    const char *eio_r = getenv("EXT4DUMP_EIO_READ_AT");
+    if (eio_r)
+        fc.eio_read_at = strtoull(eio_r, NULL, 10);
+    const char *eio_w = getenv("EXT4DUMP_EIO_WRITE_AT");
+    if (eio_w)
+        fc.eio_write_at = strtoull(eio_w, NULL, 10);
+    fc.eio_sticky = getenv("EXT4DUMP_EIO_STICKY") != NULL;
 
     /* EXT4DUMP_TRACE_WRITES was the old name for the stderr form. */
     const char *trace_env = getenv("EXT4DUMP_TRACE");

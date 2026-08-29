@@ -95,7 +95,7 @@ ARGON2_CFLAGS := $(CFLAGS) -Wno-everything -I$(ARGON2_DIR)
 CORE_LIB      := $(BUILD)/lib/$(CONFIG)/libext4core.a
 CORE_TEST_LIB := $(BUILD)/lib/$(CONFIG)/libext4core-test.a
 
-.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-reorder test-crypto test-orphan test-luks test-mount-crash test-mount-luks test-replay-speed test-kill-recovery check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple
+.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-reorder test-crypto test-orphan test-luks test-eio test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple
 
 all: app
 
@@ -331,6 +331,11 @@ test-mount-luks:
 test-replay-speed: tools
 	@bash Tests/run_replay_speed_tests.sh
 
+# A medium that answers EIO, aimed at the paths that historically swallowed
+# it. Every cell asserts the fault fired AND the failure surfaced.
+test-eio: tools
+	@bash Tests/run_eio_tests.sh
+
 # What a killed driver leaves behind, and whether the journal recovers it.
 # Passes on a disk image; EXT4_KILL_DEVICE=diskN points it at real media,
 # which it ERASES. preflight checks the hand-granted switches (extension
@@ -339,8 +344,16 @@ test-replay-speed: tools
 preflight:
 	@bash scripts/preflight.sh $(EXT4_KILL_DEVICE)
 
-test-kill-recovery: preflight
+# `tools` is not decoration: the suite formats its target with ext4dump, and
+# after `make clean` a hardware run would pass preflight, fail the format, and
+# report "could not prepare the volume" -- on the one day that costs the most.
+test-kill-recovery: preflight tools
 	@bash Tests/run_kill_recovery_tests.sh
+
+# The hands-on suite: the operator pulls the stick on cue. Erases the device
+# every round. See the header of the script for the safety notes.
+test-pull: preflight tools
+	@bash Tests/run_pull_tests.sh
 
 # Crash consistency against the mounted driver rather than the offline core.
 # Needs the extension signed, installed and enabled; skips with a message if
@@ -563,6 +576,7 @@ uninstall-barrier:
 # else. See scripts/prepare_device.sh for the three routes that do not work.
 prepare-device:
 	@DEVICE="$(DEVICE)" CONFIRM="$(CONFIRM)" EXT4_LABEL="$(EXT4_LABEL)" \
+	    EXT4_SIZE="$(EXT4_SIZE)" \
 	    bash scripts/prepare_device.sh
 
 install-diskutil:

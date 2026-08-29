@@ -64,6 +64,11 @@ fi
 rm -rf "$WORK"; mkdir -p "$WORK"
 : > "$REPORT"
 
+# The fixtures are ~400 MB each and one of them is a plaintext passphrase.
+# Nothing here is worth keeping: the report survives outside $WORK, and a
+# debugging session rebuilds the fixture deterministically in under a minute.
+trap 'rm -rf "$WORK"' EXIT
+
 PASSPHRASE="correct horse battery staple"
 printf '%s' "$PASSPHRASE" > "$WORK/pass.txt"
 export EXT4DUMP_LUKS_KEYFILE="$WORK/pass.txt"
@@ -174,6 +179,8 @@ stats=$(grep IOSTATS "$WORK/recover.err")
 
 reads=$(echo "$stats"  | sed -n 's/.*reads=\([0-9]*\).*/\1/p')
 writes=$(echo "$stats" | sed -n 's/.*writes=\([0-9]*\).*/\1/p')
+read_bytes=$(echo "$stats"  | sed -n 's/.*read_bytes=\([0-9]*\).*/\1/p')
+write_bytes=$(echo "$stats" | sed -n 's/.*write_bytes=\([0-9]*\).*/\1/p')
 note "  recovery mount: ${elapsed}s modelled; $stats"
 
 if [ "$elapsed" -le "$DA_BUDGET_S" ]; then
@@ -193,6 +200,23 @@ if [ "$total_ops" -le 20000 ]; then
 else
   bad "replay still issues ~one command per journal block" \
       "$total_ops commands for a ~32k-block journal"
+fi
+
+# The other half of the fix was byte volume: replayed blocks are written once
+# (the newest logged copy), not once per transaction that logged them. Without
+# dedup this fixture writes ~90-120 MB; with it, ~25 MB. And the log itself is
+# read once plus the header passes -- a regression that re-read it per pass
+# would keep the command count while tripling the bytes.
+if [ "${write_bytes:-0}" -le 50000000 ]; then
+  ok "replayed blocks are written once ($(( ${write_bytes:-0} / 1000000 )) MB)"
+else
+  bad "replay writes each block once per transaction again" \
+      "$write_bytes bytes written for a ~128 MiB journal"
+fi
+if [ "${read_bytes:-0}" -le 250000000 ]; then
+  ok "the log is read about once ($(( ${read_bytes:-0} / 1000000 )) MB)"
+else
+  bad "replay re-reads the log" "$read_bytes bytes read for a ~128 MiB journal"
 fi
 
 # ================================================================ correctness ==

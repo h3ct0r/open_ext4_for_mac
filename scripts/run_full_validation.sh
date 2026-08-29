@@ -210,6 +210,9 @@ stage "4c. journal revoke records" bash Tests/run_revoke_tests.sh
 # suite needs cryptsetup, so it lives with the Docker stages below.
 stage "5. crypto primitives" "$ROOT/build/bin/cryptotest"
 
+# A device that answers EIO, aimed at paths that historically swallowed it.
+stage "5b. errors surface, not vanish" bash Tests/run_eio_tests.sh
+
 if docker info >/dev/null 2>&1; then
   stage "6. LUKS containers" bash Tests/run_luks_tests.sh
   stage "7. crash consistency" bash Tests/run_crash_tests.sh
@@ -220,6 +223,11 @@ if docker info >/dev/null 2>&1; then
   # which is why it also asserts that disabling barriers breaks it.
   stage "7b. reordered writes" bash Tests/run_reorder_tests.sh
   stage "8. differential vs Linux" bash Tests/run_diff_tests.sh
+
+  # The incident regression guard: a deep dirty journal inside LUKS, priced
+  # like the USB stick that produced the 2026-08-29 replay hang, must mount
+  # inside DiskArbitration's budget. Command counts, not wall time.
+  stage "8b. journal replay speed" bash Tests/run_replay_speed_tests.sh
 
   # Stages 1-8 all drive the core directly through a plain file. These two go
   # through FSKit *and* hand their images to the Linux kernel, so they need
@@ -236,6 +244,7 @@ else
   skip "7. crash consistency"     "docker daemon not reachable"
   skip "7b. reordered writes"     "docker daemon not reachable"
   skip "8. differential vs Linux" "docker daemon not reachable"
+  skip "8b. journal replay speed" "docker daemon not reachable"
   skip "9. mounted driver"        "docker daemon not reachable"
   skip "10. encrypted volumes, mounted" "docker daemon not reachable"
 fi

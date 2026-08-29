@@ -33,6 +33,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Refuse-to-lie guard: are we measuring the build in this tree, or a stale
 # install? Warns by default; EXT4_REQUIRE_FRESH=1 makes staleness fatal.
 bash "$ROOT/scripts/check_install_freshness.sh" || exit 1
+
+# The suite formats its target with ext4dump. After `make clean` the binary is
+# gone, the format fails, and the message points at the *device* -- on real
+# media, during a hardware day. Refuse here, with the actual reason.
+[ -x "$ROOT/build/bin/ext4dump" ] || { echo "build first: make tools"; exit 1; }
 WORK="$ROOT/build/kill-recovery"
 REPORT="$ROOT/build/kill-recovery-report.txt"
 MNT="$WORK/mnt"
