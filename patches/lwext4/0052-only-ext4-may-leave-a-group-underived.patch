@@ -1,0 +1,157 @@
+Only ext4 may leave a group underived, and only its bitmaps are skipped
+
+0051 stopped the format zeroing every inode table, which took an 8 GB
+volume from 135 MB of writes to 7 MB. Two things were still wrong with it,
+and the geometry sweep found both -- 117 combinations of size, block size
+and generation, each handed to e2fsck.
+
+The first is that BLOCK_UNINIT and INODE_UNINIT mean nothing without
+uninit_bg or metadata_csum, and e2fsck rejects a volume that sets them
+anyway: "Group descriptor 1 marked uninitialized without feature set", on
+44 of the 117. ext2 and ext3 have neither feature. The flags had always
+been set for every generation, and the eager walk had always cleared them
+again before anyone could look -- so removing the walk turned a harmless
+transient into an on-disk error.
+
+The fix is not to stop setting them: setting them is what makes
+ext4_fs_get_block_group_ref do the initialising at all, and clearing them
+is part of that work. It is to keep walking every group where the flags
+cannot survive. ext2 and ext3 are therefore formatted exactly as before,
+and pay exactly what they did.
+
+The second is the remaining cost on ext4, which after 0051 was no longer
+bytes: 242 of 250 writes were 4 KiB or smaller and came to under a
+megabyte between them, one per bitmap per group, landing at each group's
+start and so scattered 128 MB apart. A stick charges an erase cycle for a
+scattered write however few bytes it carries. Those bitmaps are precisely
+what the UNINIT flags tell a reader to derive rather than read, so on a
+volume that can say so they need not be written at all -- mke2fs writes
+the same set. 250 writes become 128.
+
+Measured: 8 GB ext4, 128 writes and 6.9 MB, against 372 and 135 MB before
+0051. ext2 unchanged at 46 writes and e2fsck-clean. The sweep is clean on
+all 117 combinations; write 114, differential 36, newfs 16, bounds 23.
+--- a/src/ext4_mkfs.c
++++ b/src/ext4_mkfs.c
+@@ -410,6 +410,12 @@
+ 	uint32_t dsc_size = ext4_sb_get_desc_size(aux_info->sb);
+ 	uint32_t dsc_per_block = block_size / dsc_size;
+ 	uint32_t k = 0;
++	/* Whether this volume may describe a group as underived at all: the
++	 * flags mean nothing without one of the features that defines them,
++	 * and e2fsck rejects a volume that sets them regardless. */
++	bool lazy_groups =
++		ext4_sb_feature_ro_com(aux_info->sb, EXT4_FRO_COM_GDT_CSUM) ||
++		ext4_sb_feature_ro_com(aux_info->sb, EXT4_FRO_COM_METADATA_CSUM);
+ 
+ 	for (i = 0; i < aux_info->groups; i++) {
+ 		uint64_t bg_start_block = aux_info->first_data_block +
+@@ -473,6 +479,17 @@
+ 		 * bitmap carries the padding past the end of the volume -- and
+ 		 * clearing the flag is part of that work, so it must be set
+ 		 * here first or the initialiser skips them. */
++		/* Set on every group, whatever the generation, because this is
++		 * what makes ext4_fs_get_block_group_ref do the work: it
++		 * initialises a group only when the flags say it is underived,
++		 * and clears them as it goes.
++		 *
++		 * On ext2 and ext3 they are therefore transient -- init_bgs()
++		 * walks every group there and leaves none of them set, which
++		 * matters because e2fsck rejects the flags on a volume whose
++		 * features do not define them. On ext4 the two groups that
++		 * must be real are initialised and the rest keep the flags,
++		 * which is exactly what they mean. */
+ 		ext4_bg_set_flag(bg_desc,
+ 				 EXT4_BLOCK_GROUP_BLOCK_UNINIT |
+ 				 EXT4_BLOCK_GROUP_INODE_UNINIT);
+@@ -488,6 +505,25 @@
+ 
+ 		sb_free_blk += bg_free_blk;
+ 
++		/* The bitmaps below are written only where they will be read.
++		 *
++		 * Every group is marked BLOCK_UNINIT | INODE_UNINIT, which
++		 * tells a reader to derive both bitmaps rather than trust the
++		 * blocks -- so writing them is work nobody consumes. It is
++		 * also the expensive kind of work: one 4 KiB write per bitmap
++		 * per group, landing at that group's start, which on an 8 GB
++		 * volume is 128 scattered writes 128 MB apart. They came to
++		 * under a megabyte in total and most of the format's time on a
++		 * USB stick, because a stick charges an erase cycle for a
++		 * scattered write regardless of how few bytes it carries.
++		 *
++		 * Group 0 and the last group are the exceptions -- init_bgs()
++		 * initialises them for real, and the last group's bitmap
++		 * carries the padding past the end of the volume, which cannot
++		 * be derived. mke2fs writes exactly the same set. */
++		if (lazy_groups && i != 0 && i + 1 != aux_info->groups)
++			goto descriptors_only;
++
+ 		/* Block bitmap: everything past this group's last real block
+ 		 * is padding and must read as in-use. */
+ 		r = ext4_block_get_noread(bd, &b, bg_start_block + blk_off + 1);
+@@ -512,6 +548,9 @@
+ 		if (r != EOK)
+ 			return r;
+ 
++descriptors_only:
++		/* The descriptor table still has to be written for every
++		 * group; it is what carries the flags a reader derives from. */
+ 		if (++k != dsc_per_block)
+ 			continue;
+ 
+@@ -638,23 +677,42 @@
+  * it is paid a group at a time rather than for the whole medium up front.
+  * Group 0 is the exception: the root inode and the reserved inodes live
+  * there, so it is about to be used regardless. */
++/* Initialise the groups that cannot be left to first use.
++ *
++ * Taking a reference to a group is what runs the lazy initialisation:
++ * ext4_fs_get_block_group_ref sees the UNINIT flags, writes both bitmaps,
++ * zeroes the inode table and clears the flags. This used to walk every
++ * group, which did for the whole medium, at format time, the work the
++ * design defers -- 128 MB of zeros on an 8 GB volume, written as one 2 MB
++ * burst per group scattered 128 MB apart, which is close to the worst
++ * pattern cheap flash can be given.
++ *
++ * Where the volume can say "underived" -- uninit_bg or metadata_csum, which
++ * is ext4 as this mkfs builds it -- only two groups need doing now. Group 0
++ * holds the root and reserved inodes. The last group's bitmap carries the
++ * padding past the end of the volume as well as its own metadata, and
++ * cannot be derived: a reader that tried would hand out blocks the medium
++ * does not have.
++ *
++ * ext2 and ext3 have no such feature, so their descriptors carry no flags,
++ * nothing will ever initialise a group on demand, and every group must be
++ * written here exactly as before. Skipping that left bitmaps with only
++ * their padding marked -- the sweep reported it as "Block bitmap
++ * differences" across 78 of 117 combinations. */
+ static int init_bgs(struct ext4_fs *fs)
+ {
+ 	struct ext4_block_group_ref ref;
+-	uint32_t last = ext4_block_group_cnt(&fs->sb) - 1;
+-	uint32_t groups[2] = { 0, last };
++	uint32_t count = ext4_block_group_cnt(&fs->sb);
++	bool lazy =
++		ext4_sb_feature_ro_com(&fs->sb, EXT4_FRO_COM_GDT_CSUM) ||
++		ext4_sb_feature_ro_com(&fs->sb, EXT4_FRO_COM_METADATA_CSUM);
+ 	int r = EOK;
+ 
+-	/* Group 0 holds the root and the reserved inodes, so it is about to be
+-	 * used whatever happens. The last group is initialised for a different
+-	 * reason: its bitmap is the one that cannot be derived, because it
+-	 * carries both the group's own metadata and the padding past the end of
+-	 * the volume. Deriving it would hand out blocks the medium does not
+-	 * have, and e2fsck says so ("Block bitmap differences" over the tail).
+-	 * Writing it here is what makes the other sixty-two groups safe to
+-	 * leave alone. */
+-	for (unsigned i = 0; i < (last == 0 ? 1u : 2u); i++) {
+-		r = ext4_fs_get_block_group_ref(fs, groups[i], &ref);
++	for (uint32_t i = 0; i < count; i++) {
++		if (lazy && i != 0 && i + 1 != count)
++			continue;
++
++		r = ext4_fs_get_block_group_ref(fs, i, &ref);
+ 		if (r != EOK)
+ 			return r;
+ 		r = ext4_fs_put_block_group_ref(&ref);
