@@ -265,6 +265,39 @@ EXT4DUMP_IO_LATENCY_US=$LATENCY_US EXT4DUMP_IO_BW_MBS=$BW_MBS \
 note ""
 note "  clean mount of the same volume: ${SECONDS}s modelled (for scale)"
 
+# ==================================================================== eject ==
+# Eject has an OS timeout just as mount does, and the unmount that ends a
+# session flushes every remaining checkpoint. Priced the same way: a write
+# flood through the LUKS layer, then the session's own unmount, all under
+# the media model. The bounds are the shape, not a diff: a regression to
+# per-block checkpointing (or to trading writes for barriers -- flushes are
+# counted now) blows them immediately.
+note ""
+note "a write flood and its eject, priced"
+note ""
+
+awk 'BEGIN{ for (i = 0; i < 400; i++) printf "create /e%d\n", i }' \
+  > "$WORK/eject-load.txt"
+SECONDS=0
+stats=$(EXT4DUMP_IO_STATS=1 \
+        EXT4DUMP_IO_LATENCY_US=$LATENCY_US EXT4DUMP_IO_BW_MBS=$BW_MBS \
+        "$DUMP" "$WORK/clean.img" script "$WORK/eject-load.txt" 2>&1 >/dev/null \
+        | grep IOSTATS)
+elapsed=$SECONDS
+writes=$(echo "$stats" | sed -n 's/.*writes=\([0-9]*\).*/\1/p')
+flushes=$(echo "$stats" | sed -n 's/.*flushes=\([0-9]*\).*/\1/p')
+note "  400 creates + eject: ${elapsed}s modelled; $stats"
+if [ "$elapsed" -le "$DA_BUDGET_S" ]; then
+  ok "the flood and its eject fit the ~${DA_BUDGET_S}s budget (${elapsed}s)"
+else
+  bad "eject blows the budget" "${elapsed}s modelled"
+fi
+if [ "${writes:-99999}" -le 1500 ] && [ "${flushes:-99999}" -le 150 ]; then
+  ok "eject I/O keeps its shape ($writes writes, $flushes flushes)"
+else
+  bad "the eject path issues per-block commands again" "$stats"
+fi
+
 note ""
 note "PASS $PASS FAIL $FAIL"
 if [ "$FAIL" -eq 0 ]; then note "RESULT: PASS"; else note "RESULT: FAIL"; exit 1; fi

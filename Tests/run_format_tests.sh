@@ -301,6 +301,68 @@ expect_eq "a refused format leaves the volume untouched" "$before" \
   "$(shasum -a 256 "$img" | cut -d' ' -f1)"
 rm -f "$img"
 
+# ------------------------------------------------- the shape of a big format --
+# A 16 GB stick's format writes ~260 MB of inode tables, and it used to issue
+# them one 4 KiB command at a time -- "minutes of silence" on real media (the
+# progress bar exists because that silence was mistaken for a hang). The
+# tables are contiguous zeroes: the write count, not the byte count, is what
+# a stick prices. 2 GB sparse stands in for 16 GB; the loop shape is the same.
+# Measured: ~8,300 write commands before the batching, ~105 after; the bound
+# leaves room for geometry drift, not for a per-block regression.
+note ""
+note "a big format is priced in commands"
+big="$WORK/big.img"
+rm -f "$big"; truncate -s 2g "$big"
+stats=$(EXT4DUMP_IO_STATS=1 "$DUMP" "$big" format 4 4096 BIGFMT 2>&1 >/dev/null | grep IOSTATS)
+w=$(echo "$stats" | sed -n 's/.*writes=\([0-9]*\).*/\1/p')
+if [ "${w:-99999}" -le 500 ]; then
+  ok "a 2 GB format is ~$w write commands, not ~8,300"
+else
+  bad "format writes one command per inode-table block again" "$stats"
+fi
+e2fsck -fn "$big" >/dev/null 2>&1 \
+  && ok "the batched format still satisfies e2fsck" \
+  || bad "the batched format still satisfies e2fsck"
+rm -f "$big"
+
+# The same loop runs at MOUNT on mke2fs volumes formatted with lazy inode
+# tables: the post-recovery walk initializes every uninitialized group,
+# inside DiskArbitration's ~20 s budget. A dirty lazy volume must not cost
+# one command per table block.
+note ""
+note "lazy inode tables settle in runs at mount"
+lazy="$WORK/lazy.img"
+rm -f "$lazy"; truncate -s 2g "$lazy"
+mke2fs -q -F -b 4096 -E lazy_itable_init=1 -t ext4 "$lazy" 2>/dev/null
+"$DUMP" "$lazy" create /seed >/dev/null 2>&1   # our session, so the cut below has a journal to dirty
+EXT4DUMP_FAIL_AFTER=8 "$DUMP" "$lazy" script /dev/stdin >/dev/null 2>&1 <<'LOAD'
+create /a
+create /b
+create /c
+create /d
+create /e
+create /f
+create /g
+create /h
+create /i
+create /j
+LOAD
+if ! dumpe2fs -h "$lazy" 2>/dev/null | grep -q needs_recovery; then
+  note "  (cut left a clean journal; skipping the lazy-mount cell)"
+else
+  stats=$(EXT4DUMP_IO_STATS=1 "$DUMP" "$lazy" label LAZY 2>&1 >/dev/null | grep IOSTATS)
+  w=$(echo "$stats" | sed -n 's/.*writes=\([0-9]*\).*/\1/p')
+  if [ "${w:-99999}" -le 800 ]; then
+    ok "recovery mount of a lazy volume is ~$w write commands"
+  else
+    bad "the mount-time table walk is per-block again" "$stats"
+  fi
+  e2fsck -fn "$lazy" >/dev/null 2>&1 \
+    && ok "the settled lazy volume satisfies e2fsck" \
+    || bad "the settled lazy volume satisfies e2fsck"
+fi
+rm -f "$lazy"
+
 note ""
 note "─────────────────────────────────"
 note "passed: $PASS   failed: $FAIL"
