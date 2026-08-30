@@ -1,0 +1,263 @@
+A transaction writes its journal blocks in runs
+
+The replay and checkpoint paths read and write the log in runs; the commit
+path that fills it did not. Every journal block went out through the cache
+carrying BC_TMP and BC_FLUSH -- exactly the pair that makes
+ext4_bcache_free flush on release -- so each was a 4 KiB device command
+issued from inside the loop building the transaction.
+
+Measured before: 2,000 small files holding about 20 KB of content cost
+27,930 device writes and 100 MB, and on a 500-file run 558 of 1,492
+commands landed inside the journal.
+
+A transaction's journal blocks are consecutive by construction
+(jbd_journal_alloc_block hands out journal->last++), and the journal file
+is laid down as a long run, so they are physically contiguous too. The
+payload is now gathered and issued one command per run, bypassing the
+cache: nothing reads a journal block between writing it and the commit,
+the cache would only flush it per block anyway, and any copy left from an
+earlier lap of the ring is invalidated once the new bytes are down.
+
+After, on the same fixtures: journal commands 558 -> 192, total 1,492 ->
+1,126, and the size histogram gains 24-36 KB writes where everything used
+to be 4 KiB. The remaining single-sector writes are the file payloads
+themselves.
+
+Ordering is unchanged and is the reason the flush sits at the end of
+jbd_journal_prepare: the caller barriers next, and a barrier orders only
+what has already been handed to the medium. A NULL batch falls back to the
+per-block path, so memory pressure costs speed rather than correctness.
+The allocator's "0 means the ring is full" convention is now honoured here
+too -- it was previously passed to jbd_block_get_noread, which refuses it.
+
+Gates for a commit-path change: crash consistency 203 cut points, 203
+recovered by the Linux kernel; reordered writes 236 cut points, 0 failed,
+with the barriers-ignored negative control still failing; revoke records,
+error injection, replay speed and the Linux differential all passing.
+--- a/src/ext4_journal.c
++++ b/src/ext4_journal.c
+@@ -258,8 +258,149 @@
+ 	ext4_free(w->data);
+ 	ext4_free(w->desc);
+ 	ext4_free(w);
++}
++
++/**@brief  Write-side batch for a transaction's journal blocks.
++ *
++ * The replay and checkpoint paths read and write the log in runs; the commit
++ * path that fills the log did not. Every journal block went out through the
++ * cache carrying BC_TMP and BC_FLUSH, which is precisely the combination that
++ * makes ext4_bcache_free flush it on release -- one 4 KiB device command per
++ * block, issued from inside the loop that builds the transaction. Measured:
++ * 2,000 small files cost 27,930 device writes and 100 MB, for about 20 KB of
++ * file content, and 37% of the commands landed inside the journal.
++ *
++ * A transaction's journal blocks are consecutive by construction --
++ * jbd_journal_alloc_block hands out journal->last++ -- and the journal file
++ * itself is laid down as a long run, so they are almost always physically
++ * contiguous too. This gathers the payload and issues one command per run.
++ *
++ * It bypasses the block cache rather than filling it: nothing reads a journal
++ * block between writing it and the commit, the cache would only be flushed
++ * per block anyway, and any copy left over from an earlier lap of the ring is
++ * invalidated once the new bytes are on the medium. */
++struct jbd_commit_wb {
++	uint8_t *data;      /**< payload, @cnt blocks in arrival order */
++	uint32_t *iblock;   /**< journal block index of each slot */
++	uint8_t *gather;    /**< one contiguous run, assembled for the write */
++	uint32_t cnt;
++	uint32_t cap;
++};
++
++static void jbd_commit_wb_free(struct jbd_commit_wb *wb)
++{
++	if (!wb)
++		return;
++	ext4_free(wb->data);
++	ext4_free(wb->iblock);
++	ext4_free(wb->gather);
++	ext4_free(wb);
++}
++
++/**@brief  Allocate a commit batch. NULL means "write the old way": slower,
++ *         and correct. */
++static struct jbd_commit_wb *jbd_commit_wb_new(struct jbd_fs *jbd_fs,
++					       uint32_t hint)
++{
++	/* Same ceiling the replay batch uses, stated here because that one is
++	 * defined further down with its own machinery. */
++	uint32_t bs = jbd_fs->bdev->lg_bsize;
++	uint32_t cap = (4 * 1024 * 1024) / bs;
++	struct jbd_commit_wb *wb;
++
++	if (hint && hint < cap)
++		cap = hint;
++	if (cap == 0)
++		return NULL;
++
++	wb = ext4_calloc(1, sizeof(*wb));
++	if (!wb)
++		return NULL;
++
++	wb->data = ext4_malloc((size_t)cap * bs);
++	wb->iblock = ext4_malloc((size_t)cap * sizeof(*wb->iblock));
++	wb->gather = ext4_malloc((size_t)cap * bs);
++	if (!wb->data || !wb->iblock || !wb->gather) {
++		jbd_commit_wb_free(wb);
++		return NULL;
++	}
++	wb->cap = cap;
++	return wb;
++}
++
++/**@brief  Issue the batch: one command per physically contiguous run, then
++ *         drop any cached copies of what was written. */
++static int jbd_commit_wb_flush(struct jbd_fs *jbd_fs,
++			       struct jbd_commit_wb *wb)
++{
++	struct ext4_blockdev *bdev = jbd_fs->bdev;
++	uint32_t bs = bdev->lg_bsize;
++	uint32_t i = 0;
++	int rc = EOK;
++
++	while (i < wb->cnt) {
++		ext4_fsblk_t first = 0, next = 0;
++		uint32_t run = 1;
++
++		rc = jbd_inode_bmap(jbd_fs, wb->iblock[i], &first);
++		if (rc != EOK)
++			break;
++
++		memcpy(wb->gather, wb->data + (size_t)i * bs, bs);
++
++		while (i + run < wb->cnt) {
++			rc = jbd_inode_bmap(jbd_fs, wb->iblock[i + run], &next);
++			if (rc != EOK)
++				break;
++			if (next != first + run)
++				break;
++			memcpy(wb->gather + (size_t)run * bs,
++			       wb->data + (size_t)(i + run) * bs, bs);
++			run++;
++		}
++		if (rc != EOK)
++			break;
++
++		rc = ext4_blocks_set_direct(bdev, wb->gather, first, run);
++		if (rc != EOK)
++			break;
++
++		/* The medium now holds these blocks; a resident copy from an
++		 * earlier lap of the ring would be older than what is there. */
++		ext4_bcache_invalidate_lba(bdev->bc, first, run);
++		i += run;
++	}
++
++	wb->cnt = 0;
++	return rc;
+ }
+ 
++/**@brief  Add one journal block to the batch, flushing first when full. */
++static int jbd_commit_wb_record(struct jbd_fs *jbd_fs,
++				struct jbd_commit_wb *wb,
++				uint32_t iblock, const void *payload,
++				bool is_escape)
++{
++	uint32_t bs = jbd_fs->bdev->lg_bsize;
++	uint8_t *slot;
++	int rc;
++
++	if (wb->cnt == wb->cap) {
++		rc = jbd_commit_wb_flush(jbd_fs, wb);
++		if (rc != EOK)
++			return rc;
++	}
++
++	slot = wb->data + (size_t)wb->cnt * bs;
++	memcpy(slot, payload, bs);
++	if (is_escape)
++		((struct jbd_bhdr *)slot)->magic = 0;
++
++	wb->iblock[wb->cnt] = iblock;
++	wb->cnt++;
++	return EOK;
++}
++
+ /**@brief  Write-back batch for replayed blocks.
+  *
+  * Replay used to push every replayed block through the block cache and
+@@ -2731,6 +2872,11 @@
+ 	uint32_t checksum = EXT4_CRC32_INIT;
+ 	struct jbd_bhdr *bhdr = NULL;
+ 	void *data;
++	/* Sized to the transaction: a commit rarely fills a megabyte, and a
++	 * batch larger than the payload only costs memory. NULL falls back to
++	 * the per-block path. */
++	struct jbd_commit_wb *wb = jbd_commit_wb_new(journal->jbd_fs,
++						     trans->data_cnt + 2);
+ 
+ 	/* Try to remove any non-dirty buffers from the tail of
+ 	 * buf_queue. */
+@@ -2867,23 +3013,35 @@
+ 		}
+ 
+ 		data_iblock = jbd_journal_alloc_block(journal, trans);
+-		rc = jbd_block_get_noread(journal->jbd_fs, &data_block, data_iblock);
+-		if (rc != EOK) {
++		if (data_iblock == 0) {
++			/* The ring is full and the purge freed nothing. */
++			rc = ENOSPC;
+ 			desc_iblock = 0;
+ 			ext4_bcache_clear_dirty(desc_block.buf);
+ 			jbd_block_set(journal->jbd_fs, &desc_block);
+ 			break;
+ 		}
+ 
+-		data = data_block.data;
+-		memcpy(data, jbd_buf->block.data,
+-			journal->block_size);
+-		if (is_escape)
+-			((struct jbd_bhdr *)data)->magic = 0;
++		if (wb) {
++			rc = jbd_commit_wb_record(journal->jbd_fs, wb,
++						  data_iblock,
++						  jbd_buf->block.data,
++						  is_escape);
++		} else {
++			rc = jbd_block_get_noread(journal->jbd_fs, &data_block,
++						  data_iblock);
++			if (rc == EOK) {
++				data = data_block.data;
++				memcpy(data, jbd_buf->block.data,
++					journal->block_size);
++				if (is_escape)
++					((struct jbd_bhdr *)data)->magic = 0;
+ 
+-		ext4_bcache_set_dirty(data_block.buf);
+-		ext4_bcache_set_flag(data_block.buf, BC_TMP);
+-		rc = jbd_block_set(journal->jbd_fs, &data_block);
++				ext4_bcache_set_dirty(data_block.buf);
++				ext4_bcache_set_flag(data_block.buf, BC_TMP);
++				rc = jbd_block_set(journal->jbd_fs, &data_block);
++			}
++		}
+ 		if (rc != EOK) {
+ 			desc_iblock = 0;
+ 			ext4_bcache_clear_dirty(desc_block.buf);
+@@ -2904,6 +3062,16 @@
+ 		rc = jbd_block_set(journal->jbd_fs, &desc_block);
+ 	}
+ 
++	/* Everything this transaction describes must be issued before the
++	 * commit block that vouches for it -- the caller barriers next, and a
++	 * barrier only orders what has already been handed to the medium. */
++	if (wb) {
++		int fr = jbd_commit_wb_flush(journal->jbd_fs, wb);
++		if (rc == EOK)
++			rc = fr;
++		jbd_commit_wb_free(wb);
++	}
++
+ 	return rc;
+ }
+ 
