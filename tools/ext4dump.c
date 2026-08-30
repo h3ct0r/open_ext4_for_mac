@@ -1661,6 +1661,15 @@ unmount:
      * a write-back error surfaced here is the difference between a red test
      * and a silently damaged image with exit code 0. */
     {
+        /* What the unmount itself costs, separated from the workload that
+         * preceded it. The block cache flushes one buffer per command, so
+         * whether that matters is a question about how much is still dirty
+         * when the volume closes -- and that is measurable rather than
+         * arguable. */
+        if (getenv("EXT4DUMP_IO_STATS"))
+            fprintf(stderr, "PRE-UNMOUNT writes=%llu write_bytes=%llu\n",
+                    (unsigned long long)fc.writes,
+                    (unsigned long long)fc.write_bytes);
         int ur = ext4b_unmount(dev);
         if (ur != 0 && rc == 0) {
             fprintf(stderr, "unmount: %s\n", ext4b_strerror(ur));
