@@ -28,9 +28,18 @@ cleanup() {
 trap cleanup EXIT
 
 BUNDLE_ID="dev.h3ct0r.ext4mac.Ext4FS"
-if ! pluginkit -m -p com.apple.fskit.fsmodule 2>/dev/null | grep -q "$BUNDLE_ID"; then
-  echo "the FSKit extension is not installed; nothing to test"
-  exit 1
+# Registered is not enabled, and this suite cannot tell the difference from
+# its own failures: every cell just reports "Module ... is disabled!" and the
+# stage reads as a code failure. Its sibling mounted suites exit 77 (skip) in
+# this case; this one did not, so a machine awaiting the one approval only a
+# person can give showed a permanent FAIL. check_extension.sh is the
+# authoritative test -- it performs a real mount, which is the only thing that
+# distinguishes installed, registered, and enabled.
+if ! bash "$ROOT/scripts/check_extension.sh" >/dev/null 2>&1; then
+  echo "the FSKit extension is not enabled; skipping"
+  echo "  enable it: System Settings > General > Login Items & Extensions"
+  echo "               > File System Extensions  ->  open_ext4 (ext2/3/4)"
+  exit 77
 fi
 
 # Refuse-to-lie guard: are we measuring the build in this tree, or a stale

@@ -232,12 +232,17 @@ if docker info >/dev/null 2>&1; then
   # Stages 1-8 all drive the core directly through a plain file. These two go
   # through FSKit *and* hand their images to the Linux kernel, so they need
   # both the enabled extension and Docker.
-  if pluginkit -m -p com.apple.fskit.fsmodule 2>/dev/null | grep -q "dev.h3ct0r.ext4mac.Ext4FS"; then
+  # check_extension.sh, not pluginkit: pluginkit answers "is it registered",
+  # and a module can be registered and still refuse every mount because the
+  # user has not approved it -- which is the state a fresh install leaves.
+  # The suites below then skip themselves, so the gate only decides whether
+  # to bother starting them.
+  if bash scripts/check_extension.sh >/dev/null 2>&1; then
     stage "9. mounted driver" bash Tests/run_mount_crash_tests.sh
     stage "10. encrypted volumes, mounted" bash Tests/run_mount_luks_tests.sh
   else
-    skip "9. mounted driver" "the FSKit extension is not installed"
-    skip "10. encrypted volumes, mounted" "the FSKit extension is not installed"
+    skip "9. mounted driver" "the FSKit extension is not enabled"
+    skip "10. encrypted volumes, mounted" "the FSKit extension is not enabled"
   fi
 else
   skip "6. LUKS containers"       "docker daemon not reachable"
@@ -251,12 +256,12 @@ fi
 
 # Mounted, but Docker-free: e2fsck is their oracle. Gated only on the
 # extension, so a machine without Docker still measures the live driver.
-if pluginkit -m -p com.apple.fskit.fsmodule 2>/dev/null | grep -q "dev.h3ct0r.ext4mac.Ext4FS"; then
+if bash scripts/check_extension.sh >/dev/null 2>&1; then
   stage "11. recovery after a kill" bash Tests/run_kill_recovery_tests.sh
   stage "12. newfs through FSKit" bash Tests/run_newfs_tests.sh
 else
-  skip "11. recovery after a kill" "the FSKit extension is not installed"
-  skip "12. newfs through FSKit" "the FSKit extension is not installed"
+  skip "11. recovery after a kill" "the FSKit extension is not enabled"
+  skip "12. newfs through FSKit" "the FSKit extension is not enabled"
 fi
 
 summary
