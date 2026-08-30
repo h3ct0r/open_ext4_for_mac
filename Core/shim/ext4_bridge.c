@@ -3179,6 +3179,67 @@ int ext4b_write(ext4b_device *dev,
             chunk = (uint32_t)remaining;
 
         ext4_fsblk_t fblk = 0;
+
+        /*
+         * A whole-block write into space that is already allocated but still
+         * unwritten -- which is every byte of a file macOS preallocated
+         * before copying into it.
+         *
+         * Converting an unwritten extent zeroes it first, so that a reader
+         * cannot see whatever those blocks held for their previous owner.
+         * When the caller is about to overwrite every one of those bytes,
+         * that doubles the writing: the whole range goes to the medium as
+         * zeros and then again as data. On the stick this came from, a
+         * 522 MB copy wrote 994 MB.
+         *
+         * The zeroing is not what makes it safe, though -- the ORDER is. So
+         * take the same order the kernel does: write the data while the
+         * extent is still unwritten, and mark it written only afterwards. A
+         * crash in between leaves the extent unwritten, which reads back as
+         * zeros, exposing nothing. The conversion is journalled metadata and
+         * the commit barriers behind the data write, so the medium learns
+         * the blocks are live only after it has their contents.
+         */
+        if (in_off == 0 && remaining >= bsize) {
+            uint32_t want = (uint32_t)(remaining / bsize);
+            uint32_t mapped = 0;
+            bool is_unwritten = false;
+            ext4_fsblk_t at = 0;
+
+            if (ext4_extent_map_range(&ref, lblk, want, &at, &mapped,
+                                      &is_unwritten) == EOK &&
+                at != 0 && mapped > 0 && is_unwritten) {
+                /* The accumulated run belongs to a different mapping and
+                 * must land before this one is issued and declared live. */
+                r = bridge_flush_run(&dev->bdev, bsize, run_first,
+                                     &run_blocks, run_src);
+                if (r != EOK)
+                    break;
+                *out_written += run_bytes;
+                run_bytes = 0;
+
+                uint32_t n = mapped * bsize;
+                r = ext4_block_writebytes(&dev->bdev,
+                                          (uint64_t)at * bsize, src, n);
+                run_meter_record(mapped, bsize);
+                if (r != EOK)
+                    break;
+
+                /* Only now is the range allowed to read back as data. */
+                r = ext4_extent_mark_written(&ref, lblk, mapped);
+                if (r != EOK)
+                    break;
+
+                *out_written += n;
+                src       += n;
+                pos       += n;
+                remaining -= n;
+                if (have_blocks < lblk + mapped)
+                    have_blocks = lblk + mapped;
+                continue;
+            }
+        }
+
         if (lblk < have_blocks) {
             /* Within the allocated range: map, allocating if it is a hole. */
             r = ext4_fs_init_inode_dblk_idx(&ref, lblk, &fblk);

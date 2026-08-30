@@ -1,0 +1,180 @@
+An overwritten range is marked written, not zeroed first
+
+0045 made preallocated writes map and zero in runs, which took a 100 MB
+write from 25,941 device commands to 254. It left the other half standing:
+the range is still zeroed and then immediately overwritten, so the medium
+carries every byte twice. On the stick this came from, a 522 MB copy wrote
+994 MB.
+
+The zeroing exists so that a reader cannot see what the blocks held for
+their previous owner. But it is not the zeroing that provides that -- it
+is the order. An unwritten extent reads back as zeros no matter what its
+blocks contain, so the guarantee holds as long as the extent is not marked
+written until the data is there.
+
+So this takes the order the Linux kernel takes. Two primitives:
+
+* ext4_extent_map_range() reports where an already-allocated range lives
+  and whether it is still unwritten, changing nothing. get_blocks() cannot
+  answer that question: with create it converts and zeroes, and without
+  create it refuses to name the blocks at all.
+
+* ext4_extent_mark_written() converts a range that the caller has just
+  written, with no zeroing -- zeroing it now would erase the data.
+
+The shim writes the data while the extent is unwritten and marks it
+written afterwards. A crash in between leaves it unwritten, which reads as
+zeros and exposes nothing; the conversion is journalled metadata and the
+commit barriers behind the data write, so the medium learns the blocks are
+live only after it has their contents.
+
+Measured, same preallocated 100 MB: 254 commands and 210 MB become 153
+commands and 105 MB -- fewer commands than writing into a fresh file, and
+exactly the bytes the caller asked for.
+
+Proven rather than asserted: a new cell in run_prealloc_tests.sh fills a
+file with a recognisable pattern, deletes it, preallocates its blocks to a
+new file, and cuts the write into them at a series of points. Across every
+cut, including partial states where some of the file is visible, the
+filesystem shows only new data or zeros -- never the previous owner's
+bytes -- and e2fsck is clean after replay every time.
+--- a/src/ext4_extent.c
++++ b/src/ext4_extent.c
+@@ -2054,6 +2054,121 @@
+ 	}
+ }
+ 
++/**@brief Locate an already-allocated range without converting it.
++ *
++ * ext4_extent_get_blocks() answers an unwritten extent one of two ways: with
++ * create it zeroes the range and marks it written, and without create it
++ * reports no block at all. Neither suits a caller that is about to overwrite
++ * every byte: zeroing writes the whole range twice, and refusing to name the
++ * blocks means it cannot write them at all.
++ *
++ * This reports where the range lives and whether it is still unwritten,
++ * changing nothing. The caller writes its data and then calls
++ * ext4_extent_mark_written(), so the extent stays unwritten until the data is
++ * on the medium -- a crash in between leaves it unwritten, which reads back
++ * as zeros rather than exposing whatever those blocks held before. That
++ * ordering is the whole reason the zeroing exists, and it is what makes
++ * skipping it safe.
++ *
++ * @param inode_ref   the inode
++ * @param iblock      first logical block
++ * @param max_blocks  how many the caller can use
++ * @param result      out: first physical block, or 0 if not allocated
++ * @param blocks_count out: contiguous blocks found from @iblock
++ * @param unwritten   out: true if the range is an unwritten extent
++ * @return standard error code */
++int ext4_extent_map_range(struct ext4_inode_ref *inode_ref, ext4_lblk_t iblock,
++			  uint32_t max_blocks, ext4_fsblk_t *result,
++			  uint32_t *blocks_count, bool *unwritten)
++{
++	struct ext4_extent_path *path = NULL;
++	struct ext4_extent *ex;
++	int err = EOK;
++	int32_t depth;
++
++	if (result)
++		*result = 0;
++	if (blocks_count)
++		*blocks_count = 0;
++	if (unwritten)
++		*unwritten = false;
++
++	err = ext4_find_extent(inode_ref, iblock, &path, 0);
++	if (err != EOK)
++		return err;
++
++	depth = ext_depth(inode_ref->inode);
++	ex = path[depth].extent;
++	if (ex) {
++		ext4_lblk_t ee_block = to_le32(ex->first_block);
++		ext4_fsblk_t ee_start = ext4_ext_pblock(ex);
++		uint16_t ee_len = ext4_ext_get_actual_len(ex);
++
++		if (IN_RANGE(iblock, ee_block, ee_len)) {
++			uint32_t allocated = ee_len - (iblock - ee_block);
++			if (allocated > max_blocks)
++				allocated = max_blocks;
++
++			if (result)
++				*result = iblock - ee_block + ee_start;
++			if (blocks_count)
++				*blocks_count = allocated;
++			if (unwritten)
++				*unwritten = ext4_ext_is_unwritten(ex);
++		}
++	}
++
++	ext4_ext_drop_refs(inode_ref, path, 0);
++	ext4_free(path);
++	return EOK;
++}
++
++/**@brief Mark an unwritten range initialized, without zeroing it.
++ *
++ * For a caller that has just written every byte of the range through
++ * ext4_extent_map_range(). No zeroing: the blocks hold the caller's data, and
++ * zeroing them now would erase it.
++ *
++ * @param inode_ref    the inode
++ * @param iblock       first logical block
++ * @param blocks_count how many to mark
++ * @return standard error code */
++int ext4_extent_mark_written(struct ext4_inode_ref *inode_ref,
++			     ext4_lblk_t iblock, uint32_t blocks_count)
++{
++	struct ext4_extent_path *path = NULL;
++	struct ext4_extent *ex;
++	int err;
++	int32_t depth;
++
++	if (blocks_count == 0)
++		return EOK;
++
++	err = ext4_find_extent(inode_ref, iblock, &path, 0);
++	if (err != EOK)
++		return err;
++
++	depth = ext_depth(inode_ref->inode);
++	ex = path[depth].extent;
++	if (!ex) {
++		err = EIO;
++		goto out;
++	}
++
++	/* Already written -- nothing owed. */
++	if (!ext4_ext_is_unwritten(ex))
++		goto out;
++
++	err = ext4_ext_convert_to_initialized(inode_ref, &path, iblock,
++					      blocks_count);
++out:
++	if (path) {
++		ext4_ext_drop_refs(inode_ref, path, 0);
++		ext4_free(path);
++	}
++	return err;
++}
++
+ int ext4_extent_get_blocks(struct ext4_inode_ref *inode_ref, ext4_lblk_t iblock,
+ 			   uint32_t max_blocks, ext4_fsblk_t *result,
+ 			   bool create, uint32_t *blocks_count)
+--- a/include/ext4_extent.h
++++ b/include/ext4_extent.h
+@@ -51,6 +51,13 @@
+ void ext4_extent_tree_init(struct ext4_inode_ref *inode_ref);
+ 
+ 
++int ext4_extent_map_range(struct ext4_inode_ref *inode_ref, ext4_lblk_t iblock,
++			  uint32_t max_blocks, ext4_fsblk_t *result,
++			  uint32_t *blocks_count, bool *unwritten);
++
++int ext4_extent_mark_written(struct ext4_inode_ref *inode_ref,
++			     ext4_lblk_t iblock, uint32_t blocks_count);
++
+ int ext4_extent_get_blocks(struct ext4_inode_ref *inode_ref, ext4_lblk_t iblock,
+ 			   uint32_t max_blocks, ext4_fsblk_t *result, bool create,
+ 			   uint32_t *blocks_count);

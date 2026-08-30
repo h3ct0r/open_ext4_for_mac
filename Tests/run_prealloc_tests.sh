@@ -168,6 +168,61 @@ else
   echo "  skip  docker is not running; crash cuts not replayed"
 fi
 
+# ============ a torn write into preallocated space exposes nothing ==
+#
+# Writing into a preallocated file used to zero the range before the data,
+# so that a reader could never see what the blocks held for their previous
+# owner. That doubled every byte written, and macOS preallocates before
+# every large copy -- 994 MB on the medium for a 522 MB file. The zeroing
+# is gone; what makes it safe is the ORDER that replaced it. The data is
+# written while the extent is still unwritten, and the extent is marked
+# written only afterwards, so a cut in between leaves it unwritten, which
+# reads back as zeros.
+#
+# This is the cell that proves it. A file full of a recognisable pattern is
+# written and deleted, its blocks are preallocated to a new file, and the
+# write into them is cut at a series of points. Every byte the filesystem
+# then shows must be the new data or a zero -- never the old pattern.
+echo ""
+echo "a torn write into preallocated space"
+SECRET="$WORK/secret.bin"; FRESH="$WORK/fresh.bin"
+python3 -c "open('$SECRET','wb').write(b'OLD-OWNER-SECRET-BYTES!!'*(8*1024*1024//24))"
+python3 -c "open('$FRESH','wb').write(b'N'*(8*1024*1024))"
+leaks=0; dirty=0; partials=0
+for CUT in 20 40 60 80 100; do
+  img="$WORK/tear_$CUT.img"
+  rm -f "$img"; dd if=/dev/zero of="$img" bs=1m count=120 2>/dev/null
+  "$DUMP" "$img" format 4 >/dev/null 2>&1
+  "$DUMP" "$img" create /secret >/dev/null 2>&1
+  "$DUMP" "$img" put /secret "$SECRET" >/dev/null 2>&1
+  "$DUMP" "$img" rm /secret >/dev/null 2>&1
+  "$DUMP" "$img" create /victim >/dev/null 2>&1
+  "$DUMP" "$img" prealloc /victim 0 8388608 >/dev/null 2>&1
+  EXT4B_TXN_BATCH=1 EXT4DUMP_FAIL_AFTER=$CUT "$DUMP" "$img" put /victim "$FRESH" >/dev/null 2>&1
+  "$DUMP" "$img" label RECOVER >/dev/null 2>&1        # read-write mount replays
+  "$DUMP" "$img" cat /victim > "$WORK/tear_read.bin" 2>/dev/null
+  verdict=$(python3 - "$WORK/tear_read.bin" <<'PYEOF'
+import sys
+d = open(sys.argv[1], "rb").read()
+leak = b"OLD-OWNER-SECRET" in d
+other = len(d) - d.count(b"N") - d.count(b"\x00")
+print(f"{'LEAK' if leak or other else 'clean'} {len(d)}")
+PYEOF
+)
+  case "$verdict" in LEAK*) leaks=$((leaks+1)) ;; esac
+  size=${verdict##* }
+  [ "$size" -gt 0 ] && [ "$size" -lt 8388608 ] && partials=$((partials+1))
+  e2fsck -fn "$img" >/dev/null 2>&1 || dirty=$((dirty+1))
+  rm -f "$img"
+done
+if [ "$leaks" -eq 0 ] && [ "$dirty" -eq 0 ]; then
+  ok "a cut write into preallocated space shows only new data or zeros ($partials partial states)"
+else
+  bad "a cut write into preallocated space shows only new data or zeros" \
+      "$leaks leaked the previous owner's bytes, $dirty inconsistent"
+fi
+rm -f "$SECRET" "$FRESH" "$WORK/tear_read.bin"
+
 echo ""
 echo "─────────────────────────────────"
 echo "passed: $PASS   failed: $FAIL"
