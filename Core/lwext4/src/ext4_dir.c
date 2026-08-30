@@ -555,14 +555,28 @@ int ext4_dir_remove_entry(struct ext4_inode_ref *parent, const char *name,
 		struct ext4_dir_en *tmp_de =(void *)result.block.data;
 		uint16_t de_len = ext4_dir_en_get_entry_len(tmp_de);
 
-		/* Find direct predecessor of removed entry */
+		/* Find direct predecessor of removed entry. Every length in
+		 * this walk is an on-disk rec_len: a zero advances nothing
+		 * and spins this loop forever with the executor wedged --
+		 * which on a mounted volume is indistinguishable from a hang
+		 * and costs a force-eject -- and lengths that fail to tile
+		 * the block used to be an assert, i.e. an abort() on corrupt
+		 * data. Both are one bad byte on a stick. Corruption is an
+		 * error, not an invariant violation. */
 		while ((offset + de_len) < pos) {
-			offset += ext4_dir_en_get_entry_len(tmp_de);
+			if (de_len == 0) {
+				ext4_dir_destroy_result(parent, &result);
+				return EIO;
+			}
+			offset += de_len;
 			tmp_de = (void *)(result.block.data + offset);
 			de_len = ext4_dir_en_get_entry_len(tmp_de);
 		}
 
-		ext4_assert(de_len + offset == pos);
+		if (de_len + offset != pos) {
+			ext4_dir_destroy_result(parent, &result);
+			return EIO;
+		}
 
 		/* Add to removed entry length to predecessor's length */
 		uint16_t del_len;
