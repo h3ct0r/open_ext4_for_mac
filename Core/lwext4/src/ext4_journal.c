@@ -941,6 +941,13 @@ static int jbd_block_get(struct jbd_fs *jbd_fs,
 	struct ext4_blockdev *bdev = jbd_fs->bdev;
 	ext4_lblk_t iblock = (ext4_lblk_t)fblock;
 
+	/* Journal block 0 is the journal superblock; no log record lives
+	 * there and no valid caller asks for it. It is also the allocator's
+	 * failure sentinel, refused here so a wedged ring cannot hand the
+	 * commit path the superblock's home to scribble on. */
+	if (iblock == 0)
+		return ENOSPC;
+
 	/* Lookup the logical block address of
 	 * fblock.*/
 	rc = jbd_inode_bmap(jbd_fs, iblock,
@@ -975,6 +982,10 @@ static int jbd_block_get_noread(struct jbd_fs *jbd_fs,
 	int rc;
 	struct ext4_blockdev *bdev = jbd_fs->bdev;
 	ext4_lblk_t iblock = (ext4_lblk_t)fblock;
+
+	/* See jbd_block_get: 0 is the superblock and the failure sentinel. */
+	if (iblock == 0)
+		return ENOSPC;
 	rc = jbd_inode_bmap(jbd_fs, iblock,
 			    &fblock);
 	if (rc != EOK)
@@ -1426,7 +1437,13 @@ static void jbd_add_revoke_block_tags(struct recover_info *info,
 	}
 
 	revoke_entry = jbd_alloc_revoke_entry();
-	ext4_assert(revoke_entry);
+	if (!revoke_entry) {
+		/* Out of memory mid-recovery -- reachable from outside (a
+		 * hostile revoke count used to manufacture exactly this).
+		 * Failing recovery keeps the journal; aborting kept nothing. */
+		info->rc = ENOMEM;
+		return;
+	}
 	revoke_entry->block = block;
 	revoke_entry->trans_id = info->this_trans_id;
 	RB_INSERT(jbd_revoke, &info->revoke_root, revoke_entry);
@@ -1696,6 +1713,10 @@ static int jbd_iterate_log(struct jbd_fs *jbd_fs,
 				info->this_trans_id = this_trans_id;
 				jbd_build_revoke_tree(jbd_fs,
 						header, info);
+				if (info->rc != EOK) {
+					r = info->rc;
+					log_end = true;
+				}
 			}
 			break;
 		default:
@@ -2125,7 +2146,20 @@ static uint32_t jbd_journal_alloc_block(struct jbd_journal *journal,
 	 * transaction.*/
 	if (journal->last == journal->start) {
 		jbd_journal_purge_cp_trans(journal, true, true);
-		ext4_assert(journal->last != journal->start);
+		if (journal->last == journal->start) {
+			/* The purge could not free a single block: the head
+			 * checkpoint's log read failed (0021's case), or its
+			 * home writes did (0031's frozen tail). A full ring
+			 * on a failing medium was an assert here -- one EIO
+			 * with the log full took down the whole driver. It
+			 * is an allocation failure: 0 is never a valid log
+			 * block (block 0 is the journal superblock), the
+			 * get-wrappers refuse it, and the commit fails
+			 * upward like any other error. */
+			journal->last = start_block;
+			trans->alloc_blocks--;
+			return 0;
+		}
 		/* The purge checkpointed a transaction, barriered the
 		 * checkpoint, and moved the tail past it -- in memory. The
 		 * blocks it freed are what this allocator hands out next, so
@@ -2249,11 +2283,30 @@ jbd_trans_finish_callback(struct jbd_journal *journal,
 				r = ext4_block_get_noread(fs->bdev,
 							&block,
 							block_rec->lba);
-				ext4_assert(r == EOK);
+				/* Rolling an aborted transaction's block back
+				 * to the previous logged copy needs one fetch
+				 * and one log read. Either can fail when the
+				 * medium is going away -- which is when
+				 * aborts happen -- and each was an assert:
+				 * SIGABRT mid-teardown. Invalidate the cached
+				 * block instead: the next reader refetches
+				 * whatever the medium holds, and the journal
+				 * still covers the committed copy. */
+				if (r != EOK) {
+					ext4_bcache_invalidate_lba(
+						fs->bdev->bc,
+						block_rec->lba, 1);
+					return;
+				}
 				r = jbd_block_get(journal->jbd_fs,
 							&jbd_block,
 							jbd_buf->jbd_lba);
-				ext4_assert(r == EOK);
+				if (r != EOK) {
+					ext4_bcache_invalidate_buf(
+						fs->bdev->bc, block.buf);
+					ext4_block_set(fs->bdev, &block);
+					return;
+				}
 				memcpy(block.data, jbd_block.data,
 						journal->block_size);
 

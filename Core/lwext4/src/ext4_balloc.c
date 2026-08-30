@@ -342,8 +342,13 @@ int ext4_balloc_free_blocks(struct ext4_inode_ref *inode_ref,
 	}
 
 	ext4_bcache_invalidate_lba(fs->bdev->bc, start_block, blk_cnt);
-	/*All blocks should be released*/
-	ext4_assert(count == 0);
+	/* All blocks released -- unless the loop above broke on an I/O error
+	 * partway through a multi-group free. That used to be an assert: one
+	 * EIO on a group descriptor and the whole driver aborted mid-free.
+	 * A failure freeing blocks leaks them until e2fsck; aborting loses
+	 * the volume. The error is already in rc; count != 0 with rc == EOK
+	 * would be a real logic bug, so that combination still trips. */
+	ext4_assert(count == 0 || rc != EOK);
 
 	return rc;
 }
