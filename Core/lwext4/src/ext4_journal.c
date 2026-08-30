@@ -87,6 +87,10 @@ struct recover_info {
 	 *         log to build an empty tree, and is skipped. */
 	uint32_t revoke_block_cnt;
 
+	/**@brief  Blocks the recovery pass actually replayed; exported to
+	 *         the host as the shape of the recovery. */
+	uint32_t blocks_replayed;
+
 	/**@brief  RB-Tree storing revoke entries.*/
 	RB_HEAD(jbd_revoke, revoke_entry) revoke_root;
 
@@ -1358,6 +1362,8 @@ static void jbd_replay_block_tags(struct jbd_fs *jbd_fs,
 		have_block = true;
 	}
 
+	info->blocks_replayed++;
+
 	/* We need special treatment for ext4 superblock. */
 	if (tag_info->block) {
 		if (info->wb) {
@@ -1760,6 +1766,7 @@ int jbd_recover(struct jbd_fs *jbd_fs)
 	info.wnd = NULL;
 	info.wb = NULL;
 	info.rc = EOK;
+	info.blocks_replayed = 0;
 
 	r = jbd_iterate_log(jbd_fs, &info, ACTION_SCAN);
 	if (r != EOK)
@@ -1818,6 +1825,17 @@ int jbd_recover(struct jbd_fs *jbd_fs)
 		jbd_fs->dirty = true;
 		r = ext4_sb_write(jbd_fs->bdev,
 				  &jbd_fs->inode_ref.fs->sb);
+	}
+
+	/* The shape of what just happened, for the host to log. The numbers
+	 * exist either way; only a successful replay publishes them as
+	 * `recovered` (a failed one reports through its error). */
+	if (r == EOK) {
+		struct ext4_fs *fs = jbd_fs->inode_ref.fs;
+		fs->last_recovery.trans_replayed = info.trans_cnt;
+		fs->last_recovery.blocks_replayed = info.blocks_replayed;
+		fs->last_recovery.log_blocks = jbd_get32(&jbd_fs->sb, maxlen);
+		fs->last_recovery.recovered = true;
 	}
 	jbd_destroy_revoke_tree(&info);
 	return r;

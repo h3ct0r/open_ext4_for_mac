@@ -67,6 +67,19 @@ struct ext4_fs {
 	struct jbd_fs *jbd_fs;
 	struct jbd_journal *jbd_journal;
 	struct jbd_trans *curr_trans;
+
+	/**@brief  Shape of the last journal recovery on this mount, for the
+	 *         host to log. The incident that motivated it took eight
+	 *         minutes to replay with nothing anywhere saying how deep
+	 *         the log was; a hardware-only failure without these numbers
+	 *         costs a debugging iteration per missing fact. Valid when
+	 *         `recovered` is set; zeroed by ext4_fs_init. */
+	struct {
+		uint32_t trans_replayed;
+		uint32_t blocks_replayed;
+		uint32_t log_blocks;
+		bool     recovered;
+	} last_recovery;
 };
 
 struct ext4_block_group_ref {
