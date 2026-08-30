@@ -43,6 +43,7 @@
 
 #include <ext4_fs.h>
 #include <ext4_super.h>
+#include <ext4_inode.h>
 #include <ext4_journal.h>
 #include <ext4_blockdev.h>
 #include <ext4_crc32.h>
@@ -853,6 +854,37 @@ int jbd_get_fs(struct ext4_fs *fs,
 	if (!jbd_verify_sb(&jbd_fs->sb)) {
 		rc = EIO;
 		goto Error;
+	}
+
+	/* The geometry every user of this superblock assumes, checked once
+	 * where the superblock enters. Everything downstream treats journal
+	 * blocks and filesystem blocks as the same size -- checksums run
+	 * `blocksize` bytes over a filesystem-block buffer, replay memcpys
+	 * `blocksize` bytes into one, tag tables are walked to `blocksize`.
+	 * A corrupt field larger than the real block size turned each of
+	 * those into an out-of-bounds read, and the checksum helper into an
+	 * out-of-bounds WRITE (it zeroes the tail checksum in place) -- on
+	 * every descriptor block of every recovery mount. The self-seeded
+	 * CRC in jbd_verify_sb cannot catch it: a corrupt superblock
+	 * checksums itself consistently. `maxlen` is bounded by the journal
+	 * file's own size for the same reason: `wrap` subtracts it from
+	 * block indexes, and replay trusts the difference. */
+	if (jbd_get32(&jbd_fs->sb, blocksize) !=
+	    ext4_sb_get_block_size(&fs->sb)) {
+		rc = EIO;
+		goto Error;
+	}
+	{
+		uint64_t inode_size = ext4_inode_get_size(&fs->sb,
+					jbd_fs->inode_ref.inode);
+		uint64_t maxlen = jbd_get32(&jbd_fs->sb, maxlen);
+		if (maxlen == 0 ||
+		    maxlen > inode_size / ext4_sb_get_block_size(&fs->sb) ||
+		    jbd_get32(&jbd_fs->sb, first) >= maxlen ||
+		    jbd_get32(&jbd_fs->sb, start) >= maxlen) {
+			rc = EIO;
+			goto Error;
+		}
 	}
 
 	if (rc == EOK)
