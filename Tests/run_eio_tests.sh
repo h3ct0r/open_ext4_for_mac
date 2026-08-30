@@ -294,6 +294,40 @@ else
   fi
 fi
 
+# ---------------------------------------------- metadata write-back, refused --
+# On a journal-less volume (ext2) every metadata write reaches the device
+# through the cache's release-time flush -- whose result ext4_bcache_free
+# discarded outright. A create onto a bad sector reported success and left
+# an image e2fsck rejects: the dirent landed, the inode-table block never
+# did. The cache now latches the first swallowed write-back error and the
+# flush entry points report it; here that surfaces through unmount, so the
+# command exits nonzero. (No consistency assertion on the image: ext2 has
+# no journal to redo from -- the point is that the caller finds out.)
+note ""
+note "a metadata write-back the medium refused"
+note ""
+
+img=$(fresh wb 2)
+cp "$img" "$WORK/wb-trc.img"
+victim=$(EXT4DUMP_TRACE=- "$DUMP" "$WORK/wb-trc.img" create /x 2>&1 >/dev/null \
+         | awk '/^TRC W /{ split($4,a,"="); off=a[2]+0; if (off >= 4096) last=off } END{ print last }')
+if [ -z "$victim" ]; then
+  bad "write-back fixture: no metadata write found in the trace"
+else
+  cp "$img" "$WORK/wb-red.img"
+  EXT4DUMP_EIO_WRITE_OFF=$victim \
+    "$DUMP" "$WORK/wb-red.img" create /x >/dev/null 2>"$WORK/wb-red.err"
+  rc=$?
+  if ! grep -q '^EIO-INJECT write' "$WORK/wb-red.err"; then
+    bad "write-back fault never fired (offset $victim)"
+  elif [ $rc -ne 0 ]; then
+    ok "a swallowed write-back error reaches the exit code (rc=$rc)"
+  else
+    bad "metadata write-back failed and the command exited 0" \
+        "offset $victim never landed; e2fsck will reject the image"
+  fi
+fi
+
 # --------------------------------------------------- a read that fails midway --
 # A file of five blocks whose last block the medium refuses. ext4b_read used
 # to report the four successful blocks as rc 0 -- indistinguishable from EOF,

@@ -1510,7 +1510,17 @@ int main(int argc, char **argv)
     }
 
 unmount:
-    ext4b_unmount(dev);
+    /* An unmount that failed to persist something is the command failing,
+     * however well the operations before it went. The suites lean on this:
+     * a write-back error surfaced here is the difference between a red test
+     * and a silently damaged image with exit code 0. */
+    {
+        int ur = ext4b_unmount(dev);
+        if (ur != 0 && rc == 0) {
+            fprintf(stderr, "unmount: %s\n", ext4b_strerror(ur));
+            rc = 1;
+        }
+    }
 out:
     ext4b_device_destroy(dev);
     luks_device_close(luks);

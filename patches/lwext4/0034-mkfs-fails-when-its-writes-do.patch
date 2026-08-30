@@ -1,0 +1,54 @@
+mkfs fails when its writes do
+
+ext4_mkfs builds the entire filesystem in write-back mode, which makes its
+teardown the write path: ext4_fs_fini writes the superblock, and leaving
+write-back mode (ext4_block_cache_write_back(bd, 0)) flushes everything
+else. Both results were discarded -- the exit sequence runs fs_fini,
+cache-off, bcache_fini, block_fini and returns whatever r held from the
+build phase, so a format whose flushes failed still reported success.
+
+In practice two other nets usually catch a dying medium first: mkfs
+re-opens its own volume mid-format and verifies (patch 0024), so a block
+that reads back wrong fails the build phase; and patch 0033's latch makes
+the final cache flush return the swallowed error -- to this call site,
+which then dropped it. The bad-sector injection that motivated this patch
+was caught by the verification pass even before 0033. What remained open
+is exactly the gap between those nets: a write that fails after the last
+verification read, on a block verification does not cover. "newfs
+reported success" has to mean the writes landed, not that the failure
+happened to be somewhere the safety nets look.
+
+Both results now merge into the return, first error wins, teardown still
+runs to the end.
+
+diff --git a/src/ext4_mkfs.c b/src/ext4_mkfs.c
+--- a/src/ext4_mkfs.c
++++ b/src/ext4_mkfs.c
+@@ -964,10 +964,25 @@ int ext4_mkfs(struct ext4_fs *fs, struct ext4_blockdev *bd,
+ 		goto fs_fini;
+ 
+ 	fs_fini:
+-	ext4_fs_fini(fs);
++	{
++		/* Teardown IS the write path here: the whole filesystem was
++		 * built in write-back mode, fs_fini writes the superblock and
++		 * leaving write-back mode flushes everything else. Their
++		 * results were discarded, so a format whose writes never
++		 * landed still reported success -- "created ext4 volume"
++		 * over a medium holding nothing of the sort. The first error
++		 * wins; teardown still runs to the end. */
++		int fr = ext4_fs_fini(fs);
++		if (r == EOK)
++			r = fr;
++	}
+ 
+ 	cache_fini:
+-	ext4_block_cache_write_back(bd, 0);
++	{
++		int cr = ext4_block_cache_write_back(bd, 0);
++		if (r == EOK)
++			r = cr;
++	}
+ 	ext4_bcache_fini_dynamic(&bc);
+ 
+ 	block_fini:

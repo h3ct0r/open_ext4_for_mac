@@ -1,0 +1,133 @@
+The cache remembers a failed write-back
+
+Nearly every metadata write in a non-write-back session reaches the device
+through one call: the release-time flush inside ext4_bcache_free(). Its
+result was discarded -- the function returns EOK unconditionally -- so an
+EIO writing a bitmap, an inode table block or a directory block was
+invisible to every caller. Measured on a journal-less volume with the
+bad-sector model: `create` onto a dying inode-table block exits 0 and
+leaves an image e2fsck rejects.
+
+A failed buffer is not lost -- it stays dirty and a later flush may land
+it -- but it is also on no list the flush entry points walk (the dirty
+list holds only write-back-mode buffers), so the failure could outrun
+every subsequent "flush the cache" call and still end in "ejected clean".
+
+The fix is a one-int latch on the cache: ext4_bcache_free() and the
+unmount sweep in ext4_bcache_cleanup() record the first error they would
+otherwise swallow, and the two places that answer for durability read it
+out: ext4_block_cache_flush() folds it into its return (that call is what
+txn_finish, sync and format lean on), and ext4_umount() reads it after
+the cleanup sweep, so an eject that failed its last writes fails the
+unmount. ext4dump now also refuses to exit 0 over a failed unmount, which
+is what lets a suite see any of this.
+
+Red cell in Tests/run_eio_tests.sh: ext2 create onto a bad sector must
+exit nonzero. Before: exit 0, dirent present, inode gone, e2fsck dirty.
+
+diff --git a/include/ext4_bcache.h b/include/ext4_bcache.h
+--- a/include/ext4_bcache.h
++++ b/include/ext4_bcache.h
+@@ -138,6 +138,16 @@ struct ext4_bcache {
+ 	/**@brief   The cache should not be shaked */
+ 	bool dont_shake;
+ 
++	/**@brief   First write-back error swallowed on a path with no way
++	 *          to report it: the release-time flush in
++	 *          ext4_bcache_free(), and the unmount sweep in
++	 *          ext4_bcache_cleanup(). Nearly every metadata write in a
++	 *          non-write-back session ends in the former, and its
++	 *          result used to vanish -- EOK over EIO. Consumed (and
++	 *          cleared) by ext4_bcache_take_error(); the cache-flush
++	 *          entry points fold it into their return. */
++	int io_err;
++
+ 	/**@brief   A tree holding all bufs*/
+ 	RB_HEAD(ext4_buf_lba, ext4_buf) lba_root;
+ 
+@@ -183,6 +193,13 @@ static inline void ext4_bcache_clear_dirty(struct ext4_buf *buf) {
+ 	ext4_bcache_clear_flag(buf, BC_DIRTY);
+ }
+ 
++/**@brief   Take (and clear) the latched write-back error. See io_err. */
++static inline int ext4_bcache_take_error(struct ext4_bcache *bc) {
++	int r = bc->io_err;
++	bc->io_err = 0;
++	return r;
++}
++
+ /**@brief   Increment reference counter of buf by 1.*/
+ #define ext4_bcache_inc_ref(buf) ((buf)->refctr++)
+ 
+diff --git a/src/ext4.c b/src/ext4.c
+--- a/src/ext4.c
++++ b/src/ext4.c
+@@ -464,9 +464,15 @@ int ext4_umount(const char *mount_point)
+ 	mp->mounted = 0;
+ 
+ 	ext4_bcache_cleanup(mp->fs.bdev->bc);
++	/* The cleanup sweep was this volume's last writer; a flush it could
++	 * not land is the unmount failing, read out before the cache goes. */
++	r = ext4_bcache_take_error(mp->fs.bdev->bc);
+ 	ext4_bcache_fini_dynamic(mp->fs.bdev->bc);
+ 
+-	r = ext4_block_fini(mp->fs.bdev);
++	if (r == EOK)
++		r = ext4_block_fini(mp->fs.bdev);
++	else
++		(void)ext4_block_fini(mp->fs.bdev);
+ Finish:
+ 	mp->fs.bdev->fs = NULL;
+ 	return r;
+diff --git a/src/ext4_bcache.c b/src/ext4_bcache.c
+--- a/src/ext4_bcache.c
++++ b/src/ext4_bcache.c
+@@ -86,7 +86,13 @@ void ext4_bcache_cleanup(struct ext4_bcache *bc)
+ {
+ 	struct ext4_buf *buf, *tmp;
+ 	RB_FOREACH_SAFE(buf, ext4_buf_lba, &bc->lba_root, tmp) {
+-		ext4_block_flush_buf(bc->bdev, buf);
++		int r = ext4_block_flush_buf(bc->bdev, buf);
++		/* The buffer is dropped either way -- unmount is over -- but
++		 * the failure must reach the caller: this sweep is the last
++		 * writer, and "ejected clean" over a failed flush is how a
++		 * stick loses data with no one told. */
++		if (r != EOK && bc->io_err == EOK)
++			bc->io_err = r;
+ 		ext4_bcache_drop_buf(bc, buf);
+ 	}
+ }
+@@ -325,7 +331,16 @@ int ext4_bcache_free(struct ext4_bcache *bc, struct ext4_block *b)
+ 			    !ext4_bcache_test_flag(buf, BC_TMP))
+ 				ext4_bcache_insert_dirty_node(bc, buf);
+ 			else {
+-				ext4_block_flush_buf(bc->bdev, buf);
++				/* This release-time flush is where nearly
++				 * every metadata write in a non-write-back
++				 * session actually reaches the device, and
++				 * this function's return says nothing about
++				 * it. Latch the failure; the buffer stays
++				 * dirty and a later flush may still land it,
++				 * but the error is owed to somebody. */
++				int r = ext4_block_flush_buf(bc->bdev, buf);
++				if (r != EOK && bc->io_err == EOK)
++					bc->io_err = r;
+ 				ext4_bcache_clear_flag(buf, BC_FLUSH);
+ 			}
+ 		}
+diff --git a/src/ext4_blockdev.c b/src/ext4_blockdev.c
+--- a/src/ext4_blockdev.c
++++ b/src/ext4_blockdev.c
+@@ -516,7 +516,11 @@ int ext4_block_cache_flush(struct ext4_blockdev *bdev)
+ 			return r;
+ 
+ 	}
+-	return EOK;
++	/* The dirty list only holds write-back-mode buffers. A buffer whose
++	 * release-time flush failed is dirty but on no list -- the cache
++	 * latched that error instead (see io_err), and "flush the cache"
++	 * is the question it answers. */
++	return ext4_bcache_take_error(bdev->bc);
+ }
+ 
+ int ext4_block_cache_write_back(struct ext4_blockdev *bdev, uint8_t on_off)
