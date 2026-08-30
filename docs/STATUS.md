@@ -1741,3 +1741,27 @@ the exit gate exists: the offline suites all passed because eager
 release-time flushing usually empties the checkpoint queue before two
 transactions can share a block — the mounted driver, with fseventsd
 committing around it, is what stacked the queue.
+
+**And the second one, which the first one's fix had introduced** (0044).
+With the checkpoint regression gone, the mounted kill-recovery suite still
+failed five of twelve rounds -- but the Linux kernel replayed the same
+crashed images to the same inconsistent filesystem, which said the fault
+was not in recovery at all. The driver's log showed the real one:
+hundreds of `no space left on device` on a fresh 64 MB volume. Patch
+0041's completion drain lifts a transaction off the checkpoint queue, so
+no completion advances the journal tail; the tail advance was left to the
+purge loop, and the purge the allocator calls when the ring is full
+flushed a transaction and returned without retiring it. The ring never
+drained. Measured: 273 of 1800 operations refused with the volume 17%
+full, where the pre-session build -- rebuilt from the patch series and run
+on the identical fixture -- completes all 1800. A driver that cannot
+allocate log space also stops checkpointing, which is why the crashed
+images were beyond redo. 0044 makes the purge re-inspect after flushing;
+kill-recovery went from 7/12 to 12/12.
+
+Two harness gaps let this reach hardware, both now closed: `ext4dump
+script` stopped at the first failing command, so nothing offline modelled
+an application that keeps writing to a volume that has started refusing
+(`EXT4DUMP_SCRIPT_CONTINUE=1`), and the kill-recovery suite accepted
+read-only mounts, which after a kill replay nothing -- a round that
+measured nothing while still reporting a verdict.
