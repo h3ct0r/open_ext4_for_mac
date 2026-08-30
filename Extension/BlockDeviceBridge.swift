@@ -370,11 +370,62 @@ final class BlockDeviceBridge {
     // the journal as durable. Both used to be discarded with `_ =`.
     private struct ShortIO: Error {}
 
+    /// What the device is actually doing, in the only place that can see it.
+    ///
+    /// A copy that takes far longer than the medium should need has three
+    /// candidate homes -- the number of commands we issue, the size of each,
+    /// and how long the device takes to answer -- and from outside the
+    /// extension they are indistinguishable. Guessing between them costs a
+    /// hardware iteration every time. These counters make the mount say it:
+    /// a line per 32 MiB with the rate over that span, and the largest single
+    /// write in it, which is what separates "steadily slow" from "fast with
+    /// stalls". Info level, a few lines per copy, and nothing on the path but
+    /// two clock reads per command.
+    private struct IOMeter {
+        var ops = 0
+        var bytes = 0
+        var nanos: UInt64 = 0
+        var maxNanos: UInt64 = 0
+        var reportedBytes = 0
+
+        static let reportEvery = 32 << 20
+
+        mutating func record(bytes n: Int, nanos dt: UInt64) {
+            ops += 1
+            bytes += n
+            nanos += dt
+            if dt > maxNanos { maxNanos = dt }
+        }
+
+        /// Returns a line to log when enough has gone by to be worth one.
+        mutating func due(_ what: String) -> String? {
+            guard bytes - reportedBytes >= Self.reportEvery else { return nil }
+            reportedBytes = bytes
+            let secs = Double(nanos) / 1e9
+            let mbps = secs > 0 ? (Double(bytes) / 1_048_576.0) / secs : 0
+            let avgUs = ops > 0 ? Double(nanos) / Double(ops) / 1000.0 : 0
+            let line = String(format:
+                "%@: %d ops, %.0f MB, %.1f MB/s in the device, avg %.0f us, max %.0f ms",
+                what, ops, Double(bytes) / 1_048_576.0, mbps, avgUs,
+                Double(maxNanos) / 1e6)
+            return line
+        }
+    }
+
+    private var writeMeter = IOMeter()
+    private var readMeter = IOMeter()
+
     private func readRaw(into buf: UnsafeMutableRawBufferPointer,
                          at offset: off_t, length: Int) throws {
         switch mode {
         case .direct:
+            let t0 = DispatchTime.now().uptimeNanoseconds
             let got = try resource.read(into: buf, startingAt: offset, length: length)
+            readMeter.record(bytes: length,
+                             nanos: DispatchTime.now().uptimeNanoseconds - t0)
+            if let line = readMeter.due("device reads") {
+                Ext4Log.io.info("\(line, privacy: .public)")
+            }
             guard got == length else {
                 Ext4Log.io.error("short read: \(got, privacy: .public) of \(length, privacy: .public) at \(offset, privacy: .public)")
                 throw ShortIO()
@@ -387,7 +438,13 @@ final class BlockDeviceBridge {
                           at offset: off_t, length: Int) throws {
         switch mode {
         case .direct:
+            let t0 = DispatchTime.now().uptimeNanoseconds
             let put = try resource.write(from: buf, startingAt: offset, length: length)
+            writeMeter.record(bytes: length,
+                              nanos: DispatchTime.now().uptimeNanoseconds - t0)
+            if let line = writeMeter.due("device writes") {
+                Ext4Log.io.info("\(line, privacy: .public)")
+            }
             guard put == length else {
                 Ext4Log.io.error("short write: \(put, privacy: .public) of \(length, privacy: .public) at \(offset, privacy: .public)")
                 throw ShortIO()
