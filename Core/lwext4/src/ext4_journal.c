@@ -1301,9 +1301,15 @@ static void jbd_replay_block_tags(struct jbd_fs *jbd_fs,
 			return;
 		}
 	} else {
+		/* The fallback path when the window could not be allocated.
+		 * Skipping an unreadable logged block silently -- the old
+		 * behavior -- means finishing recovery without it and then
+		 * clearing the journal that still held it. */
 		r = jbd_block_get(jbd_fs, &journal_block, *this_block);
-		if (r != EOK)
+		if (r != EOK) {
+			info->rc = r;
 			return;
+		}
 		jdata = journal_block.data;
 		have_block = true;
 	}
@@ -1320,8 +1326,10 @@ static void jbd_replay_block_tags(struct jbd_fs *jbd_fs,
 		}
 
 		r = ext4_block_get_noread(fs->bdev, &ext4_block, tag_info->block);
-		if (r != EOK)
+		if (r != EOK) {
+			info->rc = r;
 			goto out;
+		}
 
 		memcpy(ext4_block.data,
 			jdata,
@@ -1345,8 +1353,14 @@ static void jbd_replay_block_tags(struct jbd_fs *jbd_fs,
 		/* Mark system as mounted */
 		ext4_set16(&fs->sb, state, state);
 		r = ext4_sb_write(fs->bdev, &fs->sb);
-		if (r != EOK)
+		if (r != EOK) {
+			/* The live gap: superblock updates are journaled
+			 * (patch 0023), so this branch runs on every replay
+			 * of one. Losing this write and then clearing the
+			 * journal undid exactly what 0023 preserved. */
+			info->rc = r;
 			goto out;
+		}
 
 		/*Update mount count*/
 		ext4_set16(&fs->sb, mount_count, mount_count);
