@@ -138,6 +138,13 @@ Known states, from mildest to worst (docs/STATUS.md has the histories):
 - **Device claimed by a dead mount** — `diskutil unmountDisk force diskN`,
   give it ~10 s; if a process is stuck in uninterruptible I/O on the node,
   only a physical replug clears it.
+- **Two mounted-suite results that are about the machine, not the driver**
+  — the LUKS app-flow stage skips unless the app is signed into the
+  extension's keychain group (needs `App/Ext4Mac.provisionprofile`), and
+  the "no plaintext key after unlock" check is not asserted when the
+  screen is locked: the keychain then refuses the key (-25308) and the
+  extension takes its container fallback. Run the LUKS stage with the
+  screen unlocked to exercise the keychain path.
 - **DiskArbitration wedged** (mounts then deactivates ~2 ms later,
   status 0x204, after heavy kill/pull abuse) — a replug sometimes clears
   it; SIP forbids kickstarting fskitd; only a reboot fully resets it.
