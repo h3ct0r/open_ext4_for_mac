@@ -83,6 +83,17 @@ if [ -f "$APP_PROFILE" ] && [ -f "$APP_ENTITLEMENTS" ]; then
 else
   rm -f "$APP/Contents/embedded.provisionprofile"
   echo "  without the shared keychain group (no App/Ext4Mac.provisionprofile)"
+  # Spelling out the consequence, because it is a security one and the line
+  # above reads like a detail. The extension keeps master keys in the shared
+  # group; an app outside that group cannot see or delete them. So `list`
+  # reports no unlocked volumes even when there are some, and `forget`
+  # deletes nothing while reporting success -- SecItemDelete answers
+  # "no such item", which is indistinguishable from having removed one.
+  # A container unlocked once then goes on mounting without a passphrase
+  # until the key is removed from the extension's own keychain.
+  echo "    NOTE: 'Ext4Mac forget' cannot remove keys the extension stored,"
+  echo "          and 'Ext4Mac list' cannot see them. A volume unlocked once"
+  echo "          keeps mounting without its passphrase on this build."
 fi
 codesign --force --timestamp --options runtime \
          "${APP_ENTITLEMENT_ARG[@]}" \

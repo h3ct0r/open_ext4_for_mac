@@ -331,8 +331,26 @@ note ""
 note "stage 5: unlock in the container app, mount, forget"
 
 APP="/Applications/Ext4Mac.app/Contents/MacOS/Ext4Mac"
+# The whole stage is the app managing keys the EXTENSION stores, and that is
+# only possible when both are signed into the same keychain access group.
+# Signing the app into it needs App/Ext4Mac.provisionprofile, which not every
+# build has -- scripts/sign.sh says so and carries on, because everything
+# except this stage works without it. Without the group the app cannot see or
+# delete the extension's keys: `list` reports nothing, `forget` deletes
+# nothing and still succeeds (SecItemDelete answers "no such item"), and the
+# volume goes on mounting unlocked. That produced six failures that read like
+# driver bugs and are really one missing profile, so name it and skip.
+APP_GROUPS=$(codesign -d --entitlements - --xml /Applications/Ext4Mac.app 2>/dev/null \
+             | plutil -convert xml1 -o - - 2>/dev/null \
+             | grep -c 'ext4mac.shared' || true)
 if [ ! -x "$APP" ]; then
   note "  skipped: Ext4Mac is not installed in /Applications"
+elif [ "${APP_GROUPS:-0}" -eq 0 ]; then
+  note "  skipped: the installed app is not signed into the extension's"
+  note "           keychain group (no App/Ext4Mac.provisionprofile), so it"
+  note "           cannot see or forget keys the extension stored -- and a"
+  note "           volume unlocked once keeps mounting without its passphrase."
+  note "           This stage tests exactly that flow; it needs an app profile."
 else
   # Start from nothing: no passphrase file, no stored key.
   rm -f "$KEYDIR/$UUID2".* 2>/dev/null

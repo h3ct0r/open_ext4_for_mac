@@ -1765,3 +1765,35 @@ an application that keeps writing to a volume that has started refusing
 (`EXT4DUMP_SCRIPT_CONTINUE=1`), and the kill-recovery suite accepted
 read-only mounts, which after a kill replay nothing -- a round that
 measured nothing while still reporting a verdict.
+
+**Two things the mounted stages say that are not driver defects.**
+
+The LUKS app-flow stage (stage 5 of the mounted LUKS suite) needs the app
+and the extension to share a keychain access group, and signing the app
+into it needs `App/Ext4Mac.provisionprofile`, which this build does not
+have -- `scripts/sign.sh` says so and carries on, because nothing else
+needs it. The consequence is sharper than that line suggested and is now
+spelled out where it is printed: the extension stores master keys in the
+shared group, so an app outside that group cannot see or delete them.
+`Ext4Mac list` reports no unlocked volumes when there are some, and
+`Ext4Mac forget` deletes nothing while printing "forgot the key" --
+SecItemDelete answers "no such item", which is indistinguishable from
+success. **A container unlocked once then keeps mounting without its
+passphrase** (measured: keychain empty of app-visible items, no key file
+in the container, extension killed, volume still mounted and served
+plaintext -- the driver's own log says "master key came from the
+keychain"). The suite now detects the missing group and skips the stage
+with that explanation instead of reporting six failures that read like
+driver bugs.
+
+The durability cell ("<op> is durable once synced") fails intermittently,
+about once in forty observations, on a different operation each time. It
+is not the journal: the same build passes the cell 3 runs in 4, a focused
+loop of sixteen freeze-and-snapshot cycles kept every synced unlink (with
+shell `sync` and with an explicit directory `fsync` alike), and the Linux
+kernel agrees with our replay everywhere else. The likely mechanism is
+macOS `sync(2)` delivery -- the suite freezes the extension the instant
+`sync` returns, and the module's commit is not ordered against that
+return. It predates this pass (it appeared against the pre-session build
+in the same session). Left asserted, because the contract is right; noted
+here so a hardware day does not chase it.
