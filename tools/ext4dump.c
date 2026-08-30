@@ -797,7 +797,7 @@ static luks_device *open_luks(file_ctx *fc, const char *keyfile, bool writable,
 static bool is_write_cmd(const char *c)
 {
     static const char *w[] = { "prealloc",
-                               "mkdir", "create", "write", "append", "rm",
+                               "mkdir", "create", "write", "append", "put", "rm",
                                "mv", "ln", "symlink", "truncate", "chmod",
                                "chown", "setxattr", "rmxattr", "script",
                                "format", "label", "rm-open", "rm-cycle",
@@ -928,6 +928,57 @@ static int run_write_command(ext4b_device *dev, int argc, char **argv)
         r = ext4b_write(dev, ino, off, argv[4], strlen(argv[4]), &written);
         if (r != 0) { fprintf(stderr, "write: %s\n", ext4b_strerror(r)); rc = 1; }
         else printf("wrote %zu bytes at %llu\n", written, (unsigned long long)off);
+
+    } else if (strcmp(cmd, "put") == 0) {
+        /* Bulk data, which `write` cannot express: it takes its payload from
+         * the command line. Copying a real file in is the only way to measure
+         * what the data path costs per megabyte -- the thing a USB stick
+         * charges for and a page-cached disk image hides. Writes go in
+         * `chunk` pieces so the size of the caller's buffer is a dimension
+         * too: FSKit hands us up to a megabyte at a time, and the shim's
+         * behaviour differs by how much it is given at once. */
+        if (argc < 5) {
+            fprintf(stderr, "put needs <path> <host-file> [chunk-bytes]\n");
+            rc = 2; return rc;
+        }
+        FILE *in = fopen(argv[4], "rb");
+        if (!in) { perror(argv[4]); rc = 1; return rc; }
+
+        size_t chunk = (argc >= 6) ? (size_t)strtoull(argv[5], NULL, 10)
+                                   : (1u << 20);
+        if (chunk == 0) chunk = 1u << 20;
+        void *buf = malloc(chunk);
+        if (!buf) { fclose(in); fprintf(stderr, "put: out of memory\n"); rc = 1; return rc; }
+
+        uint32_t ino = resolve(dev, argv[3], NULL);
+        if (!ino) {
+            uint32_t parent = resolve_parent(dev, argv[3], &name, &name_len);
+            if (!parent) { free(buf); fclose(in); rc = 1; return rc; }
+            r = ext4b_create(dev, parent, name, name_len, EXT4B_TYPE_FILE,
+                             0644, (uint32_t)getuid(), (uint32_t)getgid(), &ino);
+            if (r != 0) {
+                fprintf(stderr, "put: %s\n", ext4b_strerror(r));
+                free(buf); fclose(in); rc = 1; return rc;
+            }
+        }
+
+        uint64_t off = 0;
+        size_t got;
+        while ((got = fread(buf, 1, chunk, in)) > 0) {
+            size_t written = 0;
+            r = ext4b_write(dev, ino, off, buf, got, &written);
+            if (r != 0) {
+                fprintf(stderr, "put: %s\n", ext4b_strerror(r));
+                rc = 1; break;
+            }
+            off += written;
+            if (written != got) {
+                fprintf(stderr, "put: short write (%zu of %zu)\n", written, got);
+                rc = 1; break;
+            }
+        }
+        free(buf); fclose(in);
+        if (rc == 0) printf("put %llu bytes\n", (unsigned long long)off);
 
     } else if (strcmp(cmd, "rm") == 0) {
         if (argc < 4) { fprintf(stderr, "rm needs a path\n"); rc = 2; return rc; }
@@ -1077,6 +1128,7 @@ int main(int argc, char **argv)
             "  mkdir <path>            create a directory\n"
             "  create <path> [mode]    create an empty file\n"
             "  write <path> <text>     write text at offset 0\n"
+            "  put <path> <file> [n]   copy a host file in, n bytes per write\n"
             "  append <path> <text>    append text at end of file\n"
             "  script <file>           run one command per line, all inside\n"
             "                          a single mount ('-' reads stdin)\n"

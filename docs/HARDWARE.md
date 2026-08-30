@@ -174,6 +174,7 @@ enforces that):
 | `EXT4DUMP_JOURNAL_BLOCKS` | journal size for `format` |
 | `EXT4DUMP_UUID` | pin the volume UUID (reproducible images) |
 | `EXT4DUMP_KEEP_ORPHANS` | skip orphan cleanup at mount (inspection) |
+| `EXT4DUMP_IO_STATS=1` with `put <path> <file> [n]` | the data-path measurement: copy a host file in, n bytes per write, and read the command count off IOSTATS |
 | `EXT4DUMP_SCRIPT_CONTINUE=1` | `script` keeps going after a failing command instead of stopping — models an application that keeps writing to a volume that has started refusing |
 | `EXT4DUMP_REPORT_WRITES` | print `writes=N` at exit (predates IOSTATS) |
 | `EXT4B_TXN_BATCH` | mutations per journal transaction (tool only; appex uses the compiled default) |

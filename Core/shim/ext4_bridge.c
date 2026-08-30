@@ -1234,6 +1234,22 @@ int ext4b_read(ext4b_device *dev,
     uint8_t *dst = buf;
     size_t remaining = count;
 
+    /*
+     * Whole contiguous blocks are read with one device command per run, for
+     * the reason the write path above coalesces: this loop issued one read
+     * per block -- 25,606 of them for a 100 MB file -- and a USB stick
+     * charges a round trip for each.
+     *
+     * A run is read straight into the caller's buffer rather than through
+     * the block cache, which is both faster and more correct here. File data
+     * is written directly to the medium (ext4_block_writebytes), and nothing
+     * invalidates a cached copy when that happens, so a block read once and
+     * still resident could answer a later read with pre-write contents. The
+     * medium is the truth for data blocks; the one thing that outranks it is
+     * a buffer still holding unwritten changes, so any DIRTY resident is
+     * copied over the run afterwards. Partial head and tail blocks keep the
+     * cached path, where a read-modify-write wants the buffer anyway.
+     */
     while (remaining > 0) {
         uint32_t lblk = (uint32_t)((offset) / bsize);
         uint32_t in_blk_off = (uint32_t)(offset % bsize);
@@ -1246,7 +1262,36 @@ int ext4b_read(ext4b_device *dev,
         if (r != EOK)
             break;
 
-        if (fblk == 0) {
+        if (in_blk_off == 0 && chunk == bsize && fblk != 0) {
+            /* Extend the run as far as the mapping stays contiguous. */
+            uint32_t run = 1;
+            while ((size_t)(run + 1) * bsize <= remaining) {
+                ext4_fsblk_t next = 0;
+                if (ext4_fs_get_inode_dblk_idx(&ref, lblk + run, &next,
+                                               true) != EOK)
+                    break;
+                if (next != fblk + run)
+                    break;
+                run++;
+            }
+
+            r = ext4_blocks_get_direct(&dev->bdev, dst, fblk, run);
+            if (r != EOK)
+                break;
+
+            for (uint32_t i = 0; i < run; i++) {
+                struct ext4_block cached;
+                struct ext4_buf *cbuf =
+                    ext4_bcache_find_get(dev->bdev.bc, &cached, fblk + i);
+                if (cbuf) {
+                    if (ext4_bcache_test_flag(cbuf, BC_DIRTY))
+                        memcpy(dst + (size_t)i * bsize, cbuf->data, bsize);
+                    ext4_block_set(&dev->bdev, &cached);
+                }
+            }
+
+            chunk = run * bsize;
+        } else if (fblk == 0) {
             /* Sparse hole — reads as zeroes. */
             memset(dst, 0, chunk);
         } else {
@@ -2976,6 +3021,21 @@ out:
 
 /* ------------------------------------------------------------------ data -- */
 
+/* Issue a pending run of contiguous whole blocks as one command, and clear
+ * it. Zero blocks is not an error: callers flush unconditionally. */
+static int bridge_flush_run(struct ext4_blockdev *bdev, uint32_t bsize,
+                            ext4_fsblk_t first, uint32_t *blocks,
+                            const uint8_t *src)
+{
+    if (*blocks == 0)
+        return EOK;
+
+    int r = ext4_block_writebytes(bdev, (uint64_t)first * bsize, src,
+                                  (*blocks) * bsize);
+    *blocks = 0;
+    return r;
+}
+
 int ext4b_write(ext4b_device *dev,
                 uint32_t inode,
                 uint64_t offset,
@@ -3053,6 +3113,27 @@ int ext4b_write(ext4b_device *dev,
     size_t remaining = count;
     uint64_t pos = offset;
 
+    /*
+     * A run of physically contiguous whole blocks, written with one device
+     * command.
+     *
+     * This loop used to issue one write per block: 25,600 commands for a
+     * 100 MB file. A disk image hides that behind the page cache -- it
+     * measured 57 MB/s -- while a USB stick charges a round trip for each
+     * one, which is how a 100 MB copy in Finder came to look like a hang.
+     * The blocks are almost always consecutive on disk, so the fix is to
+     * notice: accumulate while the mapping stays contiguous and flush the
+     * run in a single ext4_block_writebytes, which passes a multi-block
+     * length straight to the device.
+     *
+     * Only whole blocks join a run. A partial head or tail is a
+     * read-modify-write of one block and is issued on its own, as before.
+     */
+    ext4_fsblk_t run_first = 0;
+    uint32_t run_blocks = 0;
+    uint64_t run_bytes = 0;
+    const uint8_t *run_src = NULL;
+
     /* Batch the block writes; the cache is flushed by txn_finish. */
     ext4_block_cache_write_back(&dev->bdev, 1);
 
@@ -3090,15 +3171,54 @@ int ext4b_write(ext4b_device *dev,
             break;
         }
 
-        r = ext4_block_writebytes(&dev->bdev,
-                                  (uint64_t)fblk * bsize + in_off, src, chunk);
-        if (r != EOK)
-            break;
+        if (in_off == 0 && chunk == bsize) {
+            /* Whole block: extend the run, or start a new one. */
+            if (run_blocks && fblk == run_first + run_blocks) {
+                run_blocks++;
+                run_bytes += chunk;
+            } else {
+                r = bridge_flush_run(&dev->bdev, bsize, run_first,
+                                     &run_blocks, run_src);
+                if (r != EOK)
+                    break;
+                *out_written += run_bytes;
+                run_bytes = chunk;
+                run_first  = fblk;
+                run_blocks = 1;
+                run_src    = src;
+            }
+        } else {
+            /* Partial block: flush what is pending, then write this one. */
+            r = bridge_flush_run(&dev->bdev, bsize, run_first,
+                                 &run_blocks, run_src);
+            if (r != EOK)
+                break;
+            *out_written += run_bytes;
+            run_bytes = 0;
+
+            r = ext4_block_writebytes(&dev->bdev,
+                                      (uint64_t)fblk * bsize + in_off,
+                                      src, chunk);
+            if (r != EOK)
+                break;
+            *out_written += chunk;
+        }
 
         src        += chunk;
         pos        += chunk;
         remaining  -= chunk;
-        *out_written += chunk;
+    }
+
+    /* Whatever the loop still holds. A run counts as written only once its
+     * command has been issued, so a failure here leaves those bytes out of
+     * the count rather than reporting data the device never saw. */
+    {
+        int run_r = bridge_flush_run(&dev->bdev, bsize, run_first,
+                                     &run_blocks, run_src);
+        if (run_r == EOK)
+            *out_written += run_bytes;
+        else if (r == EOK)
+            r = run_r;
     }
 
     /* Leaving write-back mode is what issues the queued metadata writes; a
@@ -3106,10 +3226,14 @@ int ext4b_write(ext4b_device *dev,
      * landed. */
     int flush_r = ext4_block_cache_write_back(&dev->bdev, 0);
 
-    /* Growing the file is only visible once i_size says so. */
+    /* Growing the file is only visible once i_size says so -- and only as far
+     * as the bytes that actually landed, which is no longer the same as how
+     * far the loop walked now that a run can fail after its blocks were
+     * mapped. */
     if (*out_written > 0) {
-        if (pos > fsize)
-            ext4_inode_set_size(ref.inode, pos);
+        uint64_t end = offset + *out_written;
+        if (end > fsize)
+            ext4_inode_set_size(ref.inode, end);
         touch(fs, &ref, TOUCH_MTIME | TOUCH_CTIME);
         ref.dirty = true;
     }
