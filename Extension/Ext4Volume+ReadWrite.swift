@@ -39,6 +39,16 @@ extension Ext4Volume: FSVolume.ReadWriteOperations {
         try requireWritable()
         guard !contents.isEmpty else { return 0 }
 
+        // How much the kernel hands us in one call decides how much the layers
+        // below can coalesce: a run of contiguous blocks cannot be longer than
+        // the request that produced it. Measured against the device counters
+        // in BlockDeviceBridge, this says whether small device commands come
+        // from small requests or from fragmented allocation.
+        Self.writeRequests.record(contents.count)
+        if let line = Self.writeRequests.due() {
+            Ext4Log.io.info("\(line, privacy: .public)")
+        }
+
         let written = try await executor.run { [self] in
             var count = 0
             let rc = try contents.withUnsafeBytes { raw -> Int32 in
@@ -132,4 +142,31 @@ private let collectXattr: @convention(c) (UnsafeMutableRawPointer?,
     let list = ctx.assumingMemoryBound(to: [FSFileName].self)
     list.pointee.append(FSFileName(data: Data(bytes: namePtr, count: nameLen)))
     return true
+}
+
+/// Aggregate size of the write requests arriving from the kernel.
+private struct RequestMeter {
+    private let lock = OSAllocatedUnfairLock(initialState: State())
+    private struct State { var ops = 0; var bytes = 0; var reported = 0; var largest = 0 }
+
+    func record(_ n: Int) {
+        lock.withLock { s in
+            s.ops += 1; s.bytes += n
+            if n > s.largest { s.largest = n }
+        }
+    }
+
+    func due() -> String? {
+        lock.withLock { s -> String? in
+            guard s.bytes - s.reported >= (32 << 20) else { return nil }
+            s.reported = s.bytes
+            let avg = s.ops > 0 ? s.bytes / s.ops : 0
+            return String(format: "write requests: %d calls, %.0f MB, avg %d KB, largest %d KB",
+                          s.ops, Double(s.bytes) / 1_048_576.0, avg / 1024, s.largest / 1024)
+        }
+    }
+}
+
+extension Ext4Volume {
+    fileprivate static let writeRequests = RequestMeter()
 }

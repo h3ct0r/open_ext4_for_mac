@@ -3021,6 +3021,39 @@ out:
 
 /* ------------------------------------------------------------------ data -- */
 
+/* How well file data is coalescing, which decides how many commands a copy
+ * costs on media that charges per command. Data writes only: metadata goes
+ * through the cache and is counted by the bridge's own meter, and the two
+ * together are what separate "runs are short" from "most commands are
+ * metadata". Reported every 32 MiB of file data. */
+static struct {
+    uint64_t runs;
+    uint64_t blocks;
+    uint64_t bytes;
+    uint64_t reported;
+    uint32_t longest;
+} g_run_meter;
+
+static void run_meter_record(uint32_t blocks, uint32_t bsize)
+{
+    g_run_meter.runs++;
+    g_run_meter.blocks += blocks;
+    g_run_meter.bytes  += (uint64_t)blocks * bsize;
+    if (blocks > g_run_meter.longest)
+        g_run_meter.longest = blocks;
+
+    if (g_run_meter.bytes - g_run_meter.reported < (32u << 20))
+        return;
+    g_run_meter.reported = g_run_meter.bytes;
+    bridge_logf(1, "data write runs: %llu runs, %llu MB, avg %llu blocks "
+                   "(%llu KB), longest %u blocks",
+                (unsigned long long)g_run_meter.runs,
+                (unsigned long long)(g_run_meter.bytes >> 20),
+                (unsigned long long)(g_run_meter.blocks / g_run_meter.runs),
+                (unsigned long long)((g_run_meter.bytes / g_run_meter.runs) >> 10),
+                g_run_meter.longest);
+}
+
 /* Issue a pending run of contiguous whole blocks as one command, and clear
  * it. Zero blocks is not an error: callers flush unconditionally. */
 static int bridge_flush_run(struct ext4_blockdev *bdev, uint32_t bsize,
@@ -3032,6 +3065,7 @@ static int bridge_flush_run(struct ext4_blockdev *bdev, uint32_t bsize,
 
     int r = ext4_block_writebytes(bdev, (uint64_t)first * bsize, src,
                                   (*blocks) * bsize);
+    run_meter_record(*blocks, bsize);
     *blocks = 0;
     return r;
 }
