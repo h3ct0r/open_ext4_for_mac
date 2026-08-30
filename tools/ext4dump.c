@@ -136,11 +136,16 @@ typedef struct {
      * USB stick it is minutes of silence, which is indistinguishable from a
      * hang -- and was mistaken for one.
      *
-     * `progress_total` is an estimate, not a measurement: ext4's defaults put
-     * one inode per 16 KiB at 256 bytes each, so the inode tables alone come
-     * to about a sixty-fourth of the volume, and the rest is journal and
-     * bitmaps. Close enough to be useful, so the bar is capped at 99% until
-     * the format actually returns rather than pretending otherwise.
+     * `progress_total` is an estimate, not a measurement, and it had to be
+     * re-derived once the format stopped zeroing every inode table: the old
+     * figure assumed that work and so read a finished format as 5% done,
+     * which is worse than no bar at all. What a format writes now is mostly
+     * fixed -- the two block groups that cannot be left uninitialised -- plus
+     * the descriptors, which scale with the group count. Measured across
+     * sizes: 4.3 MB at 1 GB, 4.4 at 2, 7.0 at 8, 11.3 at 32.
+     *
+     * The bar is still capped at 99% until the format returns, because an
+     * estimate that reaches 100% early is a bar that lies twice.
      */
     uint64_t written;
     uint64_t progress_total;
@@ -1425,7 +1430,11 @@ int main(int argc, char **argv)
 
     if (strcmp(cmd, "format") == 0) {
         /* Only this command is slow enough to be worth a bar. See file_ctx. */
-        fc.progress_total = dev_bytes / 62;
+        {
+            /* ~4 MiB fixed, plus ~32 KiB per 128 MiB block group. */
+            uint64_t groups = dev_bytes / (128ull << 20);
+            fc.progress_total = (4ull << 20) + groups * (32ull << 10);
+        }
         fc.progress_started = fc.progress_last = time(NULL);
 
         ext4b_format_options opts;
