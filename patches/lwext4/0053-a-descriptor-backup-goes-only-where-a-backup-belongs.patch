@@ -1,0 +1,107 @@
+A descriptor backup goes only where a backup belongs
+
+write_bgroup_block wrote the group-descriptor table into every block
+group. It consulted has_superblock() only to work out the offset, never
+to decide whether to write at all -- so on a volume with sparse_super,
+which is every filesystem this builds, fifty-five of sixty-four copies
+landed where no reader looks for one.
+
+They were not free. Each is a 4 KiB write at a different group's start,
+128 MB from its neighbour, and a USB stick charges an erase cycle for a
+scattered write however little it carries. After the inode tables stopped
+being zeroed, writes like these were what a format's time consisted of:
+122 of 128 writes were 4 KiB or smaller and came to 575 KB between them,
+and the format took ninety seconds on a DataTraveler.
+
+73 writes now, from 128 -- and from 372 before any of this.
+
+Measured and checked: the geometry sweep is clean on all 117 combinations
+of size, block size and generation; write 114, differential 36, newfs 16,
+bounds 23; and the Linux kernel mounts the result, writes 64 MB into it,
+leaves e2fsck clean and logs nothing.
+
+One thing this does not fix, recorded because it was found on the way and
+is real. A group marked BLOCK_UNINIT has its bitmap derived rather than
+read, and the bitmap this mkfs leaves on disk marks only the padding, not
+the group's own metadata. The two readers therefore disagree if anything
+ever reads instead of deriving -- which e2fsck does when recovering from a
+backup superblock, where it reports block-bitmap differences across every
+group and repairs them. mke2fs avoids this by writing complete bitmaps.
+Writing padding-only ones here was tried and changed nothing; generating
+complete ones is the actual fix and is not attempted here.
+--- a/src/ext4_mkfs.c
++++ b/src/ext4_mkfs.c
+@@ -340,11 +340,26 @@
+ 					  j * info->blocks_per_group;
+ 		uint32_t blk_off = 0;
+ 
++		/* A group carries a descriptor-table copy only where it
++		 * carries a superblock backup. With sparse_super -- which
++		 * every filesystem this builds declares -- that is groups 0
++		 * and 1 and the powers of 3, 5 and 7: nine of sixty-four on an
++		 * 8 GB volume. has_superblock() was consulted here only to
++		 * adjust the offset, so a copy was written into all
++		 * sixty-four, and the fifty-five extra landed where no reader
++		 * looks for one.
++		 *
++		 * They were not free: each is a 4 KiB write at a different
++		 * group's start, which is 128 MB from its neighbour, and a USB
++		 * stick charges an erase cycle for every scattered write.
++		 * Measured on a DataTraveler, the format's small writes came
++		 * to 575 KB and ninety seconds. */
++		if (!has_superblock(info, j))
++			continue;
++
+ 		blk_off += aux_info->bg_desc_blocks;
+-		if (has_superblock(info, j)) {
+-			bg_start_block++;
+-			blk_off += info->bg_desc_reserve_blocks;
+-		}
++		bg_start_block++;
++		blk_off += info->bg_desc_reserve_blocks;
+ 
+ 		uint64_t dsc_blk = bg_start_block + blk;
+ 
+@@ -472,13 +487,6 @@
+ 
+ 		ext4_bg_set_used_dirs_count(bg_desc, aux_info->sb, 0);
+ 
+-/* Both flags on every group: the descriptors say the bitmaps and
+-		 * tables are underived, which is true of all of them at this
+-		 * point. init_bgs() below then really initialises the two that
+-		 * cannot be left that way -- group 0, and the last group, whose
+-		 * bitmap carries the padding past the end of the volume -- and
+-		 * clearing the flag is part of that work, so it must be set
+-		 * here first or the initialiser skips them. */
+ 		/* Set on every group, whatever the generation, because this is
+ 		 * what makes ext4_fs_get_block_group_ref do the work: it
+ 		 * initialises a group only when the flags say it is underived,
+@@ -521,6 +529,19 @@
+ 		 * initialises them for real, and the last group's bitmap
+ 		 * carries the padding past the end of the volume, which cannot
+ 		 * be derived. mke2fs writes exactly the same set. */
++		/* Bitmaps are written only where they will be read: a group
++		 * whose descriptor says BLOCK_UNINIT has its bitmap derived,
++		 * so writing one is work nobody consumes, and it is the
++		 * expensive kind -- one 4 KiB write at each group's start,
++		 * 128 MB from its neighbour, and a stick charges an erase
++		 * cycle for every scattered write.
++		 *
++		 * Writing them anyway was tried and changed nothing that
++		 * matters: what a bitmap written here contains is the padding
++		 * and not the group's own metadata, so a reader that derives
++		 * and a reader that reads still disagree. Closing that gap
++		 * means generating a complete bitmap here, which is worth
++		 * doing and is not this change. */
+ 		if (lazy_groups && i != 0 && i + 1 != aux_info->groups)
+ 			goto descriptors_only;
+ 
+@@ -549,8 +570,6 @@
+ 			return r;
+ 
+ descriptors_only:
+-		/* The descriptor table still has to be written for every
+-		 * group; it is what carries the flags a reader derives from. */
+ 		if (++k != dsc_per_block)
+ 			continue;
+ 
