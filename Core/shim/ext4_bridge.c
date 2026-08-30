@@ -107,6 +107,9 @@ static uint64_t mono_ms(void)
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
 }
 
+/* Defined with the item helpers below; the mount path wants it early. */
+static struct ext4_fs *bridge_fs(ext4b_device *dev);
+
 /*
  * Where a failed lwext4 assertion goes. Patch 0026 points ext4_assert at this
  * instead of a printf to stdout: in a sandboxed appex stdout reaches no one,
@@ -757,8 +760,17 @@ int ext4b_mount(ext4b_device *dev, bool read_only)
                 dev->mounted = false;
                 return r;
             }
-            bridge_logf(1, "journal replayed in %llu ms",
-                        (unsigned long long)(mono_ms() - t0));
+            struct ext4_fs *rfs = bridge_fs(dev);
+            if (rfs && rfs->last_recovery.recovered)
+                bridge_logf(1, "journal replayed: %u transaction(s), "
+                               "%u block(s), log %u blocks, in %llu ms",
+                            rfs->last_recovery.trans_replayed,
+                            rfs->last_recovery.blocks_replayed,
+                            rfs->last_recovery.log_blocks,
+                            (unsigned long long)(mono_ms() - t0));
+            else
+                bridge_logf(1, "journal replayed in %llu ms",
+                            (unsigned long long)(mono_ms() - t0));
         }
 
         /*

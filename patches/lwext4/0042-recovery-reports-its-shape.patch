@@ -1,0 +1,102 @@
+Recovery reports its shape
+
+The incident that started this series took eight minutes to replay a
+journal, and nothing anywhere said how deep that log was: not the mount
+log, not the failure message, nothing a hardware tester could read without
+attaching a sampler to a wedged process. Recovery had all the numbers in
+hand -- the scan pass counts transactions, the replay pass touches every
+logged block, the superblock knows the log's size -- and dropped them on
+the floor.
+
+jbd_recover now publishes them on the filesystem it recovered
+(fs->last_recovery: transactions, blocks replayed, log size), zeroed at
+ext4_fs_init and set only by a successful replay. The bridge logs them
+with the duration: "journal replayed: 1674 transaction(s), 28191
+block(s), log 32768 blocks, in 812 ms" -- one line that answers where a
+slow mount's time went, in os_log on hardware and on stderr offline.
+Tests/run_replay_speed_tests.sh greps both the duration and the depth.
+
+diff --git a/include/ext4_fs.h b/include/ext4_fs.h
+--- a/include/ext4_fs.h
++++ b/include/ext4_fs.h
+@@ -67,6 +67,19 @@ struct ext4_fs {
+ 	struct jbd_fs *jbd_fs;
+ 	struct jbd_journal *jbd_journal;
+ 	struct jbd_trans *curr_trans;
++
++	/**@brief  Shape of the last journal recovery on this mount, for the
++	 *         host to log. The incident that motivated it took eight
++	 *         minutes to replay with nothing anywhere saying how deep
++	 *         the log was; a hardware-only failure without these numbers
++	 *         costs a debugging iteration per missing fact. Valid when
++	 *         `recovered` is set; zeroed by ext4_fs_init. */
++	struct {
++		uint32_t trans_replayed;
++		uint32_t blocks_replayed;
++		uint32_t log_blocks;
++		bool     recovered;
++	} last_recovery;
+ };
+ 
+ struct ext4_block_group_ref {
+diff --git a/src/ext4_fs.c b/src/ext4_fs.c
+--- a/src/ext4_fs.c
++++ b/src/ext4_fs.c
+@@ -69,6 +69,8 @@ int ext4_fs_init(struct ext4_fs *fs, struct ext4_blockdev *bdev,
+ 
+ 	fs->bdev = bdev;
+ 
++	memset(&fs->last_recovery, 0, sizeof(fs->last_recovery));
++
+ 	fs->read_only = read_only;
+ 
+ 	r = ext4_sb_read(fs->bdev, &fs->sb);
+diff --git a/src/ext4_journal.c b/src/ext4_journal.c
+--- a/src/ext4_journal.c
++++ b/src/ext4_journal.c
+@@ -87,6 +87,10 @@ struct recover_info {
+ 	 *         log to build an empty tree, and is skipped. */
+ 	uint32_t revoke_block_cnt;
+ 
++	/**@brief  Blocks the recovery pass actually replayed; exported to
++	 *         the host as the shape of the recovery. */
++	uint32_t blocks_replayed;
++
+ 	/**@brief  RB-Tree storing revoke entries.*/
+ 	RB_HEAD(jbd_revoke, revoke_entry) revoke_root;
+ 
+@@ -1358,6 +1362,8 @@ static void jbd_replay_block_tags(struct jbd_fs *jbd_fs,
+ 		have_block = true;
+ 	}
+ 
++	info->blocks_replayed++;
++
+ 	/* We need special treatment for ext4 superblock. */
+ 	if (tag_info->block) {
+ 		if (info->wb) {
+@@ -1760,6 +1766,7 @@ int jbd_recover(struct jbd_fs *jbd_fs)
+ 	info.wnd = NULL;
+ 	info.wb = NULL;
+ 	info.rc = EOK;
++	info.blocks_replayed = 0;
+ 
+ 	r = jbd_iterate_log(jbd_fs, &info, ACTION_SCAN);
+ 	if (r != EOK)
+@@ -1819,6 +1826,17 @@ int jbd_recover(struct jbd_fs *jbd_fs)
+ 		r = ext4_sb_write(jbd_fs->bdev,
+ 				  &jbd_fs->inode_ref.fs->sb);
+ 	}
++
++	/* The shape of what just happened, for the host to log. The numbers
++	 * exist either way; only a successful replay publishes them as
++	 * `recovered` (a failed one reports through its error). */
++	if (r == EOK) {
++		struct ext4_fs *fs = jbd_fs->inode_ref.fs;
++		fs->last_recovery.trans_replayed = info.trans_cnt;
++		fs->last_recovery.blocks_replayed = info.blocks_replayed;
++		fs->last_recovery.log_blocks = jbd_get32(&jbd_fs->sb, maxlen);
++		fs->last_recovery.recovered = true;
++	}
+ 	jbd_destroy_revoke_tree(&info);
+ 	return r;
+ }

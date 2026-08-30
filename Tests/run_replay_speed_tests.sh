@@ -220,11 +220,18 @@ else
 fi
 
 # The line a hardware tester will grep for. A replay that does not report its
-# duration puts the next incident back to `sample` and guesswork.
-if grep -q 'journal replayed in [0-9]* ms' "$WORK/recover.err"; then
-  ok "replay reports its duration ($(sed -n 's/.*journal replayed in \([0-9]* ms\).*/\1/p' "$WORK/recover.err" | head -1))"
+# shape puts the next incident back to `sample` and guesswork.
+if grep -q 'journal replayed.*in [0-9]* ms' "$WORK/recover.err"; then
+  ok "replay reports its duration ($(sed -n 's/.*in \([0-9]* ms\).*/\1/p' "$WORK/recover.err" | head -1))"
 else
   bad "replay finished without reporting its duration"
+fi
+depth=$(sed -n 's/.*journal replayed: \([0-9]*\) transaction(s).*/\1/p' "$WORK/recover.err" | head -1)
+if [ "${depth:-0}" -ge 500 ]; then
+  ok "replay reports its depth ($depth transactions)"
+else
+  bad "replay does not report how much it replayed" \
+      "$(grep 'journal replayed' "$WORK/recover.err" | head -1)"
 fi
 
 # ================================================================ correctness ==
