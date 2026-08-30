@@ -258,15 +258,22 @@ extension Ext4Volume: FSVolume.Operations {
         }
 
         let inode = try await executor.run { [self] in
-            var found: UInt32 = 0
-            var type = EXT4B_TYPE_UNKNOWN
-            let rc = try nameData.withUnsafeBytes { raw -> Int32 in
-                ext4b_lookup(try device, dir.inode,
-                             raw.baseAddress!.assumingMemoryBound(to: CChar.self),
-                             raw.count, &found, &type)
+            let dev = try device
+            // Exact bytes first; the other canonical form only if that misses.
+            var lastRC: Int32 = Int32(ENOENT)
+            for candidate in Self.nameCandidates(nameData) {
+                var found: UInt32 = 0
+                var type = EXT4B_TYPE_UNKNOWN
+                let rc = candidate.withUnsafeBytes { raw -> Int32 in
+                    ext4b_lookup(dev, dir.inode,
+                                 raw.baseAddress!.assumingMemoryBound(to: CChar.self),
+                                 raw.count, &found, &type)
+                }
+                if rc == 0 { return found }
+                lastRC = rc
             }
-            try Ext4Error.check(rc)
-            return found
+            try Ext4Error.check(lastRC)
+            return UInt32(0)
         }
         let found = self.item(for: inode)
         found.parent = dir.inode
@@ -449,6 +456,9 @@ extension Ext4Volume: FSVolume.Operations {
             // still points at -- the exact leak the deferral exists to prevent.
             let defer_ = isOpen(victim.inode)
             var orphaned = false
+            // The entry may be stored in the other canonical form (written on
+            // Linux, asked for by macOS); unlink the one that is really there.
+            let nameData = storedNameBytes(nameData, inDirectory: dir.inode, device: dev)
             let rc = nameData.withUnsafeBytes { raw -> Int32 in
                 ext4b_unlink_ex(dev, dir.inode,
                                 raw.baseAddress!.assumingMemoryBound(to: CChar.self),
@@ -481,6 +491,14 @@ extension Ext4Volume: FSVolume.Operations {
 
         try await executor.run { [self] in
             let dev = try device
+            // The source must already exist, so resolve it to the form on
+            // disk. The destination is resolved too, but only when something
+            // is already there: replacing "name" must overwrite the entry
+            // that is present rather than leave it beside a new one, while a
+            // destination that does not exist keeps the caller's bytes and is
+            // created exactly as asked.
+            let srcData = storedNameBytes(srcData, inDirectory: src.inode, device: dev)
+            let dstData = storedNameBytes(dstData, inDirectory: dst.inode, device: dev)
             let rc = srcData.withUnsafeBytes { s -> Int32 in
                 dstData.withUnsafeBytes { d -> Int32 in
                     ext4b_rename(dev,
@@ -509,6 +527,63 @@ extension Ext4Volume: FSVolume.Operations {
     /// ext4 names are raw byte strings, not Unicode. Take the bytes FSKit gives
     /// us verbatim rather than round-tripping through String, so names that are
     /// not valid UTF-8 still work.
+    /// The byte forms a name might be stored under.
+    ///
+    /// ext4 stores the bytes it was given and compares them exactly, which is
+    /// what Linux does and what this driver does. macOS does not: everything
+    /// above the syscall layer -- Finder first among them -- resolves paths in
+    /// the decomposed form HFS+ imposed and APFS still normalises against. So
+    /// a file written on Linux as "Português" (U+00EA, precomposed) is
+    /// *displayed* by Finder and then asked for as "Portugue" + U+0302, which
+    /// is a different sequence of bytes and genuinely not in the directory.
+    /// Finder reports that as "one or more required items can't be found"
+    /// (-43); folders fail to resolve at all, and a copy onto the volume can
+    /// report a name collision against an entry it cannot then open.
+    ///
+    /// Resolving an existing entry therefore tries the caller's bytes first --
+    /// always, so an exact match wins and two entries differing only in form
+    /// stay distinct and separately reachable -- and falls back to the other
+    /// canonical form. Creation is untouched: a new name is stored exactly as
+    /// given, so nothing here rewrites what lands on the medium.
+    ///
+    /// ASCII names cannot differ between forms, so they keep the single-lookup
+    /// fast path: this only ever costs a second lookup for a non-ASCII name
+    /// that was not found the first time.
+    static func nameCandidates(_ data: Data) -> [Data] {
+        guard data.contains(where: { $0 >= 0x80 }),
+              let s = String(data: data, encoding: .utf8) else { return [data] }
+        var out = [data]
+        for alt in [s.precomposedStringWithCanonicalMapping,
+                    s.decomposedStringWithCanonicalMapping] {
+            let d = Data(alt.utf8)
+            if !out.contains(d) { out.append(d) }
+        }
+        return out
+    }
+
+    /// The bytes this directory actually stores for `data`, for operations
+    /// that act on an entry that must already exist. Falls back to the
+    /// caller's bytes when nothing matches, so the operation fails with the
+    /// error it would have produced anyway.
+    ///
+    /// Must be called from inside the executor: it reaches into the core.
+    func storedNameBytes(_ data: Data, inDirectory dirInode: UInt32,
+                         device dev: OpaquePointer) -> Data {
+        let candidates = Self.nameCandidates(data)
+        guard candidates.count > 1 else { return data }
+        for candidate in candidates {
+            var found: UInt32 = 0
+            var type = EXT4B_TYPE_UNKNOWN
+            let rc = candidate.withUnsafeBytes { raw -> Int32 in
+                ext4b_lookup(dev, dirInode,
+                             raw.baseAddress!.assumingMemoryBound(to: CChar.self),
+                             raw.count, &found, &type)
+            }
+            if rc == 0 { return candidate }
+        }
+        return data
+    }
+
     static func nameBytes(_ name: FSFileName) throws -> Data {
         guard let data = name.data as Data?, !data.isEmpty else {
             throw Ext4Error.invalid

@@ -323,6 +323,73 @@ else
 fi
 rm -rf "$MNT/openunlink" 2>/dev/null
 
+# ========================= stage 0b2: accented names written elsewhere ==
+#
+# ext4 stores the bytes of a name and compares them exactly. macOS does not:
+# above the syscall layer it resolves paths in the decomposed form HFS+
+# imposed, so a file written on Linux as "Português" (precomposed U+00EA) is
+# displayed by Finder and then asked for as "e" + U+0302 -- different bytes,
+# genuinely absent from the directory. Finder called that "one or more
+# required items can't be found" (-43) on a real 30 MB .pptx; accented
+# FOLDERS could not be resolved at all, which took a whole directory tree
+# with them. Lookup now tries the caller's bytes first and the other
+# canonical form only if that misses, so both spellings reach one entry
+# while exact matches still win. Only a real mount exercises this -- the
+# offline tool never sees macOS's normalisation.
+note ""
+note "stage 0b2: names written on Linux resolve the way macOS asks for them"
+note ""
+
+if python3 - "$MNT" <<'NAMES'
+import os, sys, unicodedata
+M = sys.argv[1]
+d = os.path.join(M, "names"); os.makedirs(d, exist_ok=True)
+ok = True
+
+nfc = "Relatório Português.pptx"          # what Linux and Office write
+nfd = unicodedata.normalize("NFD", nfc)   # what macOS asks with
+with open(os.path.join(d, nfc), "wb") as f: f.write(b"P" * 4096)
+
+if not os.path.exists(os.path.join(d, nfc)):
+    print("    the name it was created with does not resolve"); ok = False
+if not os.path.exists(os.path.join(d, nfd)):
+    print("    the decomposed form macOS uses does not resolve"); ok = False
+
+# The reverse direction too: created decomposed, asked for precomposed.
+with open(os.path.join(d, unicodedata.normalize("NFD", "Ação.txt")), "wb") as f:
+    f.write(b"A")
+if not os.path.exists(os.path.join(d, "Ação.txt")):
+    print("    a decomposed name does not resolve precomposed"); ok = False
+
+# Both spellings must reach ONE entry, not two.
+entries = [e for e in os.listdir(d) if e.startswith(("Relat", "Ac", "Aç"))]
+if len(entries) != 2:
+    print(f"    expected 2 entries, found {len(entries)}: {entries}"); ok = False
+
+# Writing through the other spelling must land in the SAME file, not beside
+# it. This is the half users feel: open("...ê...") from an app that composes
+# differently than the one that wrote the file has to be the same document.
+with open(os.path.join(d, nfd), "wb") as f: f.write(b"D" * 8192)
+if os.path.getsize(os.path.join(d, nfc)) != 8192:
+    print("    writing the decomposed name did not reach the same file"); ok = False
+if len([e for e in os.listdir(d) if e.startswith("Relat")]) != 1:
+    print("    writing the other spelling created a second entry"); ok = False
+
+# Deleting by the form macOS uses must remove the entry that is there.
+os.unlink(os.path.join(d, nfd))
+os.unlink(os.path.join(d, unicodedata.normalize("NFD", "Ação.txt")))
+if os.listdir(d):
+    print(f"    unlink by the decomposed name left {os.listdir(d)}"); ok = False
+
+sys.exit(0 if ok else 1)
+NAMES
+then
+  ok "accented names resolve in either canonical form, exact match first"
+else
+  bad "accented names resolve in either canonical form, exact match first"
+fi
+rm -rf "$MNT/names" 2>/dev/null
+
 # ============================== stage 0c: a crash with one still deleted-open ==
 #
 # The interesting moment is the one stage 0b steps over: the descriptor is
