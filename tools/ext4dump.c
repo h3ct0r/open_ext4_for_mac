@@ -33,6 +33,19 @@ typedef struct {
 
 typedef struct {
     int fd;
+
+    /* Sector size the medium insists on, or 0 when it does not care.
+     *
+     * A raw character device (/dev/rdiskN) accepts only transfers that start
+     * on a sector boundary and are a whole number of sectors; the buffered
+     * node (/dev/diskN) accepts anything and pays for it. Formatting an 8 GB
+     * volume on a USB stick through the buffered node ran at 0.4 MB/s -- five
+     * minutes for 129 MB that the raw node moves in seconds -- because every
+     * transfer goes through the block layer a sector at a time. So the tool
+     * aligns its own I/O and uses the fast node: whole-sector transfers pass
+     * straight through, and the few that are not (the superblock lives at
+     * offset 1024) become a read-modify-write of the sectors they touch. */
+    uint32_t align;
     /*
      * Power-failure simulation. After `fail_after` successful writes, every
      * later write is silently discarded while still reporting success.
@@ -428,6 +441,64 @@ static void media_charge(file_ctx *c, size_t len)
     }
 }
 
+/* pread/pwrite that respect the medium's transfer rules. With align == 0, or
+ * a request that already lands on sector boundaries, these are the bare
+ * syscalls. Otherwise the surrounding sectors are read, patched and written
+ * back -- correct on any device, and only reached by the handful of
+ * sub-sector writes a format performs. */
+static int aligned_pread(file_ctx *c, void *buf, uint64_t off, size_t len)
+{
+    uint32_t a = c->align;
+    if (a <= 1 || ((off % a) == 0 && (len % a) == 0))
+        return pread(c->fd, buf, len, (off_t)off) == (ssize_t)len ? 0 : EIO;
+
+    uint64_t first = off - (off % a);
+    uint64_t last  = ((off + len + a - 1) / a) * a;
+    size_t   span  = (size_t)(last - first);
+
+    uint8_t *tmp = malloc(span);
+    if (!tmp)
+        return ENOMEM;
+
+    int rc = 0;
+    if (pread(c->fd, tmp, span, (off_t)first) != (ssize_t)span)
+        rc = EIO;
+    else
+        memcpy(buf, tmp + (off - first), len);
+
+    free(tmp);
+    return rc;
+}
+
+static int aligned_pwrite(file_ctx *c, const void *buf, uint64_t off, size_t len)
+{
+    uint32_t a = c->align;
+    if (a <= 1 || ((off % a) == 0 && (len % a) == 0))
+        return pwrite(c->fd, buf, len, (off_t)off) == (ssize_t)len ? 0 : EIO;
+
+    uint64_t first = off - (off % a);
+    uint64_t last  = ((off + len + a - 1) / a) * a;
+    size_t   span  = (size_t)(last - first);
+
+    uint8_t *tmp = malloc(span);
+    if (!tmp)
+        return ENOMEM;
+
+    int rc = 0;
+    /* Read first: the sectors at the edges carry bytes this write does not
+     * own, and writing them back as anything else would corrupt them. */
+    if (pread(c->fd, tmp, span, (off_t)first) != (ssize_t)span) {
+        rc = EIO;
+    } else {
+        memcpy(tmp + (off - first), buf, len);
+        if (pwrite(c->fd, tmp, span, (off_t)first) != (ssize_t)span)
+            rc = EIO;
+    }
+
+    free(tmp);
+    return rc;
+}
+
 static int file_read(void *ctx, void *buf, uint64_t off, size_t len)
 {
     file_ctx *c = ctx;
@@ -449,9 +520,9 @@ static int file_read(void *ctx, void *buf, uint64_t off, size_t len)
         return EIO;
     }
     media_charge(c, len);
-    ssize_t n = pread(c->fd, buf, len, (off_t)off);
-    if (n != (ssize_t)len)
-        return EIO;
+    int rrc = aligned_pread(c, buf, off, len);
+    if (rrc != 0)
+        return rrc;
 
     if (c->cache_bytes)
         cache_overlay(c, buf, off, len);
@@ -505,8 +576,7 @@ static int file_write(void *ctx, const void *buf, uint64_t off, size_t len)
         return cache_append(c, (uint64_t)seq, off, buf, len);
     }
 
-    ssize_t n = pwrite(c->fd, buf, len, (off_t)off);
-    return (n == (ssize_t)len) ? 0 : EIO;
+    return aligned_pwrite(c, buf, off, len);
 }
 
 /* A real write barrier, which on macOS fsync() is not.
@@ -1275,6 +1345,12 @@ int main(int argc, char **argv)
         if (ioctl(fd, DKIOCGETBLOCKSIZE, &sector) == 0 &&
             ioctl(fd, DKIOCGETBLOCKCOUNT, &sectors) == 0) {
             dev_bytes = sectors * (uint64_t)sector;
+            /* A raw character device transfers whole sectors only. Recording
+             * the size here is what lets the tool address /dev/rdiskN, which
+             * is the difference between a format that streams and one that
+             * crawls through the buffered node a sector at a time. */
+            if (S_ISCHR(st.st_mode) && sector > 1)
+                fc.align = sector;
         } else {
             perror("DKIOCGETBLOCKCOUNT");
             return 1;

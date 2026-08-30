@@ -612,4 +612,44 @@ install: sign
 # registration survives.
 	@rsync -a --delete "$(BUILD)/$(APP_NAME).app/" "/Applications/$(APP_NAME).app/"
 	@echo "installed to /Applications/$(APP_NAME).app"
-	@echo "Enable it in System Settings > General > Login Items & Extensions > File System Extensions"
+# Make sure the module is registered, and say which state it is in.
+#
+# Replacing the bundle wholesale loses the registration -- and a lost
+# registration does not show up in System Settings as "off", it does not show
+# up at all, so the old advice to go and enable it pointed at an empty list.
+# rsync above keeps it whenever it only rewrites the changed files, which is
+# the steady state; what loses it is an install whose every file differs, as
+# when the same tree is built somewhere else.
+#
+# The lever is not pluginkit. This is an ExtensionKit extension
+# (EXAppExtensionAttributes in the manifest), and pluginkit -a registers it
+# in the legacy world where FSKit never looks: it reports success, lists the
+# module with a null version, and the module stays invisible. What actually
+# registers it is the containing app running -- so if the module is missing,
+# launch it once, in the background, hidden.
+#
+# Approval stays the user's: nothing here can grant it, which is the point of
+# it. So this ends by reporting which of the two is missing rather than
+# printing the same "enable it" line whether or not anything is needed.
+	@state="$$(bash scripts/check_extension.sh 2>&1 || true)"; \
+	if ! printf '%s' "$$state" | grep -qi 'known to FSKit *yes'; then \
+	  echo "FSKit does not know the module yet; launching the app once to register it"; \
+	  open -g -j -a "/Applications/$(APP_NAME).app" 2>/dev/null || true; \
+	  sleep 4; \
+	  state="$$(bash scripts/check_extension.sh 2>&1 || true)"; \
+	fi; \
+	if printf '%s' "$$state" | grep -qi 'enabled and answering *yes'; then \
+	  echo "the extension is registered and enabled; nothing else to do"; \
+	elif printf '%s' "$$state" | grep -qi 'known to FSKit *yes'; then \
+	  echo ""; \
+	  echo "the extension is registered but NOT enabled yet -- only you can"; \
+	  echo "grant that:"; \
+	  echo "    System Settings > General > Login Items & Extensions"; \
+	  echo "      > File System Extensions  ->  open_ext4 (ext2/3/4)"; \
+	  echo ""; \
+	  echo "then check with: make check-extension"; \
+	else \
+	  echo ""; \
+	  echo "the module is installed but FSKit still does not list it."; \
+	  echo "Run 'make check-extension' for the diagnosis."; \
+	fi

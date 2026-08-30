@@ -66,9 +66,16 @@ sudo make prepare-device DEVICE=diskN CONFIRM=ERASE EXT4_SIZE=8g
 
 `EXT4_SIZE=8g` deliberately: the pull-test autopsy `dd`s the whole
 partition, and a full-disk partition on a 64 GB stick turns each autopsy
-into an hour. Formatting through `ext4dump` on real media: use the buffered
-node (`/dev/diskN`), not the raw one — the tool does not promise the aligned
-transfers the character device requires.
+into an hour.
+
+Formatting goes through the **raw** node (`/dev/rdiskN`) now, falling back
+to the buffered one if a device refuses it. The buffered node routes every
+transfer through the block layer a sector at a time: an 8 GB volume
+measured **0.4 MB/s** on a USB stick, five minutes to write 129 MB that the
+medium can stream in seconds. The tool aligns its own transfers, which is
+what a character device requires — a format's one sub-sector write is the
+superblock at offset 1024, and it now becomes a read-modify-write of the
+sector holding it.
 
 ## 2. The ladder
 

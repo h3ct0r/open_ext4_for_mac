@@ -135,8 +135,25 @@ format_directly() {
   echo "formatting $PART as ext4 directly..."
   diskutil unmountDisk force "$DEVICE" >/dev/null 2>&1
   sleep 1
-  "$DUMP" "/dev/$PART" format 4 || die "format failed"
-  "$DUMP" "/dev/$PART" label "$LABEL" >/dev/null 2>&1
+  # The raw node first, the buffered one only if it refuses.
+  #
+  # /dev/diskN routes every transfer through the block layer a sector at a
+  # time: an 8 GB volume measured 0.4 MB/s on a USB stick -- five minutes to
+  # write 129 MB that the medium itself could stream in seconds. /dev/rdiskN
+  # goes straight to the device, and the tool now aligns its own transfers
+  # (the superblock at offset 1024 is the one write a format makes that is
+  # not a whole sector), which is what a character device requires.
+  #
+  # Attempted rather than assumed: alignment rules vary by device, and a
+  # format that fails outright would be a worse trade than a slow one.
+  if "$DUMP" "/dev/r$PART" format 4; then
+    NODE="/dev/r$PART"
+  else
+    echo "  the raw node refused; falling back to the buffered node (slower)"
+    NODE="/dev/$PART"
+    "$DUMP" "$NODE" format 4 || die "format failed"
+  fi
+  "$DUMP" "$NODE" label "$LABEL" >/dev/null 2>&1
 }
 
 if [ "$PD_OK" = yes ]; then
