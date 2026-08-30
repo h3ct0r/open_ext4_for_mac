@@ -291,6 +291,10 @@ struct jbd_replay_wb {
 
 	/**@brief  Batch capacity, blocks. */
 	uint32_t cap;
+
+	/**@brief  Checkpointing, not replaying: a dirty resident belongs to
+	 *         a newer transaction and outranks the copy being written. */
+	bool checkpoint;
 };
 
 /**@brief  How much replayed data may wait for write-back. The batch is
@@ -321,12 +325,29 @@ static int jbd_wb_cmp(const void *__a, const void *__b)
  *         slow: released dirty, it would be flushed over the replayed
  *         data afterwards. */
 static void jbd_replay_wb_sync_bcache(struct ext4_blockdev *bdev,
-				      uint64_t lba, const void *data)
+				      uint64_t lba, const void *data,
+				      bool checkpoint)
 {
 	struct ext4_block b;
 	struct ext4_buf *buf = ext4_bcache_find_get(bdev->bc, &b, lba);
 	if (!buf)
 		return;
+
+	/* During recovery the log is the newest truth and a dirty resident
+	 * is pre-crash garbage: overwrite it. During a checkpoint the
+	 * ranking is reversed. A resident that is dirty while an older
+	 * transaction's copy is being checkpointed holds a NEWER version,
+	 * journaled by a later transaction still on the queue -- its flush
+	 * writes it home after ours. Overwriting it here replaced the
+	 * newest copy of a hot block with the oldest everywhere but that
+	 * later transaction's log blocks, which nothing subsequently read:
+	 * the block then landed one transaction stale under a green unmount
+	 * (measured: a mounted volume lost a mkdir's link-count increment
+	 * to the root inode -- the most re-journaled block there is). */
+	if (checkpoint && ext4_bcache_test_flag(buf, BC_DIRTY)) {
+		ext4_block_set(bdev, &b);
+		return;
+	}
 
 	memcpy(buf->data, data, bdev->lg_bsize);
 	ext4_bcache_set_flag(buf, BC_UPTODATE);
@@ -381,7 +402,8 @@ static int jbd_replay_wb_flush(struct jbd_fs *jbd_fs,
 			const void *src =
 				wb->data + (size_t)order[k].idx * bs;
 			memcpy(wb->gather + (size_t)(k - i) * bs, src, bs);
-			jbd_replay_wb_sync_bcache(bdev, order[k].lba, src);
+			jbd_replay_wb_sync_bcache(bdev, order[k].lba, src,
+						  wb->checkpoint);
 		}
 
 		rc = ext4_blocks_set_direct(bdev, wb->gather,
@@ -2008,6 +2030,7 @@ static int jbd_journal_flush_trans(struct jbd_trans *trans)
 		jbd_replay_wb_free(wb);
 		return jbd_journal_flush_trans_slow(trans);
 	}
+	wb->checkpoint = true;
 
 	/* Collect: no completion runs in this phase, so the walk is safe. */
 	TAILQ_FOREACH(jbd_buf, &trans->buf_queue, buf_node) {
