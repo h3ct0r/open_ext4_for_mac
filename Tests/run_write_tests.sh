@@ -525,6 +525,39 @@ else
   bad "checkpoint-ordering script ran" "ext4dump script failed"
 fi
 
+# ================== growing a file must not publish old blocks ==
+# "Growing leaves a hole, and a hole reads as zeroes" is true only where
+# nothing is allocated. Blocks past i_size routinely are: an append asks the
+# extent layer for a run of whole blocks, the write fills part of the last
+# one, and i_size comes back down to the bytes written -- so the tail of that
+# block, and anything the run allocated beyond it, stay mapped holding
+# whatever their previous owner left. Moving i_size back up published it.
+# Measured before the fix: the deleted file's bytes were readable at 5000..8191.
+echo
+echo "growing a file"
+leak_img="$TMP/grow.img"
+rm -f "$leak_img"; dd if=/dev/zero of="$leak_img" bs=1m count=64 2>/dev/null
+"$DUMP" "$leak_img" format 4 >/dev/null 2>&1
+python3 -c "open('$TMP/pattern.bin','wb').write(b'OLD-OWNER-BYTES-HERE!!!!'*(4*1024*1024//24))"
+python3 -c "open('$TMP/short.bin','wb').write(b'C'*5000)"
+"$DUMP" "$leak_img" create /old >/dev/null 2>&1
+"$DUMP" "$leak_img" put /old "$TMP/pattern.bin" >/dev/null 2>&1
+"$DUMP" "$leak_img" rm /old >/dev/null 2>&1
+"$DUMP" "$leak_img" create /new >/dev/null 2>&1
+"$DUMP" "$leak_img" put /new "$TMP/short.bin" >/dev/null 2>&1
+"$DUMP" "$leak_img" truncate /new 8192 >/dev/null 2>&1
+"$DUMP" "$leak_img" cat /new > "$TMP/grow_read.bin" 2>/dev/null
+if python3 -c "
+import sys
+d=open('$TMP/grow_read.bin','rb').read()
+sys.exit(0 if (len(d)==8192 and b'OLD-OWNER' not in d and set(d[5000:])<={0}) else 1)"; then
+  ok "growing a file over allocated blocks reads as zeroes, not old data"
+else
+  bad "growing a file over allocated blocks reads as zeroes, not old data" \
+      "the previous owner's bytes were readable past the old EOF"
+fi
+IMG="$leak_img"; fsck_clean "after truncate-grow" && ok "e2fsck clean after truncate-grow"
+
 # ==================================================================== report ==
 echo
 echo "─────────────────────────────────"

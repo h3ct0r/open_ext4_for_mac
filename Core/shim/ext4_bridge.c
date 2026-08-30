@@ -3065,6 +3065,17 @@ static int bridge_flush_run(struct ext4_blockdev *bdev, uint32_t bsize,
 
     int r = ext4_block_writebytes(bdev, (uint64_t)first * bsize, src,
                                   (*blocks) * bsize);
+    /* File data goes straight to the medium, so a block that happens to be
+     * resident in the cache now holds pre-write bytes -- and the partial
+     * head/tail path below reads through the cache, where it would find
+     * them. Refresh rather than invalidate: a resident buffer may be dirty
+     * with metadata, and these are the newest bytes for this block either
+     * way. Costs one lookup per block, no I/O. */
+    if (r == EOK) {
+        for (uint32_t i = 0; i < *blocks; i++)
+            ext4_bcache_update_if_cached(bdev->bc, first + i, 0,
+                                         src + (size_t)i * bsize, bsize);
+    }
     run_meter_record(*blocks, bsize);
     *blocks = 0;
     return r;
@@ -3221,6 +3232,12 @@ int ext4b_write(ext4b_device *dev,
                 uint32_t n = mapped * bsize;
                 r = ext4_block_writebytes(&dev->bdev,
                                           (uint64_t)at * bsize, src, n);
+                if (r == EOK) {
+                    for (uint32_t i = 0; i < mapped; i++)
+                        ext4_bcache_update_if_cached(dev->bdev.bc, at + i, 0,
+                                                     src + (size_t)i * bsize,
+                                                     bsize);
+                }
                 run_meter_record(mapped, bsize);
                 if (r != EOK)
                     break;
@@ -3314,6 +3331,8 @@ int ext4b_write(ext4b_device *dev,
                                       src, chunk);
             if (r != EOK)
                 break;
+            ext4_bcache_update_if_cached(dev->bdev.bc, fblk, in_off, src,
+                                         chunk);
             *out_written += chunk;
         }
 
@@ -3365,6 +3384,83 @@ int ext4b_write(ext4b_device *dev,
     return txn_finish(dev, fs, r);
 }
 
+/* Zero what a grow would otherwise expose.
+ *
+ * "Growing leaves a hole" is true only where nothing is allocated. Blocks
+ * past i_size routinely are: an append asks the extent layer for a run and
+ * gets whole blocks, the write fills part of the last one, and i_size comes
+ * back down to the bytes actually written -- leaving the tail of that block,
+ * and any blocks the run allocated beyond it, mapped and holding whatever
+ * their previous owner left there. Moving i_size back up over them publishes
+ * it. Measured: write a file of a recognisable pattern, delete it, write
+ * 5000 bytes to a new file and truncate that to 8192, and the deleted file's
+ * bytes are readable at offsets 5000..8191.
+ *
+ * So the newly-covered range is zeroed wherever it is backed. Holes are left
+ * alone -- they read as zeros already -- and the walk stops at the first one,
+ * which is what keeps a grow to a huge size from touching a million
+ * mappings: allocation past EOF is contiguous with the tail. */
+static int zero_exposed_range(ext4b_device *dev, struct ext4_fs *fs,
+                              struct ext4_inode_ref *ref,
+                              uint64_t from, uint64_t to)
+{
+    const uint32_t bsize = ext4_sb_get_block_size(&fs->sb);
+    uint8_t *zeros = ext4_calloc(1, bsize);
+    if (!zeros)
+        return ENOMEM;
+
+    int r = EOK;
+    uint64_t pos = from;
+    while (pos < to) {
+        uint32_t lblk = (uint32_t)(pos / bsize);
+        uint32_t in_off = (uint32_t)(pos % bsize);
+        uint32_t chunk = bsize - in_off;
+        if (chunk > to - pos)
+            chunk = (uint32_t)(to - pos);
+
+        ext4_fsblk_t fblk = 0;
+        uint32_t mapped = 0;
+        bool unwritten = false;
+
+        if (ext4_inode_has_flag(ref->inode, EXT4_INODE_FLAG_EXTENTS)) {
+            uint32_t want = (uint32_t)((to - pos + bsize - 1) / bsize);
+            r = ext4_extent_map_range(ref, lblk, want, &fblk, &mapped,
+                                      &unwritten);
+            if (r != EOK)
+                break;
+        } else {
+            r = ext4_fs_get_inode_dblk_idx(ref, lblk, &fblk, true);
+            if (r != EOK)
+                break;
+            mapped = fblk ? 1 : 0;
+        }
+
+        /* A hole, or an unwritten extent: both already read as zeros, and
+         * nothing after a hole can be backed by this file's allocation. */
+        if (fblk == 0 || mapped == 0 || unwritten)
+            break;
+
+        for (uint32_t i = 0; i < mapped && pos < to; i++) {
+            uint32_t off = (i == 0) ? in_off : 0;
+            uint32_t n = bsize - off;
+            if (n > to - pos)
+                n = (uint32_t)(to - pos);
+
+            r = ext4_block_writebytes(&dev->bdev,
+                                      (uint64_t)(fblk + i) * bsize + off,
+                                      zeros, n);
+            if (r != EOK)
+                goto out;
+            ext4_bcache_update_if_cached(dev->bdev.bc, fblk + i, off, zeros, n);
+            pos += n;
+        }
+    }
+
+out:
+    ext4_free(zeros);
+    return r;
+}
+
 int ext4b_truncate(ext4b_device *dev, uint32_t inode, uint64_t new_size)
 {
     WRITE_PROLOGUE(dev, fs);
@@ -3393,10 +3489,13 @@ int ext4b_truncate(ext4b_device *dev, uint32_t inode, uint64_t new_size)
     if (new_size < old_size) {
         r = ext4_fs_truncate_inode(&ref, new_size);
     } else if (new_size > old_size) {
-        /* Growing leaves a hole: no blocks are allocated, and the region
-         * reads back as zeroes. */
-        ext4_inode_set_size(ref.inode, new_size);
-        ref.dirty = true;
+        /* Only a hole reads back as zeroes; anything already allocated past
+         * i_size holds its previous owner's bytes until this clears them. */
+        r = zero_exposed_range(dev, fs, &ref, old_size, new_size);
+        if (r == EOK) {
+            ext4_inode_set_size(ref.inode, new_size);
+            ref.dirty = true;
+        }
     }
 
     if (r == EOK && new_size != old_size)
