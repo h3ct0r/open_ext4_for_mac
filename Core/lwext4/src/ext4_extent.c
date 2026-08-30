@@ -1071,6 +1071,11 @@ static int ext4_ext_split_node(struct ext4_inode_ref *inode_ref,
 		if (ret != EOK)
 			goto cleanup;
 
+		/* Only the header and the entries moved here are written; the
+		 * rest of the block would otherwise go to the medium as
+		 * whatever the cache slot last held. */
+		memset(bh.data, 0, ext4_sb_get_block_size(&inode_ref->fs->sb));
+
 		if (i == depth) {
 			/* start copy from next extent */
 			int m = EXT_MAX_EXTENT(path[i].header) - path[i].extent;
@@ -1419,6 +1424,14 @@ static int ext4_ext_grow_indepth(struct ext4_inode_ref *inode_ref,
 
 	/* # */
 	err = ext4_trans_block_get_noread(inode_ref->fs->bdev, &bh, newblock);
+	if (err == EOK) {
+		/* _noread hands back whatever the cache slot held. Only the
+		 * first 60 bytes are written below, so without this the rest
+		 * of the block reaches the medium as recycled heap -- another
+		 * file's data, in the general case -- and the block's checksum
+		 * is computed over it. */
+		memset(bh.data, 0, ext4_sb_get_block_size(&inode_ref->fs->sb));
+	}
 	if (err != EOK) {
 		ext4_ext_free_blocks(inode_ref, newblock, 1, 0);
 		return err;

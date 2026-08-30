@@ -984,6 +984,14 @@ static int ext4_dir_dx_split_data(struct ext4_inode_ref *inode_ref,
 	struct ext4_block new_data_block_tmp;
 	rc = ext4_trans_block_get_noread(inode_ref->fs->bdev, &new_data_block_tmp,
 				   new_fblock);
+	if (rc == EOK) {
+		/* The same rule the leaf initialiser above states: _noread
+		 * returns the cache slot's previous contents, only the entries
+		 * moved here are written, and the last one's rec_len is
+		 * stretched to cover the remainder -- so anything left in it
+		 * is both written to disk and covered by the checksum. */
+		memset(new_data_block_tmp.data, 0, block_size);
+	}
 	if (rc != EOK) {
 		ext4_free(sort);
 		ext4_free(entry_buffer);
@@ -1137,7 +1145,10 @@ ext4_dir_dx_split_index(struct ext4_inode_ref *ino_ref,
 		struct ext4_dir_idx_node *new_node = (void *)b.data;
 		struct ext4_dir_idx_entry *new_en = new_node->entries;
 
-		memset(&new_node->fake, 0, sizeof(struct ext4_fake_dir_entry));
+		/* Clear the whole node, not just its fake entry: the entries
+		 * past the ones copied in below are otherwise recycled heap on
+		 * the medium. */
+		memset(new_node, 0, block_size);
 		new_node->fake.entry_length = block_size;
 
 		/* Split leaf node */
