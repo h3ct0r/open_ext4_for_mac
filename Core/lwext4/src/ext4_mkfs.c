@@ -964,10 +964,25 @@ int ext4_mkfs(struct ext4_fs *fs, struct ext4_blockdev *bd,
 		goto fs_fini;
 
 	fs_fini:
-	ext4_fs_fini(fs);
+	{
+		/* Teardown IS the write path here: the whole filesystem was
+		 * built in write-back mode, fs_fini writes the superblock and
+		 * leaving write-back mode flushes everything else. Their
+		 * results were discarded, so a format whose writes never
+		 * landed still reported success -- "created ext4 volume"
+		 * over a medium holding nothing of the sort. The first error
+		 * wins; teardown still runs to the end. */
+		int fr = ext4_fs_fini(fs);
+		if (r == EOK)
+			r = fr;
+	}
 
 	cache_fini:
-	ext4_block_cache_write_back(bd, 0);
+	{
+		int cr = ext4_block_cache_write_back(bd, 0);
+		if (r == EOK)
+			r = cr;
+	}
 	ext4_bcache_fini_dynamic(&bc);
 
 	block_fini:
