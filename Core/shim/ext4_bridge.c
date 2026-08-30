@@ -3191,10 +3191,28 @@ int ext4b_write(ext4b_device *dev,
              */
             while (have_blocks <= lblk) {
                 uint32_t appended = 0;
-                r = ext4_fs_append_inode_dblk(&ref, &fblk, &appended);
+                uint32_t got = 0;
+                /* At the block this write actually needs, ask for the whole
+                 * rest of it. One mapping call then covers the run: the
+                 * blocks come from one allocation, and if they were
+                 * preallocated -- which is what macOS does before a large
+                 * copy -- the unwritten extent is converted, and zeroed, in
+                 * one step instead of one command per block. Blocks being
+                 * walked over to reach a sparse offset still go one at a
+                 * time; they are holes, and nothing is written to them. */
+                uint32_t want = 1;
+                if (have_blocks == lblk) {
+                    uint64_t need = (remaining + bsize - 1) / bsize;
+                    if (need > UINT32_MAX)
+                        need = UINT32_MAX;
+                    if (need > 1)
+                        want = (uint32_t)need;
+                }
+                r = ext4_fs_append_inode_dblk_range(&ref, &fblk, &appended,
+                                                    want, &got);
                 if (r != EOK)
                     break;
-                have_blocks++;
+                have_blocks += got;
             }
         }
         if (r != EOK)
