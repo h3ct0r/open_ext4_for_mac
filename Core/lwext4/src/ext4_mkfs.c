@@ -749,16 +749,31 @@ static int create_journal_inode(struct ext4_fs *fs,
 
 	blocks_count = ext4_inode_get_blocks_count(&fs->sb, inode);
 
-	while (blocks_count++ < info->journal_blocks)
+	/* The journal is the largest allocation a format makes -- up to 32,768
+	 * blocks -- and asking for them one at a time meant 32,768 extent-tree
+	 * walks and bitmap operations, and an extent tree as fragmented as the
+	 * request pattern. The run form allocates as many as the extent layer
+	 * can give at once, which on a fresh filesystem is a long contiguous
+	 * stretch: fewer walks, and a journal laid down as a few extents, which
+	 * is also what lets recovery read it back through a window. */
+	while (blocks_count < info->journal_blocks)
 	{
 		ext4_fsblk_t fblock;
 		ext4_lblk_t iblock;
 		struct ext4_block blk;
+		uint32_t got = 0;
 
-		ret = ext4_fs_append_inode_dblk(&inode_ref, &fblock, &iblock);
+		ret = ext4_fs_append_inode_dblk_range(&inode_ref, &fblock, &iblock,
+						      info->journal_blocks -
+							      blocks_count,
+						      &got);
 		if (ret != EOK)
 			goto Finish;
 
+		blocks_count += got;
+
+		/* Journal block 0 carries the jbd superblock. It is the first
+		 * block of the first run, and only of that run. */
 		if (iblock != 0)
 			continue;
 
