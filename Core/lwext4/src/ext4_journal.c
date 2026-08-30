@@ -2162,6 +2162,21 @@ jbd_journal_purge_cp_trans(struct jbd_journal *journal,
 				if (jbd_journal_flush_trans(trans) != EOK)
 					break;
 				flushed = true;
+				/* The flush completed every buffer, but 0041
+				 * lifts the transaction off this queue for the
+				 * completion drain, so no completion saw itself
+				 * as head and none advanced the tail. Re-inspect
+				 * rather than returning: the transaction is now
+				 * fully written, and the branch above retires it
+				 * and moves the tail -- which is the free log
+				 * space this purge was called to produce. The
+				 * caller checks for that space immediately
+				 * (jbd_journal_alloc_block), so leaving the
+				 * retirement to some later purge meant a ring
+				 * that never drained: sustained small-file work
+				 * filled it and every later operation failed
+				 * with ENOSPC on a volume 17% full. */
+				continue;
 			}
 		}
 		if (once)
