@@ -133,7 +133,15 @@ awk 'BEGIN{
 dirty_ok=""
 for kill_after in 20 40 80; do
   cp "$WORK/bench.img" "$WORK/dirty.img"
-  "$DUMP" "$WORK/dirty.img" script "$WORK/load.txt" >/dev/null 2>&1 &
+  # The batch size is pinned, not inherited. This cell needs a log deep in
+  # TRANSACTIONS -- it asserts at least 500 of them -- and how many a given
+  # load produces is exactly what the batch size decides: raising the
+  # shipping default divided them by four, so the fixture spent its whole
+  # retry budget failing to build and reported it as a driver failure. What
+  # the cell measures is replay speed against a deep log; how the log got
+  # deep is incidental to that, and pinning keeps it stable across future
+  # changes to the default.
+  EXT4B_TXN_BATCH=16 "$DUMP" "$WORK/dirty.img" script "$WORK/load.txt" >/dev/null 2>&1 &
   load_pid=$!
   sleep "$kill_after"
   if kill -0 "$load_pid" 2>/dev/null; then
