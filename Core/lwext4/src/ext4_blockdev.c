@@ -516,7 +516,11 @@ int ext4_block_cache_flush(struct ext4_blockdev *bdev)
 			return r;
 
 	}
-	return EOK;
+	/* The dirty list only holds write-back-mode buffers. A buffer whose
+	 * release-time flush failed is dirty but on no list -- the cache
+	 * latched that error instead (see io_err), and "flush the cache"
+	 * is the question it answers. */
+	return ext4_bcache_take_error(bdev->bc);
 }
 
 int ext4_block_cache_write_back(struct ext4_blockdev *bdev, uint8_t on_off)

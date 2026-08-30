@@ -86,7 +86,13 @@ void ext4_bcache_cleanup(struct ext4_bcache *bc)
 {
 	struct ext4_buf *buf, *tmp;
 	RB_FOREACH_SAFE(buf, ext4_buf_lba, &bc->lba_root, tmp) {
-		ext4_block_flush_buf(bc->bdev, buf);
+		int r = ext4_block_flush_buf(bc->bdev, buf);
+		/* The buffer is dropped either way -- unmount is over -- but
+		 * the failure must reach the caller: this sweep is the last
+		 * writer, and "ejected clean" over a failed flush is how a
+		 * stick loses data with no one told. */
+		if (r != EOK && bc->io_err == EOK)
+			bc->io_err = r;
 		ext4_bcache_drop_buf(bc, buf);
 	}
 }
@@ -325,7 +331,16 @@ int ext4_bcache_free(struct ext4_bcache *bc, struct ext4_block *b)
 			    !ext4_bcache_test_flag(buf, BC_TMP))
 				ext4_bcache_insert_dirty_node(bc, buf);
 			else {
-				ext4_block_flush_buf(bc->bdev, buf);
+				/* This release-time flush is where nearly
+				 * every metadata write in a non-write-back
+				 * session actually reaches the device, and
+				 * this function's return says nothing about
+				 * it. Latch the failure; the buffer stays
+				 * dirty and a later flush may still land it,
+				 * but the error is owed to somebody. */
+				int r = ext4_block_flush_buf(bc->bdev, buf);
+				if (r != EOK && bc->io_err == EOK)
+					bc->io_err = r;
 				ext4_bcache_clear_flag(buf, BC_FLUSH);
 			}
 		}

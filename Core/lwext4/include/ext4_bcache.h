@@ -138,6 +138,16 @@ struct ext4_bcache {
 	/**@brief   The cache should not be shaked */
 	bool dont_shake;
 
+	/**@brief   First write-back error swallowed on a path with no way
+	 *          to report it: the release-time flush in
+	 *          ext4_bcache_free(), and the unmount sweep in
+	 *          ext4_bcache_cleanup(). Nearly every metadata write in a
+	 *          non-write-back session ends in the former, and its
+	 *          result used to vanish -- EOK over EIO. Consumed (and
+	 *          cleared) by ext4_bcache_take_error(); the cache-flush
+	 *          entry points fold it into their return. */
+	int io_err;
+
 	/**@brief   A tree holding all bufs*/
 	RB_HEAD(ext4_buf_lba, ext4_buf) lba_root;
 
@@ -181,6 +191,13 @@ static inline void ext4_bcache_set_dirty(struct ext4_buf *buf) {
 static inline void ext4_bcache_clear_dirty(struct ext4_buf *buf) {
 	ext4_bcache_clear_flag(buf, BC_UPTODATE);
 	ext4_bcache_clear_flag(buf, BC_DIRTY);
+}
+
+/**@brief   Take (and clear) the latched write-back error. See io_err. */
+static inline int ext4_bcache_take_error(struct ext4_bcache *bc) {
+	int r = bc->io_err;
+	bc->io_err = 0;
+	return r;
 }
 
 /**@brief   Increment reference counter of buf by 1.*/

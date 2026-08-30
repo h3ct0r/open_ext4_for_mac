@@ -464,9 +464,15 @@ int ext4_umount(const char *mount_point)
 	mp->mounted = 0;
 
 	ext4_bcache_cleanup(mp->fs.bdev->bc);
+	/* The cleanup sweep was this volume's last writer; a flush it could
+	 * not land is the unmount failing, read out before the cache goes. */
+	r = ext4_bcache_take_error(mp->fs.bdev->bc);
 	ext4_bcache_fini_dynamic(mp->fs.bdev->bc);
 
-	r = ext4_block_fini(mp->fs.bdev);
+	if (r == EOK)
+		r = ext4_block_fini(mp->fs.bdev);
+	else
+		(void)ext4_block_fini(mp->fs.bdev);
 Finish:
 	mp->fs.bdev->fs = NULL;
 	return r;
