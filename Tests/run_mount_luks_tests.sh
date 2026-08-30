@@ -67,9 +67,14 @@ cleanup() {
   # below) these unlinks hang exactly like the creates, and a cleanup that
   # hangs at EXIT holds the whole suite hostage.
   for k in "${PLACED_KEYS[@]:-}"; do [ -n "$k" ] && { rm -f "$KEYDIR/$k".* 2>/dev/null & disown; }; done
-  # And anything the app stored, wherever it put it.
+  # And anything the app stored, wherever it put it. Every UUID this run
+  # touched, not just the two it names: a fixture is rebuilt with a fresh
+  # UUID on every run, so a key this misses is a master key left in the
+  # keychain for a container that no longer exists. Nine of them accumulated
+  # before the app was signed into the extension's keychain group, when
+  # `forget` deleted nothing and said it had succeeded.
   APP="/Applications/Ext4Mac.app/Contents/MacOS/Ext4Mac"
-  for u in "${UUID1:-}" "${UUID2:-}"; do
+  for u in "${UUID1:-}" "${UUID2:-}" "${PLACED_KEYS[@]:-}"; do
     [ -n "$u" ] && { rm -f "$KEYDIR/$u".* 2>/dev/null & disown; [ -x "$APP" ] && "$APP" forget "$u" >/dev/null 2>&1; }
   done
   { rmdir "$KEYDIR" 2>/dev/null & disown; }
