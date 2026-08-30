@@ -166,4 +166,121 @@ else
   bad "a tripped assertion is reported through the logger" "stderr: $se"
 fi
 
+# --- hostile journal geometry -----------------------------------------------
+# Fields the journal superblock and revoke blocks state about themselves,
+# believed before anything bounded them. blocksize larger than the real block
+# turned every checksum pass and replay memcpy into an out-of-bounds access
+# (the checksum helper WRITES past the buffer, zeroing the tail in place);
+# a revoke count below its own header size underflowed to ~2^30 fabricated
+# entries -- reads past the block, a heap allocation each, then an abort.
+# Both are one corrupt field on a stick, hit during mount.
+#
+# The fixtures use mke2fs without metadata_csum so the journal superblock
+# carries no self-checksum -- the checksummed format rejects blunt corruption
+# by luck; the fields must be bounded regardless (a crafted image checksums
+# itself consistently). A wedged driver is the failure mode here, so every
+# run gets a deadline: a kill is a FAIL, not a hang.
+echo ""
+echo "hostile journal geometry"
+
+run_deadline() {  # run_deadline <seconds> <cmd...>; rc 137 if killed
+  local secs=$1; shift
+  "$@" & local pid=$!
+  ( sleep "$secs"; kill -9 $pid 2>/dev/null ) & local dog=$!
+  wait $pid 2>/dev/null; local rc=$?
+  kill $dog 2>/dev/null; wait $dog 2>/dev/null
+  return $rc
+}
+
+if ! command -v mke2fs >/dev/null; then
+  echo "  (mke2fs not found; skipping journal-geometry cells)"
+else
+  JG="$WORK/jgeo.img"
+  make_jgeo() {  # fresh no-csum journalled volume; prints the jsb byte offset
+    rm -f "$JG"
+    mke2fs -q -F -b 4096 -O ^metadata_csum,^64bit -J size=4 "$JG" 16384 \
+      2>/dev/null
+    local blk
+    blk=$(debugfs -R "blocks <8>" "$JG" 2>/dev/null \
+          | tr ' ' '\n' | grep -v '^$' | head -1)
+    echo $(( blk * 4096 ))
+  }
+
+  # jbd superblock layout: 12-byte header, then s_blocksize at +12,
+  # s_maxlen at +16, s_first at +20 -- all big-endian.
+  poke_be32() {  # poke_be32 <img> <offset> <value>
+    python3 - "$1" "$2" "$3" <<'PY'
+import struct, sys
+path, off, val = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+with open(path, 'r+b') as f:
+    f.seek(off)
+    f.write(struct.pack('>I', val))
+PY
+  }
+
+  jsb=$(make_jgeo)
+  poke_be32 "$JG" $((jsb + 12)) 65536        # blocksize 16x the real one
+  run_deadline 15 "$DUMP" "$JG" create /x >/dev/null 2>&1; rc=$?
+  if [ $rc -ge 1 ] && [ $rc -lt 128 ]; then
+    ok "an oversized journal blocksize is refused, not believed (rc=$rc)"
+  else
+    bad "an oversized journal blocksize is refused" \
+        "rc=$rc (0 = accepted, >=128 = crashed or wedged)"
+  fi
+
+  jsb=$(make_jgeo)
+  poke_be32 "$JG" $((jsb + 16)) 0            # maxlen 0: wrap() divides by faith
+  run_deadline 15 "$DUMP" "$JG" create /x >/dev/null 2>&1; rc=$?
+  if [ $rc -ge 1 ] && [ $rc -lt 128 ]; then
+    ok "a zero-length journal is refused, not believed (rc=$rc)"
+  else
+    bad "a zero-length journal is refused" "rc=$rc"
+  fi
+
+  # A revoke block whose count underflows. The fixture earns real revoke
+  # blocks (directories created and removed in one session), the power-cut
+  # knob leaves them unreplayed, then the count is set below its own header.
+  jsb=$(make_jgeo)
+  {
+    for i in 1 2 3 4 5 6 7 8; do
+      echo "mkdir /t$i"; echo "create /t$i/x"; echo "rm /t$i/x"; echo "rm /t$i"
+      echo "create /f$i"
+    done
+  } > "$WORK/jgeo-load.txt"
+  EXT4DUMP_FAIL_AFTER=60 "$DUMP" "$JG" script "$WORK/jgeo-load.txt" \
+    >/dev/null 2>&1
+  poked=$(python3 - "$JG" "$jsb" <<'PY'
+import struct, sys
+path, jsb = sys.argv[1], int(sys.argv[2])
+JBD_MAGIC = 0xC03B3998
+n = 0
+with open(path, 'r+b') as f:
+    # walk the 4 MiB journal region one block at a time
+    for i in range(1, 1024):
+        f.seek(jsb + i * 4096)
+        hdr = f.read(12)
+        if len(hdr) < 12:
+            break
+        magic, btype, _ = struct.unpack('>III', hdr)
+        if magic == JBD_MAGIC and btype == 5:        # revoke block
+            f.seek(jsb + i * 4096 + 12)
+            f.write(struct.pack('>I', 12))           # < header size: underflow
+            n += 1
+print(n)
+PY
+)
+  if [ "${poked:-0}" -eq 0 ]; then
+    bad "revoke-count fixture holds no revoke blocks" \
+        "the cut left none in the log; nothing was tested"
+  else
+    run_deadline 20 "$DUMP" "$JG" label AFTER >/dev/null 2>&1; rc=$?
+    if [ $rc -lt 128 ]; then
+      ok "an underflowing revoke count is bounded, not walked ($poked block(s), rc=$rc)"
+    else
+      bad "an underflowing revoke count is bounded" \
+          "rc=$rc: recovery walked ~2^30 fabricated entries"
+    fi
+  fi
+fi
+
 finish

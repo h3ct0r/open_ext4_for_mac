@@ -1,0 +1,53 @@
+A zero-length dirent cannot loop
+
+The predecessor walk in ext4_dir_remove_entry advances by on-disk rec_len
+values: a zero advances nothing and spins the loop forever -- on a mounted
+volume that is a wedged executor, indistinguishable from a hang, resolved
+by force-eject or reboot -- and a chain that fails to tile the block ended
+in ext4_assert, an abort() on corrupt data.
+
+Honest reachability note: through the linear lookup path this is shielded
+today, because ext4_dir_find_in_block refuses a zero rec_len before the
+remove ever runs, and both walks traverse the same prefix. The exposed
+route is the htree-indexed one, where the hash lookup lands in a leaf
+without linearly validating the chain the merge walk will then follow --
+the same class the B14 audit tranche will fuzz properly. This patch makes
+the walk defend itself either way: a zero rec_len or a chain that
+overshoots the target is EIO, not a spin and not an abort. (Precedent:
+patch 0007, "assert must not spin forever".)
+
+diff --git a/src/ext4_dir.c b/src/ext4_dir.c
+--- a/src/ext4_dir.c
++++ b/src/ext4_dir.c
+@@ -555,14 +555,28 @@ int ext4_dir_remove_entry(struct ext4_inode_ref *parent, const char *name,
+ 		struct ext4_dir_en *tmp_de =(void *)result.block.data;
+ 		uint16_t de_len = ext4_dir_en_get_entry_len(tmp_de);
+ 
+-		/* Find direct predecessor of removed entry */
++		/* Find direct predecessor of removed entry. Every length in
++		 * this walk is an on-disk rec_len: a zero advances nothing
++		 * and spins this loop forever with the executor wedged --
++		 * which on a mounted volume is indistinguishable from a hang
++		 * and costs a force-eject -- and lengths that fail to tile
++		 * the block used to be an assert, i.e. an abort() on corrupt
++		 * data. Both are one bad byte on a stick. Corruption is an
++		 * error, not an invariant violation. */
+ 		while ((offset + de_len) < pos) {
+-			offset += ext4_dir_en_get_entry_len(tmp_de);
++			if (de_len == 0) {
++				ext4_dir_destroy_result(parent, &result);
++				return EIO;
++			}
++			offset += de_len;
+ 			tmp_de = (void *)(result.block.data + offset);
+ 			de_len = ext4_dir_en_get_entry_len(tmp_de);
+ 		}
+ 
+-		ext4_assert(de_len + offset == pos);
++		if (de_len + offset != pos) {
++			ext4_dir_destroy_result(parent, &result);
++			return EIO;
++		}
+ 
+ 		/* Add to removed entry length to predecessor's length */
+ 		uint16_t del_len;

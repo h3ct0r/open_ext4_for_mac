@@ -1,0 +1,184 @@
+Checkpoint completion does not eat its own queue
+
+Found by the 0035/0036 fixtures rather than by the audit: a 4 MiB mke2fs
+journal, the ring wrapping under a power-cut load, and the driver dies of
+heap-use-after-free -- on the build that shipped before any of this
+session's patches, so it is a latent upstream defect that small journals
+on foreign-formatted media have been sitting on.
+
+The shape: completing one checkpointed buffer (jbd_trans_end_write) walks
+its block's dirty_buf_queue and completes the OTHER pending copies of the
+same block -- which can retire whole transactions, freeing their jbd_bufs
+and block_recs. Three walkers held prefetched next-pointers or raw
+pointers across that cascade:
+
+* jbd_trans_finish_callback's FOREACH_SAFE over dirty_buf_queue -- the
+  cascade frees the prefetched next. Now a drain loop that re-reads the
+  queue head each pass; every completion removes its own buffer, so the
+  loop strictly advances, and the queue holds at most one buffer per
+  transaction so the owner cannot complete mid-drain.
+
+* jbd_journal_free_trans's walk over buf_queue -- same, same fix.
+
+* jbd_journal_cp_trans releases block references whose flushes fire the
+  cascade -- it now snapshots the plain block handles first and releases
+  from the snapshot (with the old walk as fallback under memory pressure).
+
+Two lifetime fixes underneath: jbd_trans_remove_block_rec no longer frees
+a record while buffers still queue on it (a block re-journaled while an
+older copy is checkpoint-pending leaves two transactions' buffers pointing
+at one record; a leaked record is a few bytes, a dangling one is a crash
+in the commit path), and jbd_trans_end_write clears the buffer's callback
+registration BEFORE the cascade using the buffer alone, instead of reading
+block_rec afterwards.
+
+With all five, the fixture's cut, its recovery and a full uncut run are
+ASan-clean and e2fsck-clean; the crash and reorder sweeps stay green.
+
+diff --git a/src/ext4_journal.c b/src/ext4_journal.c
+--- a/src/ext4_journal.c
++++ b/src/ext4_journal.c
+@@ -2176,16 +2257,23 @@ jbd_trans_finish_callback(struct jbd_journal *journal,
+ 		return;
+ 
+ 	if (!abort) {
+-		struct jbd_buf *jbd_buf, *tmp;
+-		TAILQ_FOREACH_SAFE(jbd_buf,
+-				&block_rec->dirty_buf_queue,
+-				dirty_buf_node,
+-				tmp) {
++		struct jbd_buf *jbd_buf;
++		/* Head re-read on every pass, deliberately. Each end_write
++		 * removes its own buffer -- but by completing an older
++		 * transaction it can also free OTHER buffers still on this
++		 * queue, and the FOREACH_SAFE this used to be carried a
++		 * prefetched next pointer across those frees. Measured as a
++		 * use-after-free under ASan: a 4 MiB mke2fs journal, the
++		 * ring wrapping under a power-cut load, one checkpoint
++		 * completion cascading into the next. The queue holds at
++		 * most one buffer per transaction, so the owning
++		 * transaction cannot complete mid-drain and block_rec
++		 * itself stays alive. */
++		while ((jbd_buf = TAILQ_FIRST(&block_rec->dirty_buf_queue)))
+ 			jbd_trans_end_write(fs->bdev->bc,
+ 					NULL,
+ 					EOK,
+ 					jbd_buf);
+-		}
+ 	} else {
+ 		/*
+ 		 * We have to roll back data if the block is going to be
+@@ -2237,8 +2344,15 @@ jbd_trans_remove_block_rec(struct jbd_journal *journal,
+ 			   struct jbd_trans *trans)
+ {
+ 	/* If this block record doesn't belong to this transaction,
+-	 * give up.*/
+-	if (block_rec->trans == trans) {
++	 * give up. And never free it while buffers still queue on it: a
++	 * block journaled again while an older copy is checkpoint-pending
++	 * leaves both transactions' buffers pointing here, and freeing under
++	 * them was a measured use-after-free (ASan: small mke2fs journal,
++	 * cache pressure re-dirtying a block whose first copy had already
++	 * flushed). A record that stays until its queue drains is a few
++	 * bytes; a dangling one is a crash in the commit path. */
++	if (block_rec->trans == trans &&
++	    TAILQ_EMPTY(&block_rec->dirty_buf_queue)) {
+ 		LIST_REMOVE(block_rec, tbrec_node);
+ 		RB_REMOVE(jbd_block,
+ 				&journal->block_rec_root,
+@@ -2364,12 +2478,15 @@ void jbd_journal_free_trans(struct jbd_journal *journal,
+ 			    struct jbd_trans *trans,
+ 			    bool abort)
+ {
+-	struct jbd_buf *jbd_buf, *tmp;
++	struct jbd_buf *jbd_buf;
+ 	struct jbd_revoke_rec *rec, *tmp2;
+ 	struct jbd_block_rec *block_rec, *tmp3;
+ 	struct ext4_fs *fs = journal->jbd_fs->inode_ref.fs;
+-	TAILQ_FOREACH_SAFE(jbd_buf, &trans->buf_queue, buf_node,
+-			  tmp) {
++	/* Head re-read each pass, same reasoning as the drain in
++	 * jbd_trans_finish_callback: the callback can cascade into
++	 * completions that free other buffers of this very queue, and a
++	 * prefetched next pointer does not survive that. */
++	while ((jbd_buf = TAILQ_FIRST(&trans->buf_queue))) {
+ 		block_rec = jbd_buf->block_rec;
+ 		if (abort) {
+ 			jbd_buf->block.buf->end_write = NULL;
+@@ -2381,12 +2498,12 @@ void jbd_journal_free_trans(struct jbd_journal *journal,
+ 		TAILQ_REMOVE(&jbd_buf->block_rec->dirty_buf_queue,
+ 			jbd_buf,
+ 			dirty_buf_node);
++		TAILQ_REMOVE(&trans->buf_queue, jbd_buf, buf_node);
+ 		jbd_trans_finish_callback(journal,
+ 				trans,
+ 				block_rec,
+ 				abort,
+ 				false);
+-		TAILQ_REMOVE(&trans->buf_queue, jbd_buf, buf_node);
+ 		ext4_free(jbd_buf);
+ 	}
+ 	RB_FOREACH_SAFE(rec, jbd_revoke_tree, &trans->revoke_root,
+@@ -2736,6 +2853,32 @@ void jbd_journal_cp_trans(struct jbd_journal *journal, struct jbd_trans *trans)
+ {
+ 	struct jbd_buf *jbd_buf, *tmp;
+ 	struct ext4_fs *fs = journal->jbd_fs->inode_ref.fs;
++	struct ext4_block *blocks;
++	uint32_t cnt = 0, i = 0;
++
++	/* Releasing a block can flush it, complete its transaction, and free
++	 * other jbd_bufs of this very queue -- including the FOREACH_SAFE's
++	 * prefetched next. The block handles are what this function is here
++	 * to release and they are plain copies, so snapshot them first (no
++	 * mutation during the walk), then release from the snapshot, immune
++	 * to whatever the completions free. */
++	TAILQ_FOREACH(jbd_buf, &trans->buf_queue, buf_node)
++		cnt++;
++	if (cnt == 0)
++		return;
++
++	blocks = ext4_malloc(cnt * sizeof(*blocks));
++	if (blocks) {
++		TAILQ_FOREACH(jbd_buf, &trans->buf_queue, buf_node)
++			blocks[i++] = jbd_buf->block;
++		for (i = 0; i < cnt; i++)
++			ext4_block_set(fs->bdev, &blocks[i]);
++		ext4_free(blocks);
++		return;
++	}
++
++	/* No memory for the snapshot: fall back to the old walk, which is
++	 * only unsafe when a completion cascade fires mid-release. */
+ 	TAILQ_FOREACH_SAFE(jbd_buf, &trans->buf_queue, buf_node,
+ 			tmp) {
+ 		struct ext4_block block = jbd_buf->block;
+@@ -2764,17 +2907,22 @@ static void jbd_trans_end_write(struct ext4_bcache *bc __unused,
+ 			jbd_buf,
+ 			dirty_buf_node);
+ 
+-	jbd_trans_finish_callback(journal,
+-			trans,
+-			jbd_buf->block_rec,
+-			false,
+-			false);
+-	if (block_rec->trans == trans && buf) {
++	/* Before the callback below: it can cascade into completions that
++	 * free block_rec, and the ownership test used to read it afterwards.
++	 * Whether the buffer's registered callback is ours is the same
++	 * question, answerable from the buffer alone. */
++	if (buf && buf->end_write_arg == jbd_buf) {
+ 		/* Clear the end_write and end_write_arg fields. */
+ 		buf->end_write = NULL;
+ 		buf->end_write_arg = NULL;
+ 	}
+ 
++	jbd_trans_finish_callback(journal,
++			trans,
++			block_rec,
++			false,
++			false);
++
+ 	ext4_free(jbd_buf);
+ 
+ 	trans->written_cnt++;
+

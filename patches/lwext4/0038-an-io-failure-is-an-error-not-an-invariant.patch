@@ -1,0 +1,158 @@
+An I/O failure is an error, not an invariant
+
+Patches 0007/0026 route ext4_assert to a fail-stop handler, which is right
+for broken invariants -- and wrong for device errors, which are not
+invariants at all. Five asserts fired on plain I/O failure, each taking
+the whole driver down mid-operation on a failing or yanked medium:
+
+* ext4_balloc: freeing a run that crosses a block-group boundary asserts
+  count == 0 -- but the loop legitimately breaks early when a group
+  descriptor read fails. The assert now tolerates exactly the case where
+  an error is already being returned; count != 0 with rc == EOK is still
+  a real logic bug and still trips.
+
+* the journal allocator asserted the ring was no longer full after an
+  emergency purge -- but the purge legitimately fails when its checkpoint
+  could not be read back (0021) or written home (0031). A full ring on a
+  failing medium is an allocation failure: the allocator now returns 0,
+  a block no valid caller can mean (journal block 0 is the superblock),
+  and the block-get wrappers refuse it with ENOSPC, so the commit fails
+  upward like any other error.
+
+* the abort-rollback path asserted its two block fetches succeed; aborts
+  happen precisely when the medium is going away. A failed fetch now
+  invalidates the cached block -- the next reader refetches whatever the
+  medium holds, and the journal still covers the committed copy.
+
+* the replay revoke tree asserted its allocation; a hostile revoke count
+  used to manufacture exactly that OOM (0036). Allocation failure now
+  fails recovery through info->rc, keeping the journal for the retry.
+
+diff --git a/src/ext4_journal.c b/src/ext4_journal.c
+--- a/src/ext4_journal.c
++++ b/src/ext4_journal.c
+@@ -909,6 +941,13 @@ static int jbd_block_get(struct jbd_fs *jbd_fs,
+ 	struct ext4_blockdev *bdev = jbd_fs->bdev;
+ 	ext4_lblk_t iblock = (ext4_lblk_t)fblock;
+ 
++	/* Journal block 0 is the journal superblock; no log record lives
++	 * there and no valid caller asks for it. It is also the allocator's
++	 * failure sentinel, refused here so a wedged ring cannot hand the
++	 * commit path the superblock's home to scribble on. */
++	if (iblock == 0)
++		return ENOSPC;
++
+ 	/* Lookup the logical block address of
+ 	 * fblock.*/
+ 	rc = jbd_inode_bmap(jbd_fs, iblock,
+@@ -943,6 +982,10 @@ static int jbd_block_get_noread(struct jbd_fs *jbd_fs,
+ 	int rc;
+ 	struct ext4_blockdev *bdev = jbd_fs->bdev;
+ 	ext4_lblk_t iblock = (ext4_lblk_t)fblock;
++
++	/* See jbd_block_get: 0 is the superblock and the failure sentinel. */
++	if (iblock == 0)
++		return ENOSPC;
+ 	rc = jbd_inode_bmap(jbd_fs, iblock,
+ 			    &fblock);
+ 	if (rc != EOK)
+@@ -1394,7 +1437,13 @@ static void jbd_add_revoke_block_tags(struct recover_info *info,
+ 	}
+ 
+ 	revoke_entry = jbd_alloc_revoke_entry();
+-	ext4_assert(revoke_entry);
++	if (!revoke_entry) {
++		/* Out of memory mid-recovery -- reachable from outside (a
++		 * hostile revoke count used to manufacture exactly this).
++		 * Failing recovery keeps the journal; aborting kept nothing. */
++		info->rc = ENOMEM;
++		return;
++	}
+ 	revoke_entry->block = block;
+ 	revoke_entry->trans_id = info->this_trans_id;
+ 	RB_INSERT(jbd_revoke, &info->revoke_root, revoke_entry);
+@@ -1649,6 +1713,10 @@ static int jbd_iterate_log(struct jbd_fs *jbd_fs,
+ 				info->this_trans_id = this_trans_id;
+ 				jbd_build_revoke_tree(jbd_fs,
+ 						header, info);
++				if (info->rc != EOK) {
++					r = info->rc;
++					log_end = true;
++				}
+ 			}
+ 			break;
+ 		default:
+@@ -2078,7 +2146,20 @@ static uint32_t jbd_journal_alloc_block(struct jbd_journal *journal,
+ 	 * transaction.*/
+ 	if (journal->last == journal->start) {
+ 		jbd_journal_purge_cp_trans(journal, true, true);
+-		ext4_assert(journal->last != journal->start);
++		if (journal->last == journal->start) {
++			/* The purge could not free a single block: the head
++			 * checkpoint's log read failed (0021's case), or its
++			 * home writes did (0031's frozen tail). A full ring
++			 * on a failing medium was an assert here -- one EIO
++			 * with the log full took down the whole driver. It
++			 * is an allocation failure: 0 is never a valid log
++			 * block (block 0 is the journal superblock), the
++			 * get-wrappers refuse it, and the commit fails
++			 * upward like any other error. */
++			journal->last = start_block;
++			trans->alloc_blocks--;
++			return 0;
++		}
+ 		/* The purge checkpointed a transaction, barriered the
+ 		 * checkpoint, and moved the tail past it -- in memory. The
+ 		 * blocks it freed are what this allocator hands out next, so
+@@ -2202,11 +2290,30 @@ jbd_trans_finish_callback(struct jbd_journal *journal,
+ 				r = ext4_block_get_noread(fs->bdev,
+ 							&block,
+ 							block_rec->lba);
+-				ext4_assert(r == EOK);
++				/* Rolling an aborted transaction's block back
++				 * to the previous logged copy needs one fetch
++				 * and one log read. Either can fail when the
++				 * medium is going away -- which is when
++				 * aborts happen -- and each was an assert:
++				 * SIGABRT mid-teardown. Invalidate the cached
++				 * block instead: the next reader refetches
++				 * whatever the medium holds, and the journal
++				 * still covers the committed copy. */
++				if (r != EOK) {
++					ext4_bcache_invalidate_lba(
++						fs->bdev->bc,
++						block_rec->lba, 1);
++					return;
++				}
+ 				r = jbd_block_get(journal->jbd_fs,
+ 							&jbd_block,
+ 							jbd_buf->jbd_lba);
+-				ext4_assert(r == EOK);
++				if (r != EOK) {
++					ext4_bcache_invalidate_buf(
++						fs->bdev->bc, block.buf);
++					ext4_block_set(fs->bdev, &block);
++					return;
++				}
+ 				memcpy(block.data, jbd_block.data,
+ 						journal->block_size);
+ 
+diff --git a/src/ext4_balloc.c b/src/ext4_balloc.c
+--- a/src/ext4_balloc.c
++++ b/src/ext4_balloc.c
+@@ -342,8 +342,13 @@ int ext4_balloc_free_blocks(struct ext4_inode_ref *inode_ref,
+ 	}
+ 
+ 	ext4_bcache_invalidate_lba(fs->bdev->bc, start_block, blk_cnt);
+-	/*All blocks should be released*/
+-	ext4_assert(count == 0);
++	/* All blocks released -- unless the loop above broke on an I/O error
++	 * partway through a multi-group free. That used to be an assert: one
++	 * EIO on a group descriptor and the whole driver aborted mid-free.
++	 * A failure freeing blocks leaks them until e2fsck; aborting loses
++	 * the volume. The error is already in rc; count != 0 with rc == EOK
++	 * would be a real logic bug, so that combination still trips. */
++	ext4_assert(count == 0 || rc != EOK);
+ 
+ 	return rc;
+ }

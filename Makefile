@@ -388,6 +388,12 @@ test-asan:
 	@$(MAKE) --no-print-directory tools CONFIG=debug
 	@bash Tests/run_tests.sh
 	@echo
+	@# The corrupt-fixture cells exist to catch memory unsafety; running
+	@# them without the sanitizer watching would test half their point.
+	@bash Tests/run_bounds_tests.sh
+	@echo
+	@bash Tests/run_eio_tests.sh
+	@echo
 	@bash Tests/run_write_tests.sh
 
 clean:
