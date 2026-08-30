@@ -862,10 +862,25 @@ int ext4b_unmount(ext4b_device *dev)
 
 int ext4b_journal_recover(ext4b_device *dev)
 {
-    if (!dev || !dev->mounted)
+    if (!dev)
         return EINVAL;
     if (dev->read_only)
         return EROFS;
+
+    /* DiskArbitration's pre-mount check lands here on a device nothing has
+     * mounted yet, and lwext4's replay machinery only exists inside a
+     * mounted context -- the old EINVAL made the whole check fail, and
+     * DiskArbitration answered a failed check by mounting read-only with
+     * the journal unreplayed. Every post-crash plug-in served pre-crash
+     * contents. Recovery on an unmounted device is a mount and a clean
+     * unmount: the mount replays and settles orphans, the unmount
+     * checkpoints, and both already report every failure honestly. */
+    if (!dev->mounted) {
+        int r = ext4b_mount(dev, false);
+        if (r != EOK)
+            return r;
+        return ext4b_unmount(dev);
+    }
 
     int r = ext4_recover(BRIDGE_MOUNT_POINT);
     if (r == EOK && dev->flush_fn)

@@ -305,6 +305,50 @@ else
   bad "the eject path issues per-block commands again" "$stats"
 fi
 
+# =========================== a full ring reclaims its own space ==
+# Sustained small-file work fills the journal ring many times over. Each
+# time it fills, the allocator purges one checkpointed transaction and
+# expects the freed log space immediately -- so the purge has to retire
+# the transaction it just flushed, not leave that to a later caller.
+# When it did not, the ring never drained and every operation after the
+# first lap failed with ENOSPC on a volume 17% full: a mounted stick
+# stopped accepting writes minutes into a copy, and the crash that
+# followed left a log even the Linux kernel could not fully replay.
+# 300 directories with a file and two xattrs each is ~15 laps of the
+# default 1024-block journal.
+note ""
+note "sustained work on the default journal"
+# Plain image, not a container: the suite exports EXT4DUMP_LUKS_KEYFILE for
+# the cells above, and inheriting it here would format a LUKS volume that
+# e2fsck cannot read.
+ring_key="$EXT4DUMP_LUKS_KEYFILE"; unset EXT4DUMP_LUKS_KEYFILE
+RING_IMG="$WORK/ring.img"
+rm -f "$RING_IMG"; dd if=/dev/zero of="$RING_IMG" bs=1m count=64 2>/dev/null
+"$DUMP" "$RING_IMG" format 4 >/dev/null 2>&1
+python3 - "$WORK/ring.ops" <<'PY'
+import sys
+ops = []
+for i in range(1, 301):
+    ops += [f"mkdir /d{i}", f"mkdir /d{i}/inner", f"create /d{i}/f",
+            f"write /d{i}/f x", f"setxattr /d{i}/f user.k v",
+            f"setxattr /d{i}/f com.apple.provenance v"]
+open(sys.argv[1], "w").write("\n".join(ops) + "\n")
+PY
+ring_out=$(EXT4DUMP_SCRIPT_CONTINUE=1 "$DUMP" "$RING_IMG" script "$WORK/ring.ops" 2>&1)
+ring_fail=$(grep -c 'failed$' <<<"$ring_out")
+if [ "$ring_fail" -eq 0 ]; then
+  ok "1800 operations through a ring that wraps ~15 times, none refused"
+else
+  bad "the journal ring stopped reclaiming space" \
+      "$ring_fail operation(s) failed with the volume nearly empty"
+fi
+if e2fsck -fn "$RING_IMG" >/dev/null 2>&1; then
+  ok "and the volume is e2fsck-clean afterwards"
+else
+  bad "the volume is not clean after sustained work" "$(e2fsck -fn "$RING_IMG" 2>&1 | head -3)"
+fi
+export EXT4DUMP_LUKS_KEYFILE="$ring_key"
+
 note ""
 note "PASS $PASS FAIL $FAIL"
 if [ "$FAIL" -eq 0 ]; then note "RESULT: PASS"; else note "RESULT: FAIL"; exit 1; fi

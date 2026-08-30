@@ -85,6 +85,18 @@ mount_target() {
   fi
 }
 
+# True when MOUNTED_AT is a read-write ext4 mount. Read-only is the driver's
+# honest fallback when the resource is not writable -- after a kill, fskitd
+# can hold the dead instance's claim for a few seconds and the relaunched
+# extension mounts read-only WITHOUT replaying (it logs "read-only mount of
+# an unreplayed journal"). A round on such a mount measures nothing: the
+# workload's writes fail silently, or the "recovery" never recovered.
+mounted_rw() {
+  local line
+  line=$(mount | grep -F " $MOUNTED_AT (ext4") || return 1
+  ! grep -q "read-only" <<<"$line"
+}
+
 unmount_target() {
   if [ -n "$DEVICE" ]; then
     diskutil unmount "$DEVICE" >/dev/null 2>&1 || \
@@ -311,6 +323,10 @@ for round in $(seq 1 $((ROUNDS + 1))); do
         "$(diskutil mount "$DEVICE" 2>&1 | head -1)"
     detach_target; continue
   fi
+  if ! mounted_rw; then
+    bad "$R_TAG: mounted read-only -- the workload would measure nothing"
+    unmount_target; detach_target; continue
+  fi
 
   # A workload that touches every kind of metadata: directory entries, inode
   # allocation, block allocation, link counts, and an xattr apiece. The
@@ -340,10 +356,18 @@ for round in $(seq 1 $((ROUNDS + 1))); do
   else DEV=$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount "$WORK/k.img" \
              2>/dev/null | head -1 | awk '{print $1}'); fi
   note "  $R_TAG: driver killed; waiting for the device to be released"
+  # Only a read-write mount replays. A read-only one means fskitd has not
+  # released the dead instance's claim yet -- unmount it and keep waiting,
+  # or the timed number below is the time to NOT run recovery.
   mounted=0; MOUNT_SECS=0
-  for attempt in 1 2 3 4 5; do
+  for attempt in 1 2 3 4 5 6 7 8; do
     t0=$SECONDS
-    mount_target && { mounted=1; MOUNT_SECS=$((SECONDS - t0)); break; }
+    if mount_target; then
+      if mounted_rw; then
+        mounted=1; MOUNT_SECS=$((SECONDS - t0)); break
+      fi
+      unmount_target
+    fi
     sleep 3
   done
   if [ "$mounted" -eq 0 ]; then
@@ -352,8 +376,18 @@ for round in $(seq 1 $((ROUNDS + 1))); do
     release_device; detach_target; continue
   fi
   sleep 1
-  unmount_target
-  detach_target
+  # Unmount and detach without a gap. A released, attached, probeable
+  # volume is exactly what auto-mount exists to grab, and force-detaching
+  # that fresh mount manufactures a brand-new crash right before the check
+  # below judges the image. A plain detach unmounts and detaches in one
+  # step; the force fallback only runs if something is genuinely stuck.
+  if [ -z "$DEVICE" ] && [ -n "$DEV" ]; then
+    hdiutil detach "$DEV" >/dev/null 2>&1 \
+      || { unmount_target; hdiutil detach "$DEV" -force >/dev/null 2>&1; }
+    DEV=""; MOUNTED_AT=""
+  else
+    unmount_target
+  fi
   sleep 1
 
   # The remount runs the replay; its duration IS the user-visible number,

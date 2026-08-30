@@ -830,12 +830,24 @@ static int run_write_command(ext4b_device *dev, int argc, char **argv);
  * With EXT4DUMP_FAIL_AFTER set, writes past the cut report success and reach
  * nothing, so the script runs on to the end over a device that stopped
  * persisting -- which is what a crash looks like from inside the filesystem.
+ *
+ * EXT4DUMP_SCRIPT_CONTINUE=1 keeps going after a failing command instead of
+ * stopping at the first one, and reports how many failed. Stopping is the
+ * right default for a script that describes a filesystem to build, but it
+ * cannot model the workload that matters most: an application that keeps
+ * writing to a volume that has started refusing -- a full one above all,
+ * where every later call exercises an error path with a live journal behind
+ * it. The mounted driver serves hundreds of those; the offline tool stopped
+ * at the first, so the whole class was untested.
  */
 static int run_script(ext4b_device *dev, const char *path)
 {
     FILE *f = (strcmp(path, "-") == 0) ? stdin : fopen(path, "r");
     if (!f) { perror(path); return 1; }
 
+    const char *cont = getenv("EXT4DUMP_SCRIPT_CONTINUE");
+    bool keep_going = cont && *cont && strcmp(cont, "0") != 0;
+    unsigned long failed = 0;
     char line[4096];
     unsigned long lineno = 0;
     int rc = 0;
@@ -858,9 +870,15 @@ static int run_script(ext4b_device *dev, const char *path)
         rc = run_write_command(dev, argc, argv);
         if (rc != 0) {
             fprintf(stderr, "%s:%lu: %s failed\n", path, lineno, argv[2]);
-            break;
+            if (!keep_going)
+                break;
+            failed++;
+            rc = 0;
         }
     }
+
+    if (keep_going && failed)
+        fprintf(stderr, "script: %lu command(s) failed, kept going\n", failed);
 
     if (f != stdin)
         fclose(f);

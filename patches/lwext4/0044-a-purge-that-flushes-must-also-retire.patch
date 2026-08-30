@@ -1,0 +1,70 @@
+A purge that flushes must also retire
+
+0041 routed the checkpoint through the replay batcher and, to keep the
+completion drain safe, lifted the transaction off the checkpoint queue
+first: with the transaction not at the head, no completion sees itself as
+first-in-queue, and none of them advances the journal tail while the loop
+is walking the very structure that would be freed. The tail advance was
+left to "the purge loop re-inspects after this returns".
+
+It does not, when it matters most. jbd_journal_alloc_block calls
+jbd_journal_purge_cp_trans(flush=true, once=true) precisely because the
+ring is full, and checks for free space the instant it returns. With
+once=true the loop flushes the head transaction and breaks -- leaving it
+on the queue, fully written, with the tail exactly where it was. No space
+appeared, so the allocation failed, and a failed log allocation is
+reported upward as ENOSPC.
+
+The result was a journal that never drained. Sustained small-file work
+fills a 1024-block ring in about a lap of 60 directories; from the first
+lap onward every operation needing log space failed on a volume 17% full.
+Measured on the fixture the mounted kill-recovery suite runs: 273 of 1800
+operations refused with 2790 of 16384 blocks used and 911 of 4096 inodes
+allocated. The pre-0041 build completes all 1800.
+
+The damage did not stop at the refusals. A driver that cannot allocate log
+space stops checkpointing, so the ring stays full of live transactions
+across a crash -- and the recovery that follows finds a log whose records
+run out mid-ring. The Linux kernel replays such an image to the same
+inconsistent filesystem ours does; it is not recoverable by redo, and the
+kill-recovery suite reported it as a recovery failure, which is where this
+was found.
+
+The fix restores what the old checkpoint did implicitly: after a
+successful flush, re-inspect the same head transaction instead of
+returning. It is now written in full, so the branch above retires it,
+moves the tail, and stages the superblock -- and the caller finds the
+space it asked for. Terminates for the same reason it always did: the
+re-inspection takes the fully-written branch, which either frees the
+transaction or stops at a recorded error.
+
+Red first: 1800 operations through the default journal on a 64 MB volume,
+which wraps the ring about fifteen times -- 273 refusals before, none
+after, and e2fsck clean either way. The cell lives in
+Tests/run_replay_speed_tests.sh ("1800 operations through a ring that
+wraps ~15 times, none refused").
+
+--- a/src/ext4_journal.c
++++ b/src/ext4_journal.c
+@@ -2162,6 +2162,21 @@
+ 				if (jbd_journal_flush_trans(trans) != EOK)
+ 					break;
+ 				flushed = true;
++				/* The flush completed every buffer, but 0041
++				 * lifts the transaction off this queue for the
++				 * completion drain, so no completion saw itself
++				 * as head and none advanced the tail. Re-inspect
++				 * rather than returning: the transaction is now
++				 * fully written, and the branch above retires it
++				 * and moves the tail -- which is the free log
++				 * space this purge was called to produce. The
++				 * caller checks for that space immediately
++				 * (jbd_journal_alloc_block), so leaving the
++				 * retirement to some later purge meant a ring
++				 * that never drained: sustained small-file work
++				 * filled it and every later operation failed
++				 * with ENOSPC on a volume 17% full. */
++				continue;
+ 			}
+ 		}
+ 		if (once)

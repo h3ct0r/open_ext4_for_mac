@@ -129,6 +129,12 @@ Known states, from mildest to worst (docs/STATUS.md has the histories):
 
 - **Extension serving stale code** — `pkill -9 -f Ext4FS`; fskitd relaunches
   on the next probe.
+- **Mount comes up read-only right after a kill** — fskitd has not released
+  the dead instance's claim, so the relaunched extension sees a non-writable
+  resource and (correctly) mounts read-only *without replaying* — the log
+  says `read-only mount of an unreplayed journal`. The volume shows
+  pre-crash contents; this is not data loss. Unmount, give it a few
+  seconds, remount: the read-write mount replays.
 - **Device claimed by a dead mount** — `diskutil unmountDisk force diskN`,
   give it ~10 s; if a process is stuck in uninterruptible I/O on the node,
   only a physical replug clears it.
@@ -161,6 +167,7 @@ enforces that):
 | `EXT4DUMP_JOURNAL_BLOCKS` | journal size for `format` |
 | `EXT4DUMP_UUID` | pin the volume UUID (reproducible images) |
 | `EXT4DUMP_KEEP_ORPHANS` | skip orphan cleanup at mount (inspection) |
+| `EXT4DUMP_SCRIPT_CONTINUE=1` | `script` keeps going after a failing command instead of stopping — models an application that keeps writing to a volume that has started refusing |
 | `EXT4DUMP_REPORT_WRITES` | print `writes=N` at exit (predates IOSTATS) |
 | `EXT4B_TXN_BATCH` | mutations per journal transaction (tool only; appex uses the compiled default) |
 
