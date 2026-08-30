@@ -1662,3 +1662,62 @@ pathological tail ever matters in practice, the next step is checkpointed
 replay (advance the durable log tail after each flushed batch, behind a
 barrier), so consecutive attempts make forward progress; jbd2 does not do
 this either, and it is not worth the risk until a real journal needs it.
+
+## The pre-hardware hardening pass
+
+After the replay incident, a systematic audit (2026-08-29) swept the tree
+for the incident's three ingredient classes — per-command access patterns
+on paths with OS timeouts, errors swallowed on their way up, and coverage
+the offline suites could not express — and a phased fix landed before the
+next hardware day. The principle: a hardware iteration is only spent
+confirming what the desk already predicts, never discovering.
+
+**The harness learned to fail like real media.** ext4dump gained EIO
+injection (`EXT4DUMP_EIO_READ_AT`/`WRITE_AT`, sticky mode, and the
+bad-sector model `EXT4DUMP_EIO_*_OFF` — every I/O covering one offset
+fails, which ordinal injection cannot express because the cache
+legitimately retries), flush counting in IOSTATS, and reads in the trace.
+`Tests/run_eio_tests.sh` (validation stage 5b) holds the cells; every one
+asserts the fault fired *and* the failure surfaced.
+
+**Errors now leave as errors.** The audit found the replay bug's shape in a
+dozen places; all are fixed red-first. In the bridge: orphan cleanup no
+longer guesses "in use" over an unreadable bitmap (the guess routed a read
+error into truncate-and-free — a measured double-free); partial reads no
+longer pose as EOF; fsync and unmount no longer return 0 over failed
+write-back; short FSKit I/O throws. In lwext4 (patches 0030–0034): replay,
+checkpointing and stop keep the journal covering anything that failed to
+land — the tail freezes at an errored transaction, stop refuses to clear
+what it could not flush, the cache latches the write-back errors
+`ext4_bcache_free` used to swallow, and mkfs propagates its teardown. The
+headline red test: forty files onto a bad sector used to exit 0 with
+needs_recovery cleared and every inode gone; now the journal is kept and
+the next mount hands all forty back, e2fsck-clean.
+
+**A corrupt or dying stick cannot crash the driver** (patches 0035–0039):
+journal geometry is validated at the door (a corrupt blocksize was an
+out-of-bounds *write* on every recovery), revoke counts are bounded (an
+underflow walked ~2^30 fabricated entries), a zero rec_len is EIO instead
+of a wedged executor, and five asserts that fired on plain I/O errors
+return errors instead. The fixtures for those cells found a latent upstream
+use-after-free in checkpoint completion (0039) that crashed the *shipped*
+build on a 4 MiB mke2fs journal wrapping under a power-cut load — exactly
+the small-journal foreign-formatted stick a hardware day would meet.
+
+**The remaining timeout paths batch** (0040–0041): inode tables zero in
+1 MiB runs (2 GB format: 8,300 → 105 write commands; a dirty
+lazy_itable_init volume's recovery mount: ~7,000 → 77 — that walk runs
+inside DiskArbitration's budget), and checkpoints ride the replay
+machinery from 0027/0028, which also fixed a latent escaped-block bug.
+Recovery now reports its shape (0042): `journal replayed: N
+transaction(s), M block(s), log L blocks, in T ms` in os_log — the line
+whose absence made the incident cost days. Measured for scale: 500
+orphans reclaim in 389 commands and 309 ms, so orphan cleanup needed no
+change (the audit's estimate had assumed unjournaled head writes).
+
+**The gates close the loop.** `scripts/preflight.sh` is the one hardware
+gate (real-mount check, CDHash freshness — strict, "could not verify" now
+fails), every hardware suite calls it, kill-recovery times its remounts
+against the ~20 s budget including a new deep-journal round, and
+`docs/HARDWARE.md` is the runbook: the ladder, the log lines each rung
+should print, evidence-before-retry, and the full knob reference.
