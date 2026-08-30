@@ -262,6 +262,8 @@ struct ext4b_device {
     bool     read_only;
     bool     mounted;
     bool     journal_running;
+    /* Said once per mount, not once per statfs: Finder asks continually. */
+    bool     warned_free_blocks;
 
     /* Journal batching. `txn_ops` counts mutations accumulated in the
      * currently open transaction; `txn_batch` is how many are allowed to
@@ -976,6 +978,38 @@ int ext4b_statfs(ext4b_device *dev, ext4b_statfs_info *out)
     out->free_blocks  = st.free_blocks_count;
     out->total_inodes = st.inodes_count;
     out->free_inodes  = st.free_inodes_count;
+
+    /*
+     * A volume can claim more free blocks than it has. Measured on a real
+     * stick: 2,045,724 free against 1,920,357 total, which df renders as
+     * "negative filesystem block count" and Disk Utility as 106.5% free.
+     * The superblock's counters are ordinary metadata and drift like any
+     * other -- an interrupted format, an unclean history, a bad sector under
+     * the group descriptors.
+     *
+     * Two things follow. The number is clamped, because passing an
+     * impossible one up produces nonsense in every tool that asks and
+     * teaches the user to distrust all of them. And it is said out loud
+     * once, because the same broken free-space picture is what the block
+     * allocator works from: on that stick it handed out four-block runs
+     * where a healthy volume gives two hundred and forty, and a copy that
+     * should stream ran at 3.9 MB/s. Silent bad numbers are how a corrupt
+     * volume passes for a slow driver.
+     */
+    if (out->free_blocks > out->total_blocks) {
+        if (!dev->warned_free_blocks) {
+            dev->warned_free_blocks = true;
+            bridge_logf(3, "free block count (%llu) exceeds the volume size "
+                           "(%llu blocks): the superblock's accounting is "
+                           "corrupt, allocation will be poor, and e2fsck is "
+                           "the fix",
+                        (unsigned long long)out->free_blocks,
+                        (unsigned long long)out->total_blocks);
+        }
+        out->free_blocks = out->total_blocks;
+    }
+    if (out->free_inodes > out->total_inodes)
+        out->free_inodes = out->total_inodes;
 
     /*
      * Available != free. s_r_blocks_count is set aside for root so a full
