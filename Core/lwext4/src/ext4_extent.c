@@ -569,6 +569,12 @@ static uint16_t ext4_ext_space_root_idx(struct ext4_inode_ref *inode_ref)
 	return size;
 }
 
+/* ext4 cannot build a tree deeper than this: five levels of 4 KiB index
+ * blocks address more than the 2^32-block address space. A larger value on
+ * disk is corruption, and believing it means walking a path array sized for
+ * something else. Linux caps it the same way. */
+#define EXT4_MAX_EXTENT_DEPTH 5
+
 static uint16_t ext4_ext_max_entries(struct ext4_inode_ref *inode_ref,
 				     uint32_t depth)
 {
@@ -747,6 +753,20 @@ static int ext4_ext_check(struct ext4_inode_ref *inode_ref,
 		error_msg = "invalid eh_max";
 		goto corrupted;
 	}
+	/* eh_max has to fit the space that actually holds the entries: 60 bytes
+	 * inside the inode for the root, one block for anything deeper. Without
+	 * this the count is believed, and every user of it walks off the end --
+	 * the binary search below reads entries past the buffer, and the
+	 * checksum helpers read (and on a write path, write) at
+	 * 12 + 12 * eh_max, which for eh_max = 0xFFFF is 786 KB beyond a 4 KB
+	 * block. Reproduced with AddressSanitizer: reading one file on a volume
+	 * whose inode carries eh_max = 0xFFFF is a heap-buffer-overflow in
+	 * ext4_ext_binsearch, reached from a plain directory listing. */
+	if (to_le16(eh->max_entries_count) >
+	    ext4_ext_max_entries(inode_ref, depth)) {
+		error_msg = "eh_max too large for the space it describes";
+		goto corrupted;
+	}
 	if (to_le16(eh->entries_count) > to_le16(eh->max_entries_count)) {
 		error_msg = "invalid eh_entries";
 		goto corrupted;
@@ -864,6 +884,20 @@ static int ext4_find_extent(struct ext4_inode_ref *inode_ref, ext4_lblk_t block,
 
 	eh = ext_inode_hdr(inode_ref->inode);
 	depth = ext_depth(inode_ref->inode);
+
+	/* The root lives in the inode and never passed through
+	 * read_extent_tree_block(), so nothing had checked it: every deeper
+	 * block was validated and the one the walk starts from was not. A
+	 * corrupt root is the cheapest way to reach the overflow, since it
+	 * needs no valid checksum anywhere. */
+	if (depth > EXT4_MAX_EXTENT_DEPTH) {
+		ext4_dbg(DEBUG_EXTENT, DBG_ERROR
+			 "extent tree depth %" PRId32 " is impossible\n", depth);
+		return EIO;
+	}
+	ret = ext4_ext_check(inode_ref, eh, (uint16_t)depth, 0);
+	if (ret != EOK)
+		return ret;
 
 	if (path) {
 		ext4_ext_drop_refs(inode_ref, path, 0);
