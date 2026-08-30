@@ -66,8 +66,27 @@
  * something asks -- sync(2), the batch filling, the journal running low, or
  * unmount -- not when the call returns. That is the contract Linux ext4,
  * HFS+ and APFS give. An undrained batch dies cleanly, which the mount-crash
- * suite's stage 1b asserts. EXT4B_TXN_BATCH overrides for anyone measuring. */
-#define BRIDGE_TXN_BATCH 16
+ * suite's stage 1b asserts. EXT4B_TXN_BATCH overrides for anyone measuring.
+ *
+ * The value is 64 because 16 was measured and found expensive. Metadata is
+ * written home once per transaction, and a small-file workload rewrites the
+ * same few blocks every time: 2,000 files touched 138 distinct metadata
+ * blocks about seventy times each. Transactions, not bytes, were the cost.
+ *
+ *   batch   writes   bytes   flushes   unmount
+ *      16   20,518   96 MB     7,739   53 writes
+ *      64    2,932    7 MB       128   26 writes
+ *     256    2,342    3 MB        34   --
+ *
+ * Seven times fewer commands and thirteen times fewer bytes for the same
+ * 2,000 files, all e2fsck-clean, and the eject gets cheaper rather than
+ * dearer -- the objection a wider batch invites, measured and answered.
+ *
+ * 64 rather than 256 because it is the largest value the crash evidence
+ * already covers: run_reorder_tests.sh tears 236 images across batch
+ * {1,16,64} and the real Linux kernel recovers every one. Going further
+ * would mean widening the durability window past what has been tested. */
+#define BRIDGE_TXN_BATCH 64
 
 /* ============================================================== logging == */
 

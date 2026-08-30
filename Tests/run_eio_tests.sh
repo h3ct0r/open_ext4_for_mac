@@ -203,7 +203,14 @@ awk 'BEGIN{ for (i = 0; i < 120; i++) {
   printf "create /f%d\n", i;
   if (i % 20 == 10) printf "rm-open /f%d\n", i - 5;
 } }' > "$WORK/sbload.txt"
-EXT4DUMP_FAIL_AFTER=60 "$DUMP" "$img" script "$WORK/sbload.txt" >/dev/null 2>&1
+# The batch size is pinned, not inherited. This fixture needs the cut to land
+# after a commit and before the journal is checkpointed, and where that is
+# depends on how many operations share a transaction -- so a change to the
+# shipping default silently moved the cut outside the window and the fixture
+# came out with a clean journal, reporting a driver failure that was really a
+# stale constant. What this cell tests is superblock replay, which the batch
+# size has nothing to do with.
+EXT4B_TXN_BATCH=16 EXT4DUMP_FAIL_AFTER=60 "$DUMP" "$img" script "$WORK/sbload.txt" >/dev/null 2>&1
 if ! dumpe2fs -h "$img" 2>/dev/null | grep -q needs_recovery; then
   bad "superblock-replay fixture: the cut left a clean journal"
 else
