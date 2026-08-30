@@ -62,6 +62,9 @@ final class Ext4MenuBar: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         appLog.info("menu-bar agent started")
+        // Both switches a fresh install needs, asked for once and only when
+        // they are actually missing.
+        Ext4Setup.runAtLaunch()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: "externaldrive.badge.person.crop",

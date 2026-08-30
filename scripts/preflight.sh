@@ -36,8 +36,25 @@ else
 fi
 
 # ---------------------------------------------------------- the extension --
+# A reboot leaves the module unregistered -- absent from System Settings, not
+# switched off -- until the containing app runs, because that is what registers
+# an ExtensionKit extension. So try that once before reporting a problem: it is
+# the difference between "your extension is gone" and a working session.
+if ! bash "$ROOT/scripts/check_extension.sh" >/dev/null 2>&1; then
+  if [ -d /Applications/Ext4Mac.app ]; then
+    open -g -j -a /Applications/Ext4Mac.app 2>/dev/null || true
+    sleep 4
+  fi
+fi
+
 if bash "$ROOT/scripts/check_extension.sh" >/dev/null 2>&1; then
   ok "the FSKit extension is installed, enabled, and answers a mount"
+  # Registered today is not registered tomorrow. Without the login item the
+  # next reboot loses it again, and the failure looks like a broken install.
+  if ! /Applications/Ext4Mac.app/Contents/MacOS/Ext4Mac login-item status >/dev/null 2>&1; then
+    note "      (not set to start at login: the next reboot will unregister it."
+    note "       fix once with: Ext4Mac login-item on)"
+  fi
 else
   bad "the FSKit extension is not enabled" \
       "System Settings > General > Login Items & Extensions > File System Extensions"

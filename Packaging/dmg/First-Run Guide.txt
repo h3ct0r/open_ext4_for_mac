@@ -1,7 +1,7 @@
 open_ext4 for Mac — First-Run Guide
 ===================================
 
-A native ext2/ext3/ext4 driver for macOS, built on FSKit. Two steps and
+A native ext2/ext3/ext4 driver for macOS, built on FSKit. Three steps and
 your Linux disks read and write like any other volume.
 
 
@@ -11,20 +11,64 @@ your Linux disks read and write like any other volume.
 Drag Ext4Mac.app onto the Applications folder in this window.
 
 
-2. Enable the file-system extension
------------------------------------
+2. Open Ext4Mac once
+--------------------
 
-macOS ships file-system extensions disabled until you approve them:
+This step is not optional, and it is the one people skip.
+
+macOS registers a file-system extension when its containing app RUNS —
+not when you install it. Until Ext4Mac has been opened at least once, the
+extension does not appear in System Settings at all. Not switched off:
+absent. So if you go looking for it before opening the app, you will find
+an empty list and conclude the installer is broken.
+
+Open it from Applications. It lives in the menu bar and will ask you for
+whatever is still missing.
+
+
+3. Approve the extension
+------------------------
+
+macOS requires a person to approve a file-system extension. No app can do
+it for you — an app that could would be a hole in the sandbox — which is
+why nothing prompts on its own.
+
+Ext4Mac offers to open the right pane for you. Or go there directly:
 
   System Settings  →  General  →  Login Items & Extensions
     →  File System Extensions  →  turn on "open_ext4 (ext2/3/4)"
 
 Plug in an ext4 disk (or open a disk image) and it mounts read-write
-immediately. That is all there is.
+immediately.
 
 
-3. (Optional) Formatting from Disk Utility
-------------------------------------------
+Keep "Start at Login" turned on
+-------------------------------
+
+Ext4Mac offers this on first run, and it is worth accepting. The
+registration from step 2 does not survive a restart: after a reboot, the
+extension is missing again until something opens the app. Starting at
+login does that for you, so the approval you gave in step 3 keeps working.
+
+If you decline and later change your mind, the menu-bar menu has the
+toggle, or run:
+
+    /Applications/Ext4Mac.app/Contents/MacOS/Ext4Mac login-item on
+
+
+Encrypted (LUKS) volumes
+------------------------
+
+Plug one in and Ext4Mac asks for the passphrase, then mounts it under its
+own name. The passphrase is typed into the app and never reaches the
+sandboxed extension, which only ever sees a derived key.
+
+    Ext4Mac list            which volumes are unlocked
+    Ext4Mac forget <uuid>   forget a volume's key again
+
+
+Formatting from Disk Utility (optional)
+---------------------------------------
 
     sudo make install-diskutil
 

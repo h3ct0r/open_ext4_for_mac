@@ -9,6 +9,7 @@
 //
 
 import Foundation
+import ServiceManagement
 import FSKit
 
 @main
@@ -55,6 +56,48 @@ struct Ext4MacApp {
             guard let device = arguments.first else { usage(1) }
             exit(Ext4Mount.command(device))
 
+        // Whether the app starts at login, which is what keeps the FILE SYSTEM
+        // EXTENSION registered.
+        //
+        // An ExtensionKit extension is registered by its containing app
+        // running -- not by installing it, and not by pluginkit, which
+        // reports success and registers it somewhere FSKit never looks. So a
+        // reboot leaves the module absent from System Settings entirely (not
+        // switched off: absent) until something launches the app. Making the
+        // app a login item is the only fix that survives a restart, and it
+        // was reachable solely from the menu bar, which is no use to a script
+        // or to anyone whose extension has just vanished.
+        case "login-item":
+            let action = arguments.first ?? "status"
+            switch action {
+            case "on":
+                do {
+                    try SMAppService.mainApp.register()
+                    print("Ext4Mac will start at login; the extension stays registered across reboots")
+                } catch {
+                    FileHandle.standardError.write(
+                        "Ext4Mac: could not enable: \(error.localizedDescription)\n".data(using: .utf8)!)
+                    exit(1)
+                }
+            case "off":
+                do {
+                    try SMAppService.mainApp.unregister()
+                    print("Ext4Mac will no longer start at login")
+                    print("note: after a reboot the extension will be missing until the app runs")
+                } catch {
+                    FileHandle.standardError.write(
+                        "Ext4Mac: could not disable: \(error.localizedDescription)\n".data(using: .utf8)!)
+                    exit(1)
+                }
+            case "status":
+                let on = SMAppService.mainApp.status == .enabled
+                print(on ? "enabled — starts at login" : "disabled — the extension will be missing after a reboot")
+                exit(on ? 0 : 1)
+            default:
+                usage(1)
+            }
+            exit(0)
+
         case "help", "-h", "--help":
             usage(0)
         default:
@@ -73,6 +116,8 @@ struct Ext4MacApp {
         Ext4Mac list                which volumes are unlocked
         Ext4Mac mount /dev/diskN    mount a volume whose key is stored
         Ext4Mac menu                watch for encrypted volumes and ask
+        Ext4Mac login-item [on|off] start at login, so the extension stays
+                                    registered across reboots (default: status)
 
         Or mount anything ext4 with:
           mount -F -t ext4 <disk> <mountpoint>
