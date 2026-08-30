@@ -26,12 +26,53 @@ note() { printf "        %s\n" "$1"; }
 echo "########## PREFLIGHT ##########"
 echo ""
 
+# --------------------------------------------------------------- the tools --
+# The hardware suites format and inspect through ext4dump; after `make clean`
+# they used to fail mid-run with a message that blamed the device.
+if [ -x "$ROOT/build/bin/ext4dump" ]; then
+  ok "ext4dump is built"
+else
+  bad "ext4dump is not built" "run: make tools"
+fi
+
 # ---------------------------------------------------------- the extension --
 if bash "$ROOT/scripts/check_extension.sh" >/dev/null 2>&1; then
-  ok "the FSKit extension is installed and enabled"
+  ok "the FSKit extension is installed, enabled, and answers a mount"
 else
   bad "the FSKit extension is not enabled" \
       "System Settings > General > Login Items & Extensions > File System Extensions"
+fi
+
+# ---------------------------------------------------------------- freshness --
+# Is the installed extension the build in this tree? A stale install runs the
+# whole day and measures last week. Always strict here: preflight's whole job
+# is refusing to lie.
+if EXT4_REQUIRE_FRESH=1 bash "$ROOT/scripts/check_install_freshness.sh" >/dev/null 2>&1; then
+  ok "the installed extension matches this tree's build"
+else
+  bad "the installed extension does not match this tree (or freshness cannot be checked)" \
+      "run: make install   (then kill the running Ext4FS process so fskitd relaunches it)"
+fi
+
+# Real-media-only requirements, checked only when a device was named: image
+# runs need neither, and blocking them on an unprimed sudo would gate offline
+# work on a password.
+if [ -n "$DEVICE" ]; then
+  # Formatting real media routes through /Library/Filesystems/ext4.fs;
+  # without it, prepare-device writes a partition type nothing claims.
+  if [ -d "/Library/Filesystems/ext4.fs" ]; then
+    ok "the ext4.fs bundle is installed"
+  else
+    bad "the ext4.fs bundle is missing" "run: sudo make install-diskutil"
+  fi
+
+  # The device suites need root mid-run; prompting for a password inside a
+  # five-round sweep is how a run stalls unattended.
+  if sudo -n true 2>/dev/null; then
+    ok "sudo is pre-authorized"
+  else
+    bad "sudo is not pre-authorized" "run: sudo -v   (and keep the terminal open)"
+  fi
 fi
 
 # ------------------------------------------------------- the only real test --

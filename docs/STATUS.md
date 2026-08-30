@@ -3,7 +3,7 @@
 | Phase | State |
 |---|---|
 | 0 — pipeline & packaging | **complete — signed, installed, loads** |
-| 1 — read-only ext2/3/4 | **complete; 41 tests green** |
+| 1 — read-only ext2/3/4 | **complete; read suite green** |
 | 2 — kernel-offloaded I/O | **disabled** — see below |
 | 3 — write path | **complete and working on real mounts** |
 | 4 — correctness harness | **complete: image, crash-consistency, differential-vs-Linux, and mounted-driver** |
@@ -13,7 +13,7 @@
 
 ```bash
 make          # builds Ext4Mac.app with the FSKit extension inside
-make test     # 41 assertions against real ext2/3/4 images
+make test     # the read suite against real ext2/3/4 images
 ```
 
 The whole project builds with the **Command Line Tools** — full Xcode is not
@@ -227,7 +227,7 @@ how two genuine lwext4 defects were found; see `patches/lwext4/README.md`.
 ## Validation
 
 ```bash
-make validate           # all seven stages, unattended
+make validate           # the full chain (18 stages), unattended
 make validate-asan      # the same under AddressSanitizer + UBSan
 make test-format        # stage 3 on its own
 make test-orphan        # stage 4 on its own
@@ -236,14 +236,20 @@ make test-mount-crash   # stage 7 on its own
 
 | Stage | What it proves |
 |---|---|
-| read suite | 41 assertions, content verified byte-for-byte against `debugfs` |
-| write suite | 101 assertions, `e2fsck` after **every** mutating operation |
-| format | 29 assertions; 117 size/block-size/generation combinations must be `e2fsck`-clean, and the volume must round-trip through the Linux kernel |
-| open-unlink recovery | 23 assertions; every cut point of a deferred delete recovers by *mounting*, and the orphan lists we write are cleaned up by `e2fsck` and by the Linux kernel |
-| crash consistency | 303 cut points across 14 operations; the write stream is severed at every point, the **real Linux kernel** replays the journal, and `e2fsck` must be clean |
-| reordered writes | the same, on a medium that also **reorders** what was in flight — the failure a disk image cannot otherwise produce. Asserts that disabling barriers breaks it |
-| differential vs Linux | 36 assertions; volumes round-trip between our driver and the real Linux ext4 driver in both directions, with the kernel log required to be silent |
-| mounted driver | 23 assertions against a **real mount** — the only stage that goes through FSKit |
+| 0 / 0b — patches, ship surface | the patch set reproduces the vendored tree; the shipping core reads no environment |
+| 1 — read suite | content verified byte-for-byte against `debugfs` |
+| 2 / 2b — write suite, bounds | `e2fsck` after **every** mutating operation; overflow and POSIX-semantics refusals, including hostile journal geometry under deadlines |
+| 3 — format | a size/block-size/generation sweep must be `e2fsck`-clean and round-trip through the Linux kernel; big formats and lazy-init mounts are bounded in device *commands* |
+| 4 / 4b / 4c — orphans, prealloc, revoke | every cut point of a deferred delete recovers by *mounting*; unwritten-extent lifecycle; every revoke entry names a real block |
+| 5 / 5b — crypto, error injection | AES-XTS known answers; a medium that answers EIO must surface every failure (exit codes, kept journals, e2fsck-clean end states) |
+| 6 — LUKS | fixtures made by real cryptsetup, read back by the Linux kernel |
+| 7 / 7b — crash, reordered writes | the write stream severed at every cut point, replayed by the **real Linux kernel**; then the same on a medium that also **reorders** what was in flight |
+| 8 / 8b — differential, replay speed | round-trips between our driver and Linux ext4 with a silent kernel log; a deep dirty journal must mount inside DiskArbitration's ~20 s budget on a modelled USB stick |
+| 9–12 — mounted stages | the real FSKit mount: crash sweeps, encrypted volumes, kill recovery (now with a timed deep-journal remount), newfs/fsck |
+
+The per-suite assertion counts drift as suites grow; the suites print their
+own tallies and the validation driver records PASS/FAIL/SKIP per stage —
+those, not this table, are the record.
 
 Stages 5–7 use Docker, which on Apple Silicon is a real Linux VM — so the
 oracle is the actual ext4 implementation, not another copy of our assumptions.
@@ -1545,7 +1551,6 @@ thirteen sizes × three block sizes × three generations.
 - LUKS detached headers, and ciphers other than `aes-xts-plain64`
 - Kernel-offloaded I/O, for reads as well as writes: the conformance is out
   of the build entirely, so *all* I/O is byte-copy today
-- Notarised DMG
 
 ## Preallocation
 

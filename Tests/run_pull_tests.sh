@@ -96,11 +96,14 @@ case "$LOCATION:$REMOVABLE" in
   *) die "$DEVICE reports neither External nor Removable (location '${LOCATION:-none}', media '${REMOVABLE:-none}'); refusing" ;;
 esac
 
-if ! pluginkit -m -i dev.h3ct0r.ext4mac.Ext4FS 2>/dev/null | grep -q '^+'; then
-  echo "warning: the extension does not look enabled (pluginkit shows no '+')."
-  echo "         System Settings > General > Login Items & Extensions >"
-  echo "         File System Extensions, or nothing below will mount."
-fi
+# The full gate, not the pluginkit guess (check_extension.sh documents why
+# pluginkit misreports): extension answers a real mount, install is fresh,
+# tools built, .fs bundle in place, sudo primed. This is the costliest suite
+# in the tree -- rounds of physical pulls -- and it used to be the only
+# hardware suite with no freshness check: a stale install would burn the
+# whole session measuring last week's build.
+bash "$ROOT/scripts/preflight.sh" \
+  || die "preflight failed; nothing below would measure this build"
 
 echo "about to run $ROUNDS pull round(s), erasing /dev/$DEVICE each time"
 echo "    $(sed -n 's/.*Device \/ Media Name: */name  /p' <<<"$INFO" | head -1)"

@@ -287,10 +287,27 @@ detach_target() {
 
 require_sudo
 
-for round in $(seq 1 "$ROUNDS"); do
-  prepare || { bad "round $round: could not prepare the volume"; continue; }
+# One extra round beyond ROUNDS: the incident round. The normal rounds kill
+# after 0.8-2.2 s -- a shallow journal, which is most crashes. The 2026-08-29
+# incident was the other kind: minutes of writes, then the cut, then a replay
+# so deep DiskArbitration timed the mount out before it finished. This round
+# floods for ~12 s first and then holds the remount to the same ~20 s budget
+# the OS does -- as a measured number, where the old suite recorded only
+# REMOUNT=yes/no after a fixed wait.
+for round in $(seq 1 $((ROUNDS + 1))); do
+  if [ "$round" -le "$ROUNDS" ]; then
+    R_TAG="round $round"
+    R_DIRS=300
+    R_SLEEP="$(python3 -c 'import random; print(round(random.uniform(0.8, 2.2), 2))')"
+  else
+    R_TAG="deep round"
+    R_DIRS=2000
+    R_SLEEP=12
+  fi
+
+  prepare || { bad "$R_TAG: could not prepare the volume"; continue; }
   if ! mount_target; then
-    bad "round $round: did not mount" \
+    bad "$R_TAG: did not mount" \
         "$(diskutil mount "$DEVICE" 2>&1 | head -1)"
     detach_target; continue
   fi
@@ -300,7 +317,7 @@ for round in $(seq 1 "$ROUNDS"); do
   # directory name carries the run's PID as well as the round, so damage
   # reported by e2fsck can never be confused with an earlier run's.
   ROUND_DIR="k$$-r$round"
-  ( for i in $(seq 1 300); do
+  ( for i in $(seq 1 "$R_DIRS"); do
       mkdir -p "$MOUNTED_AT/$ROUND_DIR/d$i/inner" 2>/dev/null
       echo x > "$MOUNTED_AT/$ROUND_DIR/d$i/f" 2>/dev/null
       xattr -w user.k v "$MOUNTED_AT/$ROUND_DIR/d$i/f" 2>/dev/null
@@ -308,7 +325,7 @@ for round in $(seq 1 "$ROUNDS"); do
   WORKLOAD=$!
 
   # Somewhere in the middle of it, at no particular boundary.
-  sleep "$(python3 -c 'import random; print(round(random.uniform(0.8, 2.2), 2))')"
+  sleep "$R_SLEEP"
   pkill -9 -f "$EXT_PATTERN" 2>/dev/null
   sleep 2
   kill "$WORKLOAD" 2>/dev/null; wait "$WORKLOAD" 2>/dev/null
@@ -322,14 +339,15 @@ for round in $(seq 1 "$ROUNDS"); do
   if [ -n "$DEVICE" ]; then DEV="/dev/$DEVICE"
   else DEV=$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount "$WORK/k.img" \
              2>/dev/null | head -1 | awk '{print $1}'); fi
-  note "  round $round: driver killed; waiting for the device to be released"
-  mounted=0
+  note "  $R_TAG: driver killed; waiting for the device to be released"
+  mounted=0; MOUNT_SECS=0
   for attempt in 1 2 3 4 5; do
-    mount_target && { mounted=1; break; }
+    t0=$SECONDS
+    mount_target && { mounted=1; MOUNT_SECS=$((SECONDS - t0)); break; }
     sleep 3
   done
   if [ "$mounted" -eq 0 ]; then
-    bad "round $round: did not mount after the kill -- recovery could not run" \
+    bad "$R_TAG: did not mount after the kill -- recovery could not run" \
         "$(diskutil mount "$DEVICE" 2>&1 | head -1)"
     release_device; detach_target; continue
   fi
@@ -338,10 +356,20 @@ for round in $(seq 1 "$ROUNDS"); do
   detach_target
   sleep 1
 
-  note "  round $round: replayed; checking with e2fsck"
+  # The remount runs the replay; its duration IS the user-visible number,
+  # and past ~20 s DiskArbitration gives up and the volume never appears.
+  note "  $R_TAG: remount (replay included) took ${MOUNT_SECS}s"
+  if [ "$MOUNT_SECS" -le 20 ]; then
+    ok "$R_TAG: remount fits DiskArbitration's ~20s budget (${MOUNT_SECS}s)"
+  else
+    bad "$R_TAG: remount blew DiskArbitration's budget" \
+        "${MOUNT_SECS}s; on a real desktop this volume never appears"
+  fi
+
+  note "  $R_TAG: replayed; checking with e2fsck"
   with_deadline "$FSCK_TIMEOUT" fsck_target "$WORK/fsck.out"
   if [ $? -eq 124 ]; then
-    bad "round $round: the check never returned"
+    bad "$R_TAG: the check never returned"
     wedged
     exit 1
   fi
@@ -350,21 +378,21 @@ for round in $(seq 1 "$ROUNDS"); do
   # A verdict requires the check to have actually run. e2fsck output always
   # carries its own banner; sudo's complaints do not.
   if ! grep -q "^e2fsck" <<<"$out"; then
-    bad "round $round: e2fsck did not run -- no verdict" \
+    bad "$R_TAG: e2fsck did not run -- no verdict" \
         "$(head -1 <<<"$out")"
     exit 1
   fi
 
   with_deadline "$FSCK_TIMEOUT" repair_target
   if [ $? -eq 124 ]; then
-    bad "round $round: the repair never returned"
+    bad "$R_TAG: the repair never returned"
     wedged
     exit 1
   fi
   if grep -qE "^(Pass 5|.*: [0-9]+/[0-9]+ files)" <<<"$out" && ! grep -q "WARNING" <<<"$out"; then
-    ok "round $round: the journal recovered the volume completely"
+    ok "$R_TAG: the journal recovered the volume completely"
   else
-    bad "round $round: inconsistent after recovery" \
+    bad "$R_TAG: inconsistent after recovery" \
         "$(grep -vE '^Pass |^e2fsck |^$' <<<"$out" | head -3 | tr '\n' ' ')"
   fi
 done

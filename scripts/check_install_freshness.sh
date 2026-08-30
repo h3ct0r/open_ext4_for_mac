@@ -20,8 +20,12 @@ cdhash() { codesign -dvvv "$1" 2>&1 | awk -F= '/^CDHash=/{print $2; exit}'; }
 
 if [ ! -d "$BUILT" ]; then
   # Nothing local to compare against -- common right after `make clean`.
-  # Say so rather than pretending to have checked anything.
-  echo "freshness: no built appex in build/ to compare against (skipping)"
+  # Say so rather than pretending to have checked anything. Under
+  # EXT4_REQUIRE_FRESH (the hardware-day gate) an uncheckable install is a
+  # failed check, not a pass: "could not verify" and "verified" must not
+  # be the same green.
+  echo "freshness: no built appex in build/ to compare against"
+  [ "${EXT4_REQUIRE_FRESH:-0}" = "1" ] && exit 1
   exit 0
 fi
 

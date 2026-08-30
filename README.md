@@ -29,7 +29,7 @@ newfs_fskit -t ext4 -L MYDISK /dev/disk5      # ext4, or -g 2 / -g 3
 sudo make install-diskutil                    # and appear in Disk Utility
 ```
 
-Validation runs unattended in about two minutes:
+Validation runs unattended (allow ~20 minutes for the full chain with Docker and the mounted stages; the offline stages alone are a few minutes):
 
 ```bash
 make validate
@@ -37,18 +37,21 @@ make validate
 
 | Stage | Coverage |
 |---|---|
-| read suite | 41 assertions, verified against `debugfs` |
-| write suite | 101 assertions, `e2fsck` after **every** mutating operation |
-| format | 29 assertions; 117 geometries, all `e2fsck`-clean |
-| open-unlink recovery | 23 assertions; the orphan list, and torn ones |
-| crypto primitives | 29 assertions; AES-XTS against OpenSSL, hostile JSON |
-| LUKS containers | 27 assertions; judged by real `cryptsetup` |
-| crash consistency | 303 cut points; the Linux kernel replays each journal |
+| read suite | verified against `debugfs` |
+| write suite | `e2fsck` after **every** mutating operation |
+| bounds & semantics | overflow refusals, hostile journal geometry, POSIX edges |
+| format | a geometry sweep, all `e2fsck`-clean; big formats bounded in device commands |
+| open-unlink recovery | the orphan list, and torn ones |
+| crypto & error injection | AES-XTS against OpenSSL; a medium that answers EIO must surface every failure |
+| LUKS containers | judged by real `cryptsetup` |
+| crash consistency | every cut point of the write stream; the Linux kernel replays each journal |
 | reordered writes | the same on a medium that reorders, which is the failure an image cannot produce — and asserts that disabling barriers breaks it |
-| differential vs Linux | 36 assertions, both directions |
-| mounted driver | 23 assertions against a live FSKit mount |
-| encrypted, mounted | 35 assertions; a LUKS volume through FSKit, judged by Linux |
-| recovery after a kill | the driver killed mid-write, then made to replay its own journal |
+| differential vs Linux | both directions, with a silent kernel log |
+| journal replay speed | a deep dirty journal must mount inside DiskArbitration's budget on a modelled USB stick |
+| mounted driver | a live FSKit mount: crash sweeps, encrypted volumes, kill recovery with a timed remount, newfs |
+
+(The suites print their own assertion tallies; the counts grow too often to
+be worth restating here.)
 
 A file deleted while something still has it open goes on ext4's own **orphan
 list**, so a crash in that window is recoverable by the next mount rather than
@@ -73,7 +76,7 @@ extension, which only ever sees a master key. Everything macOS writes to an
 encrypted volume is handed back to real `cryptsetup` and the Linux kernel to
 read; see [docs/STATUS.md](docs/STATUS.md).
 
-Testing found eight genuine bugs in lwext4 — including one that replayed stale
+Testing has found over twenty genuine bugs in lwext4 — including one that replayed stale
 journal records over live metadata, and one that hung the driver forever
 instead of failing — plus several of our own. See
 [docs/STATUS.md](docs/STATUS.md) and
