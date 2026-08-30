@@ -456,7 +456,56 @@ static int ext4_fs_init_inode_table(struct ext4_block_group_ref *bg_ref)
 
 	ext4_fsblk_t last_block = first_block + table_blocks - 1;
 
-	/* Initialization of all itable blocks */
+	/* Initialization of all itable blocks.
+	 *
+	 * The table is physically contiguous and its content is zeroes, so
+	 * this is the textbook bulk write -- and it went through the cache
+	 * one block at a time: one device command per 4 KiB, ~512 commands
+	 * per group, ~66,000 for a 16 GB format ("minutes of silence" on a
+	 * stick, and the reason the format progress bar exists). Worse, the
+	 * same loop runs at MOUNT: a volume formatted by mke2fs with
+	 * lazy_itable_init leaves groups uninitialized, the post-recovery
+	 * walk initializes them, and with a journal running each block also
+	 * traveled through the log. All of it inside DiskArbitration's ~20 s
+	 * budget.
+	 *
+	 * Zero in physically-contiguous runs with one command per chunk,
+	 * past the cache. Safe against a crash by idempotence and ordering:
+	 * the zeroes carry no state, and the UNINIT flag that says "this
+	 * table is now valid" is journaled by the caller and committed
+	 * behind a barrier AFTER these writes -- a crash before the commit
+	 * re-zeroes next time, a crash after finds the zeroes on the medium.
+	 * The invalidate keeps any cached copies from resurrecting stale
+	 * bytes. */
+	{
+		const uint32_t chunk_max = (1024u * 1024u) / block_size;
+		uint32_t chunk = table_blocks < chunk_max ? table_blocks
+							  : chunk_max;
+		uint8_t *zeros = ext4_calloc(chunk, block_size);
+
+		if (zeros) {
+			int rc = EOK;
+			ext4_fsblk_t at = first_block;
+			uint32_t left = table_blocks;
+			while (left) {
+				uint32_t n = left < chunk ? left : chunk;
+				rc = ext4_blocks_set_direct(bg_ref->fs->bdev,
+							    zeros, at, n);
+				if (rc != EOK)
+					break;
+				at += n;
+				left -= n;
+			}
+			ext4_free(zeros);
+			if (rc == EOK)
+				ext4_bcache_invalidate_lba(
+					bg_ref->fs->bdev->bc,
+					first_block, table_blocks);
+			return rc;
+		}
+	}
+
+	/* No memory for a chunk buffer: the slow, correct path. */
 	for (fblock = first_block; fblock <= last_block; ++fblock) {
 		struct ext4_block b;
 		int rc = ext4_trans_block_get_noread(bg_ref->fs->bdev, &b, fblock);
