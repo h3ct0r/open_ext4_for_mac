@@ -1711,6 +1711,70 @@ static int ext4_fs_set_inode_data_block_index(struct ext4_inode_ref *inode_ref,
 }
 
 
+/**@brief Append a RANGE of data blocks to an inode, in one mapping call.
+ *
+ * The single-block form below asks the extent layer for exactly one block,
+ * and that is what made writing into a preallocated file crawl. macOS
+ * preallocates a large file before copying into it, which leaves unwritten
+ * extents; converting an unwritten extent zeroes it first, and asking one
+ * block at a time meant one zeroing command per block. Measured on a USB
+ * stick: 100 MB into a preallocated file cost 25,941 device commands and
+ * wrote 210 MB, against 167 commands and 105 MB for the same write into a
+ * fresh file -- a Finder copy ran at 6 MB/s.
+ *
+ * Asking for the whole run instead lets the extent layer convert it in one
+ * step, and the zeroing underneath it is issued in runs too. Fresh files
+ * benefit as well: the blocks come from one allocation rather than N.
+ *
+ * @param inode_ref  the inode
+ * @param fblock     out: first physical block of the run
+ * @param iblock     out: first logical block of the run
+ * @param max_blocks how many blocks the caller can use
+ * @param count      out: how many it actually got (>= 1 on success)
+ * @return standard error code */
+int ext4_fs_append_inode_dblk_range(struct ext4_inode_ref *inode_ref,
+				    ext4_fsblk_t *fblock, ext4_lblk_t *iblock,
+				    uint32_t max_blocks, uint32_t *count)
+{
+	if (max_blocks == 0)
+		max_blocks = 1;
+#if CONFIG_EXTENT_ENABLE && CONFIG_EXTENTS_ENABLE
+	if ((ext4_sb_feature_incom(&inode_ref->fs->sb, EXT4_FINCOM_EXTENTS)) &&
+	    (ext4_inode_has_flag(inode_ref->inode, EXT4_INODE_FLAG_EXTENTS))) {
+		int rc;
+		ext4_fsblk_t current_fsblk;
+		uint32_t got = 0;
+		struct ext4_sblock *sb = &inode_ref->fs->sb;
+		uint64_t inode_size = ext4_inode_get_size(sb, inode_ref->inode);
+		uint32_t block_size = ext4_sb_get_block_size(sb);
+		*iblock = (uint32_t)((inode_size + block_size - 1) / block_size);
+
+		rc = ext4_extent_get_blocks(inode_ref, *iblock, max_blocks,
+					    &current_fsblk, true, &got);
+		if (rc != EOK)
+			return rc;
+
+		/* A mapping that reports nothing would leave the caller
+		 * looping on the same block for ever. */
+		if (got == 0)
+			got = 1;
+
+		*fblock = current_fsblk;
+		ext4_assert(*fblock);
+
+		ext4_inode_set_size(inode_ref->inode,
+				    inode_size + (uint64_t)got * block_size);
+		inode_ref->dirty = true;
+		*count = got;
+		return rc;
+	}
+#endif
+	/* Indirect-mapped inodes (ext2/ext3) have no extents to convert and no
+	 * range form to ask for; one block, exactly as before. */
+	*count = 1;
+	return ext4_fs_append_inode_dblk(inode_ref, fblock, iblock);
+}
+
 int ext4_fs_append_inode_dblk(struct ext4_inode_ref *inode_ref,
 			      ext4_fsblk_t *fblock, ext4_lblk_t *iblock)
 {

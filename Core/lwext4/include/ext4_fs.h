@@ -279,6 +279,10 @@ int ext4_fs_init_inode_dblk_idx(struct ext4_inode_ref *inode_ref,
  * @param iblock    Output logical number of newly allocated block
  * @return Error code
  */
+int ext4_fs_append_inode_dblk_range(struct ext4_inode_ref *inode_ref,
+				    ext4_fsblk_t *fblock, ext4_lblk_t *iblock,
+				    uint32_t max_blocks, uint32_t *count);
+
 int ext4_fs_append_inode_dblk(struct ext4_inode_ref *inode_ref,
 			      ext4_fsblk_t *fblock, ext4_lblk_t *iblock);
 

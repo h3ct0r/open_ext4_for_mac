@@ -1978,9 +1978,28 @@ static int ext4_ext_zero_unwritten_range(struct ext4_inode_ref *inode_ref,
 					 uint32_t blocks_count)
 {
 	int err = EOK;
-	uint32_t i;
 	uint32_t block_size = ext4_sb_get_block_size(&inode_ref->fs->sb);
-	void *zeros = ext4_calloc(1, block_size);
+
+	/* The range is contiguous by construction, so it can be zeroed in runs
+	 * rather than a command per block. It matters because this is not a
+	 * rare path: macOS preallocates a large file before copying into it,
+	 * which is what an unwritten extent is, so every Finder copy of any
+	 * size lands here. Measured on a USB stick, 100 MB written into a
+	 * preallocated file cost 25,941 device commands where the same write
+	 * into a fresh file cost 167, and the copy ran at 6 MB/s. */
+	uint32_t chunk_blocks = (1u << 20) / block_size;
+	if (chunk_blocks == 0)
+		chunk_blocks = 1;
+	if (chunk_blocks > blocks_count)
+		chunk_blocks = blocks_count;
+
+	void *zeros = ext4_calloc(chunk_blocks, block_size);
+	while (!zeros && chunk_blocks > 1) {
+		/* Memory pressure is not a reason to fail a write; it is a
+		 * reason to do it in smaller pieces. */
+		chunk_blocks /= 2;
+		zeros = ext4_calloc(chunk_blocks, block_size);
+	}
 	if (!zeros)
 		return ENOMEM;
 
@@ -1993,11 +2012,16 @@ static int ext4_ext_zero_unwritten_range(struct ext4_inode_ref *inode_ref,
 	 * gives the caller a clean base its direct write can land on. It also
 	 * keeps data blocks out of the journal, where the transaction-dirty
 	 * path would have put them. */
-	for (i = 0; i < blocks_count; i++) {
+	for (uint32_t done = 0; done < blocks_count; ) {
+		uint32_t n = blocks_count - done;
+		if (n > chunk_blocks)
+			n = chunk_blocks;
+
 		err = ext4_blocks_set_direct(inode_ref->fs->bdev, zeros,
-					     block + i, 1);
+					     block + done, n);
 		if (err != EOK)
 			break;
+		done += n;
 	}
 	ext4_bcache_invalidate_lba(inode_ref->fs->bdev->bc, block,
 				   blocks_count);
