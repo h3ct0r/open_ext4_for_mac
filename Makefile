@@ -341,7 +341,7 @@ test-eio: tools
 # which it ERASES. preflight checks the hand-granted switches (extension
 # enabled, .fs bundle installed) before spending the run, not after -- none
 # of them announces itself when it lapses.
-preflight:
+preflight: tools
 	@bash scripts/preflight.sh $(EXT4_KILL_DEVICE)
 
 # `tools` is not decoration: the suite formats its target with ext4dump, and
@@ -580,7 +580,12 @@ uninstall-barrier:
 # Needs DEVICE, and CONFIRM=ERASE, because BSD names change on every replug and
 # a script that trusts a remembered one will eventually be pointed at something
 # else. See scripts/prepare_device.sh for the three routes that do not work.
-prepare-device:
+# `tools` first, always. This erases a real device with build/bin/ext4dump,
+# and without the prerequisite it runs whatever happens to be in build/ --
+# which on a machine where the last build came from somewhere else is code
+# nobody chose. That cost three re-runs of a four-minute format against a
+# stale binary before anyone thought to check the timestamp.
+prepare-device: tools
 	@DEVICE="$(DEVICE)" CONFIRM="$(CONFIRM)" EXT4_LABEL="$(EXT4_LABEL)" \
 	    EXT4_SIZE="$(EXT4_SIZE)" \
 	    bash scripts/prepare_device.sh
