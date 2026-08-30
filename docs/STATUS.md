@@ -1721,3 +1721,23 @@ fails), every hardware suite calls it, kill-recovery times its remounts
 against the ~20 s budget including a new deep-journal round, and
 `docs/HARDWARE.md` is the runbook: the ladder, the log lines each rung
 should print, evidence-before-retry, and the full knob reference.
+
+**And the first mounted run caught the pass's own regression** (0043).
+The re-run of the mounted suites — the P0 exit gate — ended with e2fsck
+counting one more subdirectory than the root inode's link count on a
+cleanly unmounted LUKS2 volume. The autopsy: 0041's checkpoint batcher
+inherited the replay batch's cache-sync, which is correct in recovery
+(the log outranks any resident) and inverted at checkpoint time —
+flushing an older transaction synced its stale logged copy over a newer
+transaction's dirty resident, so every hot metadata block could land one
+transaction stale under a green unmount, and later commits journaled the
+clobbered bytes (the mount-crash suite's intermittent "durable once
+synced" failures were this same bug seen through a crash). Reproduced
+offline in four mkdirs (`EXT4B_TXN_BATCH=1` — one transaction each, all
+sharing one inode-table block), fixed by one rule (a checkpoint's
+cache-sync leaves dirty residents alone), and guarded in the write suite
+("a checkpointed hot block keeps its newest copy"). A reminder of why
+the exit gate exists: the offline suites all passed because eager
+release-time flushing usually empties the checkpoint queue before two
+transactions can share a block — the mounted driver, with fseventsd
+committing around it, is what stacked the queue.

@@ -502,6 +502,29 @@ else
   bad "e2fsck accepts the 4Kn-built volume"
 fi
 
+# ================================== checkpoints keep the newest copy ==
+# One transaction per operation stacks the checkpoint queue, and these four
+# mkdirs journal the same inode-table block in every transaction. The final
+# unmount flushes them oldest-first; flushing an older transaction must not
+# resurrect its stale copy of that block. It did: the write batch's cache
+# sync overwrote the newer transaction's dirty resident with the older
+# logged copy, and /d landed on disk as an unallocated inode -- a green
+# unmount, a lost directory. (Found on a mounted volume as a root link
+# count one short of its subdirectories.)
+echo
+echo "checkpoint ordering"
+ckpt_img="$TMP/ckpt.img"
+rm -f "$ckpt_img"; truncate -s 64m "$ckpt_img"
+mke2fs -q -F -t ext4 -b 4096 "$ckpt_img"
+printf 'mkdir /a\nmkdir /b\nmkdir /c\nmkdir /d\n' > "$TMP/ckpt.ops"
+if EXT4B_TXN_BATCH=1 "$DUMP" "$ckpt_img" script "$TMP/ckpt.ops" >/dev/null 2>&1; then
+  IMG="$ckpt_img"
+  fsck_clean "a checkpointed hot block keeps its newest copy" \
+    && ok "a checkpointed hot block keeps its newest copy (4 transactions, one inode-table block)"
+else
+  bad "checkpoint-ordering script ran" "ext4dump script failed"
+fi
+
 # ==================================================================== report ==
 echo
 echo "─────────────────────────────────"
