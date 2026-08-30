@@ -2054,6 +2054,121 @@ __unused static void print_path(struct ext4_extent_path *path)
 	}
 }
 
+/**@brief Locate an already-allocated range without converting it.
+ *
+ * ext4_extent_get_blocks() answers an unwritten extent one of two ways: with
+ * create it zeroes the range and marks it written, and without create it
+ * reports no block at all. Neither suits a caller that is about to overwrite
+ * every byte: zeroing writes the whole range twice, and refusing to name the
+ * blocks means it cannot write them at all.
+ *
+ * This reports where the range lives and whether it is still unwritten,
+ * changing nothing. The caller writes its data and then calls
+ * ext4_extent_mark_written(), so the extent stays unwritten until the data is
+ * on the medium -- a crash in between leaves it unwritten, which reads back
+ * as zeros rather than exposing whatever those blocks held before. That
+ * ordering is the whole reason the zeroing exists, and it is what makes
+ * skipping it safe.
+ *
+ * @param inode_ref   the inode
+ * @param iblock      first logical block
+ * @param max_blocks  how many the caller can use
+ * @param result      out: first physical block, or 0 if not allocated
+ * @param blocks_count out: contiguous blocks found from @iblock
+ * @param unwritten   out: true if the range is an unwritten extent
+ * @return standard error code */
+int ext4_extent_map_range(struct ext4_inode_ref *inode_ref, ext4_lblk_t iblock,
+			  uint32_t max_blocks, ext4_fsblk_t *result,
+			  uint32_t *blocks_count, bool *unwritten)
+{
+	struct ext4_extent_path *path = NULL;
+	struct ext4_extent *ex;
+	int err = EOK;
+	int32_t depth;
+
+	if (result)
+		*result = 0;
+	if (blocks_count)
+		*blocks_count = 0;
+	if (unwritten)
+		*unwritten = false;
+
+	err = ext4_find_extent(inode_ref, iblock, &path, 0);
+	if (err != EOK)
+		return err;
+
+	depth = ext_depth(inode_ref->inode);
+	ex = path[depth].extent;
+	if (ex) {
+		ext4_lblk_t ee_block = to_le32(ex->first_block);
+		ext4_fsblk_t ee_start = ext4_ext_pblock(ex);
+		uint16_t ee_len = ext4_ext_get_actual_len(ex);
+
+		if (IN_RANGE(iblock, ee_block, ee_len)) {
+			uint32_t allocated = ee_len - (iblock - ee_block);
+			if (allocated > max_blocks)
+				allocated = max_blocks;
+
+			if (result)
+				*result = iblock - ee_block + ee_start;
+			if (blocks_count)
+				*blocks_count = allocated;
+			if (unwritten)
+				*unwritten = ext4_ext_is_unwritten(ex);
+		}
+	}
+
+	ext4_ext_drop_refs(inode_ref, path, 0);
+	ext4_free(path);
+	return EOK;
+}
+
+/**@brief Mark an unwritten range initialized, without zeroing it.
+ *
+ * For a caller that has just written every byte of the range through
+ * ext4_extent_map_range(). No zeroing: the blocks hold the caller's data, and
+ * zeroing them now would erase it.
+ *
+ * @param inode_ref    the inode
+ * @param iblock       first logical block
+ * @param blocks_count how many to mark
+ * @return standard error code */
+int ext4_extent_mark_written(struct ext4_inode_ref *inode_ref,
+			     ext4_lblk_t iblock, uint32_t blocks_count)
+{
+	struct ext4_extent_path *path = NULL;
+	struct ext4_extent *ex;
+	int err;
+	int32_t depth;
+
+	if (blocks_count == 0)
+		return EOK;
+
+	err = ext4_find_extent(inode_ref, iblock, &path, 0);
+	if (err != EOK)
+		return err;
+
+	depth = ext_depth(inode_ref->inode);
+	ex = path[depth].extent;
+	if (!ex) {
+		err = EIO;
+		goto out;
+	}
+
+	/* Already written -- nothing owed. */
+	if (!ext4_ext_is_unwritten(ex))
+		goto out;
+
+	err = ext4_ext_convert_to_initialized(inode_ref, &path, iblock,
+					      blocks_count);
+out:
+	if (path) {
+		ext4_ext_drop_refs(inode_ref, path, 0);
+		ext4_free(path);
+	}
+	return err;
+}
+
 int ext4_extent_get_blocks(struct ext4_inode_ref *inode_ref, ext4_lblk_t iblock,
 			   uint32_t max_blocks, ext4_fsblk_t *result,
 			   bool create, uint32_t *blocks_count)
