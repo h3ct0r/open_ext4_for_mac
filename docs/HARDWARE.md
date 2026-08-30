@@ -15,6 +15,21 @@ diagnose it in one iteration.
 
 ## 0. Before leaving the desk
 
+**Unmount your own media first.** The mounted suites crash-test the driver
+by `SIGSTOP`ing and `kill -9`ing the extension — the *shared* extension
+process, which serves every ext4 volume on the machine. A drive of yours
+mounted at the time gets crash-tested whether you meant it or not, and a
+copy in flight is interrupted mid-write. The journal is built for exactly
+that and kill-recovery passes it 12 rounds out of 12, but a file written
+in that window can still be incomplete, and it is a needless risk to take
+with real data.
+
+The same goes the other way: heavy I/O from your own work while a suite
+runs makes the machine slower, and two fixtures build their journals by
+running a load for a fixed number of seconds. Starve them and they come
+out shallow, which reads as a driver failure rather than a busy machine.
+
+
 ```bash
 bash scripts/run_full_validation.sh
 ```
