@@ -1468,8 +1468,23 @@ static void jbd_build_revoke_tree(struct jbd_fs *jbd_fs,
 				     JBD_FEATURE_INCOMPAT_64BIT))
 		record_len = 8;
 
-	nr_entries = (jbd_get32(revoke_hdr, count) -
-			sizeof(struct jbd_revoke_header)) /
+	/* `count` comes off the medium and the block is only so big. Patch
+	 * 0018 fixed what the field MEANS; nothing yet bounded what it SAYS.
+	 * A count below the header size underflows the unsigned subtraction
+	 * to ~2^30 iterations, and anything above the block size walks the
+	 * loop off the end of the buffer -- reads past the block, one heap
+	 * allocation per fabricated entry, and an abort when the allocator
+	 * finally gives up. All of it during recovery, from one corrupt
+	 * field. Entries live between the header and the end of the block;
+	 * a count outside that range is a corrupt block, and recovery
+	 * already treats a failed checksum here as end-of-log, so a hostile
+	 * count simply contributes no entries. */
+	uint32_t count = jbd_get32(revoke_hdr, count);
+	uint32_t limit = jbd_get32(&jbd_fs->sb, blocksize);
+	if (count < sizeof(struct jbd_revoke_header) || count > limit)
+		return;
+
+	nr_entries = (count - sizeof(struct jbd_revoke_header)) /
 			record_len;
 
 	blocks_entry = (char *)(revoke_hdr + 1);
