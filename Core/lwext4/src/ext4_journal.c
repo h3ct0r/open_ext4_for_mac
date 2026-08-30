@@ -209,25 +209,30 @@ static int jbd_replay_wnd_read(struct jbd_fs *jbd_fs,
 	return EOK;
 }
 
-/**@brief  Set up the recovery read-ahead window. Best-effort: on memory
- *         pressure recovery falls back to per-block reads, which are
- *         slow and correct.
- * @param  jbd_fs jbd filesystem
- * @param  info   journal replay info*/
-static void jbd_replay_wnd_init(struct jbd_fs *jbd_fs,
-				struct recover_info *info)
+/**@brief  Allocate a read-ahead window. Callers treat NULL as "fall back
+ *         to per-block reads": slow, and correct.
+ * @param  jbd_fs   jbd filesystem
+ * @param  cap_hint upper bound on useful window size in blocks, or 0 for
+ *                  the default. Recovery sweeps the whole log and wants
+ *                  the full window; a checkpoint reads one transaction's
+ *                  span, and a full-sized fill would read a megabyte to
+ *                  serve a dozen blocks.
+ * @return the window, or NULL on memory pressure*/
+static struct jbd_replay_wnd *jbd_replay_wnd_new(struct jbd_fs *jbd_fs,
+						 uint32_t cap_hint)
 {
 	uint32_t bs = jbd_fs->bdev->lg_bsize;
 	uint32_t cap = JBD_REPLAY_WND_BYTES / bs;
 	struct jbd_replay_wnd *w;
 
-	info->wnd = NULL;
+	if (cap_hint && cap_hint < cap)
+		cap = cap_hint;
 	if (cap == 0)
-		return;
+		return NULL;
 
 	w = ext4_calloc(1, sizeof(*w));
 	if (!w)
-		return;
+		return NULL;
 
 	w->data = ext4_malloc((size_t)cap * bs);
 	w->desc = ext4_malloc(bs);
@@ -235,21 +240,20 @@ static void jbd_replay_wnd_init(struct jbd_fs *jbd_fs,
 		ext4_free(w->data);
 		ext4_free(w->desc);
 		ext4_free(w);
-		return;
+		return NULL;
 	}
 
 	w->cap = cap;
-	info->wnd = w;
+	return w;
 }
 
-static void jbd_replay_wnd_fini(struct recover_info *info)
+static void jbd_replay_wnd_free(struct jbd_replay_wnd *w)
 {
-	if (!info->wnd)
+	if (!w)
 		return;
-	ext4_free(info->wnd->data);
-	ext4_free(info->wnd->desc);
-	ext4_free(info->wnd);
-	info->wnd = NULL;
+	ext4_free(w->data);
+	ext4_free(w->desc);
+	ext4_free(w);
 }
 
 /**@brief  Write-back batch for replayed blocks.
@@ -422,24 +426,22 @@ static int jbd_replay_wb_record(struct jbd_fs *jbd_fs,
 	return EOK;
 }
 
-/**@brief  Set up the write-back batch. Best-effort, like the window: no
- *         memory means the slow per-block path, not a failed mount.
+/**@brief  Allocate a write-back batch. Callers treat NULL as "fall back
+ *         to the slow per-block path", not as a failure.
  * @param  jbd_fs jbd filesystem
- * @param  info   journal replay info*/
-static void jbd_replay_wb_init(struct jbd_fs *jbd_fs,
-			       struct recover_info *info)
+ * @return the batch, or NULL on memory pressure*/
+static struct jbd_replay_wb *jbd_replay_wb_new(struct jbd_fs *jbd_fs)
 {
 	uint32_t bs = jbd_fs->bdev->lg_bsize;
 	uint32_t cap = JBD_REPLAY_WB_BYTES / bs;
 	struct jbd_replay_wb *wb;
 
-	info->wb = NULL;
 	if (cap == 0)
-		return;
+		return NULL;
 
 	wb = ext4_calloc(1, sizeof(*wb));
 	if (!wb)
-		return;
+		return NULL;
 
 	wb->data = ext4_malloc((size_t)cap * bs);
 	wb->lba = ext4_malloc((size_t)cap * sizeof(*wb->lba));
@@ -449,22 +451,21 @@ static void jbd_replay_wb_init(struct jbd_fs *jbd_fs,
 		ext4_free(wb->lba);
 		ext4_free(wb->gather);
 		ext4_free(wb);
-		return;
+		return NULL;
 	}
 
 	wb->cap = cap;
-	info->wb = wb;
+	return wb;
 }
 
-static void jbd_replay_wb_fini(struct recover_info *info)
+static void jbd_replay_wb_free(struct jbd_replay_wb *wb)
 {
-	if (!info->wb)
+	if (!wb)
 		return;
-	ext4_free(info->wb->data);
-	ext4_free(info->wb->lba);
-	ext4_free(info->wb->gather);
-	ext4_free(info->wb);
-	info->wb = NULL;
+	ext4_free(wb->data);
+	ext4_free(wb->lba);
+	ext4_free(wb->gather);
+	ext4_free(wb);
 }
 
 /* Make sure we wrap around the log correctly! */
@@ -1772,15 +1773,17 @@ int jbd_recover(struct jbd_fs *jbd_fs)
 			return r;
 	}
 
-	jbd_replay_wnd_init(jbd_fs, &info);
-	jbd_replay_wb_init(jbd_fs, &info);
+	info.wnd = jbd_replay_wnd_new(jbd_fs, 0);
+	info.wb = jbd_replay_wb_new(jbd_fs);
 	r = jbd_iterate_log(jbd_fs, &info, ACTION_RECOVER);
 	/* Whatever the batch still holds has to land before the barrier
 	 * below claims the replay writes are on the medium. */
 	if (r == EOK && info.wb)
 		r = jbd_replay_wb_flush(jbd_fs, info.wb);
-	jbd_replay_wnd_fini(&info);
-	jbd_replay_wb_fini(&info);
+	jbd_replay_wnd_free(info.wnd);
+	jbd_replay_wb_free(info.wb);
+	info.wnd = NULL;
+	info.wb = NULL;
 	if (r == EOK) {
 		/* The replay writes were issued; the superblock below says
 		 * they are not needed again. Make the first true before
@@ -1881,7 +1884,7 @@ static void jbd_trans_end_write(struct ext4_bcache *bc __unused,
 
 /*
  * This routine is only suitable to committed transactions. */
-static int jbd_journal_flush_trans(struct jbd_trans *trans)
+static int jbd_journal_flush_trans_slow(struct jbd_trans *trans)
 {
 	struct jbd_buf *jbd_buf, *tmp;
 	struct jbd_journal *journal = trans->journal;
@@ -1945,6 +1948,105 @@ static int jbd_journal_flush_trans(struct jbd_trans *trans)
 	}
 
 	ext4_free(tmp_data);
+	return rc;
+}
+
+/* The checkpoint is the replay incident's other half: it used to read each
+ * logged block back with one command and write it home with another, in log
+ * order -- two commands per block, serialized, for the whole checkpoint
+ * queue at unmount. Eject has an OS timeout just as mount does, and a
+ * 128 MiB journal priced out at minutes. The recovery machinery already
+ * solves both sides (patches 0027/0028): read the log through the window in
+ * contiguous runs, collect home writes in the batch, write them sorted,
+ * deduplicated and coalesced. This routes the checkpoint through the same
+ * machinery.
+ *
+ * Cache-resident copies are recorded from the live buffer (and the buffer
+ * is marked clean the moment its bytes are in the batch: if the batch flush
+ * then fails, the log still covers the block -- the completion below parks
+ * the error in trans->error and the tail freezes, patch 0031's rule).
+ * Evicted copies are read back from the log through the window, which also
+ * fixes a latent bug: a from-the-log checkpoint had no descriptor tag to
+ * consult, so an escaped block (first word matching the journal magic) was
+ * written home with its escaped bytes. The escape bit now travels on the
+ * jbd_buf.
+ *
+ * Completions run after the batch lands, one per buffer with the batch's
+ * result, through the same cascade-safe drain as everywhere else (0039). */
+static int jbd_journal_flush_trans(struct jbd_trans *trans)
+{
+	struct jbd_journal *journal = trans->journal;
+	struct jbd_fs *jbd_fs = journal->jbd_fs;
+	struct ext4_fs *fs = jbd_fs->inode_ref.fs;
+	struct jbd_buf *jbd_buf;
+	struct jbd_replay_wnd *wnd;
+	struct jbd_replay_wb *wb;
+	int rc = EOK;
+
+	wnd = jbd_replay_wnd_new(jbd_fs, trans->alloc_blocks);
+	wb = jbd_replay_wb_new(jbd_fs);
+	if (!wnd || !wb) {
+		jbd_replay_wnd_free(wnd);
+		jbd_replay_wb_free(wb);
+		return jbd_journal_flush_trans_slow(trans);
+	}
+
+	/* Collect: no completion runs in this phase, so the walk is safe. */
+	TAILQ_FOREACH(jbd_buf, &trans->buf_queue, buf_node) {
+		struct ext4_buf *buf;
+		struct ext4_block block;
+
+		buf = ext4_bcache_find_get(fs->bdev->bc, &block,
+					   jbd_buf->block_rec->lba);
+		if (buf && ext4_bcache_test_flag(buf, BC_UPTODATE) &&
+		    jbd_buf->block_rec->trans == trans) {
+			rc = jbd_replay_wb_record(jbd_fs, wb,
+						  jbd_buf->block_rec->lba,
+						  buf->data, false);
+			/* Recorded; the release below must not flush the
+			 * old copy one block at a time behind our back. */
+			if (rc == EOK)
+				ext4_bcache_clear_flag(buf, BC_DIRTY);
+		} else {
+			void *jdata;
+			rc = jbd_replay_wnd_read(jbd_fs, wnd,
+						 jbd_buf->jbd_lba, &jdata);
+			if (rc == EOK)
+				rc = jbd_replay_wb_record(jbd_fs, wb,
+						jbd_buf->block_rec->lba,
+						jdata, jbd_buf->is_escape);
+		}
+		if (buf)
+			ext4_block_set(fs->bdev, &block);
+		if (rc != EOK)
+			break;
+	}
+
+	if (rc == EOK)
+		rc = jbd_replay_wb_flush(jbd_fs, wb);
+
+	/* Complete every buffer with the batch's verdict. Two lifetime rules
+	 * make this safe: the head is re-read each pass because completions
+	 * can free later entries (0039); and the transaction is lifted off
+	 * the checkpoint queue first, so no completion in the drain -- ours
+	 * or a cascaded one -- sees it as head-of-queue and frees the very
+	 * structure the loop is walking. The purge loop re-inspects after
+	 * this returns and retires or freezes it by the ordinary rules. The
+	 * buffer is passed when resident so the callback registration is
+	 * cleared. */
+	TAILQ_REMOVE(&journal->cp_queue, trans, trans_node);
+	while ((jbd_buf = TAILQ_FIRST(&trans->buf_queue))) {
+		struct ext4_block block;
+		struct ext4_buf *buf = ext4_bcache_find_get(fs->bdev->bc,
+					&block, jbd_buf->block_rec->lba);
+		jbd_trans_end_write(fs->bdev->bc, buf, rc, jbd_buf);
+		if (buf)
+			ext4_block_set(fs->bdev, &block);
+	}
+	TAILQ_INSERT_HEAD(&journal->cp_queue, trans, trans_node);
+
+	jbd_replay_wnd_free(wnd);
+	jbd_replay_wb_free(wb);
 	return rc;
 }
 
@@ -2649,6 +2751,9 @@ static int jbd_journal_prepare(struct jbd_journal *journal,
 		if (((struct jbd_bhdr *)jbd_buf->block.data)->magic ==
 				to_be32(JBD_MAGIC_NUMBER))
 			is_escape = true;
+		/* Remembered on the buffer: a checkpoint that re-reads the
+		 * log has no descriptor tag to consult. */
+		jbd_buf->is_escape = is_escape;
 
 again:
 		if (!desc_iblock) {

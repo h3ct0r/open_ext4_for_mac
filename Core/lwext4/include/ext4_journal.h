@@ -59,6 +59,15 @@ struct jbd_buf {
 	struct ext4_block block;
 	struct jbd_trans *trans;
 	struct jbd_block_rec *block_rec;
+
+	/**@brief  The logged copy was escaped (its first word matched the
+	 *         journal magic and was blanked in the log). Checkpointing
+	 *         that re-reads the log needs this to restore the word; it
+	 *         used to be known only to the descriptor tags, so a
+	 *         from-the-log checkpoint of such a block wrote the escaped
+	 *         bytes home verbatim. */
+	bool is_escape;
+
 	TAILQ_ENTRY(jbd_buf) buf_node;
 	TAILQ_ENTRY(jbd_buf) dirty_buf_node;
 };
