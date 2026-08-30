@@ -283,4 +283,55 @@ PY
   fi
 fi
 
+# --- a corrupt extent header ------------------------------------------------
+# The extent tree's own headers state how many entries they hold and how many
+# they could hold, and both were believed. eh_max is used as the stride to the
+# checksum tail (12 + 12 * eh_max, which for 0xFFFF is 786 KB past a 4 KB
+# block) and eh_entries bounds the binary search, so a corrupt inode turned
+# reading one file into a heap overflow -- read on every path, and write on the
+# checksum-setting one. The root header made it worse: it lives inside the
+# inode, never passed through the block reader, and so was the one header
+# nothing validated, reachable without a single valid checksum anywhere.
+#
+# Confirmed with AddressSanitizer before the fix: `cat` on the file below was
+# a heap-buffer-overflow in ext4_ext_binsearch, reached from a plain read.
+# Run this suite under `make test-asan` for that to be the assertion; without
+# the sanitizer it still catches a crash or a hang.
+echo ""
+echo "a corrupt extent header"
+
+EXTIMG="$WORK/extent_hdr.img"
+rm -f "$EXTIMG"; dd if=/dev/zero of="$EXTIMG" bs=1m count=64 2>/dev/null
+"$DUMP" "$EXTIMG" format 4 >/dev/null 2>&1
+"$DUMP" "$EXTIMG" create /victim >/dev/null 2>&1
+"$DUMP" "$EXTIMG" write /victim hello-world >/dev/null 2>&1
+
+imap=$(debugfs -R 'imap <12>' "$EXTIMG" 2>/dev/null)
+blk=$(sed -n 's/.*located at block \([0-9]*\).*/\1/p' <<<"$imap")
+off=$(sed -n 's/.*offset \(0x[0-9a-f]*\).*/\1/p' <<<"$imap")
+if [ -z "$blk" ] || [ -z "$off" ]; then
+  bad "could not locate the inode to corrupt" "debugfs said: $imap"
+else
+  python3 - "$EXTIMG" "$blk" "$off" <<'PYEOF'
+import struct, sys
+img, blk, off = sys.argv[1], int(sys.argv[2]), int(sys.argv[3], 16)
+d = bytearray(open(img, 'rb').read())
+hdr = blk * 4096 + off + 40          # i_block[] holds the root extent header
+magic, entries, mx, depth = struct.unpack_from('<HHHH', d, hdr)
+# Claim far more entries, and far more room, than 60 bytes can hold.
+struct.pack_into('<HHHH', d, hdr, magic, 0x4000, 0xFFFF, depth)
+open(img, 'wb').write(d)
+PYEOF
+  for verb in "cat /victim" "extents /victim" "write /victim x"; do
+    out=$(run_deadline 20 "$DUMP" "$EXTIMG" $verb 2>&1); rc=$?
+    if [ $rc -ge 128 ]; then
+      bad "a corrupt extent header is refused ($verb)" "rc=$rc: crashed or hung"
+    elif grep -qi 'AddressSanitizer' <<<"$out"; then
+      bad "a corrupt extent header is refused ($verb)" "sanitizer reported an overflow"
+    else
+      ok "a corrupt extent header is refused, not walked ($verb)"
+    fi
+  done
+fi
+
 finish

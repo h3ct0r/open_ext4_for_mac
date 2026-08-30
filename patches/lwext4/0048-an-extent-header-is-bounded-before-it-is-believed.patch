@@ -1,0 +1,97 @@
+An extent header is bounded before it is believed
+
+Reading one file on a corrupt volume was a heap buffer overflow.
+
+The extent tree's headers state how many entries they hold (eh_entries)
+and how many would fit (eh_max), and both were taken at face value. eh_max
+is the stride to the checksum tail -- 12 + 12 * eh_max, which for 0xFFFF
+lands 786 KB past a 4 KB block, read on every validation and written on
+the checksum-setting path -- and eh_entries bounds the binary search that
+every lookup runs. ext4_ext_check tested eh_entries <= eh_max and stopped
+there, so a header claiming both were enormous passed.
+
+The root header was worse: it lives in the inode's 60-byte block array and
+never passes through read_extent_tree_block, which is the only caller of
+ext4_ext_check. So the one header the walk starts from was the one nothing
+validated, and reaching it needs no valid checksum anywhere on the volume.
+
+Confirmed with AddressSanitizer rather than argued: an inode carrying
+eh_max = 0xFFFF, eh_entries = 0x4000 turns `cat` on that file into
+
+  ERROR: AddressSanitizer: heap-buffer-overflow
+  READ of size 4 ... in ext4_ext_binsearch ext4_extent.c:845
+    ext4_find_extent <- ext4_extent_probe <- ext4b_map_extents
+
+which is the path a directory listing takes. After: the same three paths
+(read, extent walk, write) refuse with EIO, and a healthy volume is
+unchanged.
+
+Two bounds and one call site:
+
+* eh_max must fit the space it describes -- 60 bytes in the inode for the
+  root, one block below it -- which is what ext4_ext_max_entries already
+  computes for the writers.
+* the tree depth is capped at 5, past which no tree can address the
+  block space, and a larger value sizes a path array for something else.
+* ext4_find_extent validates the root before walking it.
+
+Cell in Tests/run_bounds_tests.sh; run under `make test-asan` for the
+sanitizer to be the judge. Bounds suite 23 passed, write suite 112 passed
+under ASan.
+--- a/src/ext4_extent.c
++++ b/src/ext4_extent.c
+@@ -568,6 +568,12 @@
+ #endif
+ 	return size;
+ }
++
++/* ext4 cannot build a tree deeper than this: five levels of 4 KiB index
++ * blocks address more than the 2^32-block address space. A larger value on
++ * disk is corruption, and believing it means walking a path array sized for
++ * something else. Linux caps it the same way. */
++#define EXT4_MAX_EXTENT_DEPTH 5
+ 
+ static uint16_t ext4_ext_max_entries(struct ext4_inode_ref *inode_ref,
+ 				     uint32_t depth)
+@@ -745,6 +751,20 @@
+ 	}
+ 	if (eh->max_entries_count == 0) {
+ 		error_msg = "invalid eh_max";
++		goto corrupted;
++	}
++	/* eh_max has to fit the space that actually holds the entries: 60 bytes
++	 * inside the inode for the root, one block for anything deeper. Without
++	 * this the count is believed, and every user of it walks off the end --
++	 * the binary search below reads entries past the buffer, and the
++	 * checksum helpers read (and on a write path, write) at
++	 * 12 + 12 * eh_max, which for eh_max = 0xFFFF is 786 KB beyond a 4 KB
++	 * block. Reproduced with AddressSanitizer: reading one file on a volume
++	 * whose inode carries eh_max = 0xFFFF is a heap-buffer-overflow in
++	 * ext4_ext_binsearch, reached from a plain directory listing. */
++	if (to_le16(eh->max_entries_count) >
++	    ext4_ext_max_entries(inode_ref, depth)) {
++		error_msg = "eh_max too large for the space it describes";
+ 		goto corrupted;
+ 	}
+ 	if (to_le16(eh->entries_count) > to_le16(eh->max_entries_count)) {
+@@ -864,6 +884,20 @@
+ 
+ 	eh = ext_inode_hdr(inode_ref->inode);
+ 	depth = ext_depth(inode_ref->inode);
++
++	/* The root lives in the inode and never passed through
++	 * read_extent_tree_block(), so nothing had checked it: every deeper
++	 * block was validated and the one the walk starts from was not. A
++	 * corrupt root is the cheapest way to reach the overflow, since it
++	 * needs no valid checksum anywhere. */
++	if (depth > EXT4_MAX_EXTENT_DEPTH) {
++		ext4_dbg(DEBUG_EXTENT, DBG_ERROR
++			 "extent tree depth %" PRId32 " is impossible\n", depth);
++		return EIO;
++	}
++	ret = ext4_ext_check(inode_ref, eh, (uint16_t)depth, 0);
++	if (ret != EOK)
++		return ret;
+ 
+ 	if (path) {
+ 		ext4_ext_drop_refs(inode_ref, path, 0);
