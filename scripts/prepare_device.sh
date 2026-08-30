@@ -108,12 +108,30 @@ else
 fi
 pd=$!
 PD_OK=no
+# Timed and reported, because this wait is invisible and long. partitionDisk
+# formats through newfs_fskit, which runs the INSTALLED extension -- so a
+# stale install makes this phase slow and the fallback then does the work
+# quickly, leaving a run that took minutes with a fast-looking format in it.
+# Three reformats were attributed to the format itself before the phases were
+# separated.
+pd_start=$SECONDS
 for _ in $(seq 1 300); do
   if ! kill -0 $pd 2>/dev/null; then wait $pd && PD_OK=yes; break; fi
   sleep 1
 done
 kill -9 $pd 2>/dev/null
+pd_secs=$(( SECONDS - pd_start ))
 sleep 2
+if [ "$PD_OK" = yes ]; then
+  echo "  partitioning took ${pd_secs}s (formatted by newfs_fskit)"
+else
+  echo "  partitioning took ${pd_secs}s and did not finish cleanly"
+  if [ "$pd_secs" -ge 60 ]; then
+    echo "        that is long enough to suspect the installed extension is"
+    echo "        stale or slow: newfs_fskit formats through it. 'make install'"
+    echo "        and check with 'make check-extension'."
+  fi
+fi
 
 PART="${DEVICE}s2"
 diskutil list "$DEVICE" 2>/dev/null | grep -q "${DEVICE}s2" || PART="${DEVICE}s1"
@@ -133,6 +151,7 @@ fi
 # ----------------------------------------------------------------- format --
 format_directly() {
   echo "formatting $PART as ext4 directly..."
+  fmt_start=$SECONDS
   diskutil unmountDisk force "$DEVICE" >/dev/null 2>&1
   sleep 1
   # The raw node first, the buffered one only if it refuses.
@@ -154,6 +173,7 @@ format_directly() {
     "$DUMP" "$NODE" format 4 || die "format failed"
   fi
   "$DUMP" "$NODE" label "$LABEL" >/dev/null 2>&1
+  echo "  formatting took $(( SECONDS - fmt_start ))s via $NODE"
 }
 
 if [ "$PD_OK" = yes ]; then
