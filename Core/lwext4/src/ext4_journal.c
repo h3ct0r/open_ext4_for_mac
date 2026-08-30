@@ -1860,8 +1860,17 @@ static int jbd_journal_flush_trans(struct jbd_trans *trans)
 			r = ext4_blocks_set_direct(fs->bdev, tmp_data,
 					jbd_buf->block_rec->lba, 1);
 			jbd_trans_end_write(fs->bdev->bc, buf, r, jbd_buf);
-		} else
-			ext4_block_flush_buf(fs->bdev, buf);
+			if (r != EOK)
+				rc = r;
+		} else {
+			/* The flush reports through end_write either way;
+			 * this return value is the caller's copy of it. It
+			 * was discarded, so a failed home write flushed
+			 * "successfully" as far as the purge could see. */
+			int r = ext4_block_flush_buf(fs->bdev, buf);
+			if (r != EOK)
+				rc = r;
+		}
 
 		if (buf)
 			ext4_block_set(fs->bdev, &block);
@@ -1900,6 +1909,14 @@ jbd_journal_purge_cp_trans(struct jbd_journal *journal,
 		} else {
 			if (trans->data_cnt ==
 					trans->written_cnt) {
+				/* Every buffer was attempted; not every one
+				 * landed. The log is the only copy of the
+				 * ones that failed, so the tail must not
+				 * move past this transaction -- nor past
+				 * anything behind it. Recovery redoes the
+				 * whole thing on the next mount. */
+				if (trans->error != EOK)
+					break;
 				journal->start =
 					trans->start_iblock +
 					trans->alloc_blocks;
@@ -2723,8 +2740,15 @@ static void jbd_trans_end_write(struct ext4_bcache *bc __unused,
 		 * we will shift the start of the journal to the next
 		 * transaction, and remove subsequent written
 		 * transactions from checkpoint queue until we find
-		 * an unwritten one. */
-		if (first_in_queue) {
+		 * an unwritten one.
+		 *
+		 * Unless a write failed. trans->error was recorded above and
+		 * then never read anywhere: the count completed, the tail
+		 * advanced, and the journal stopped covering a block that
+		 * never reached its home. The errored transaction stays on
+		 * the queue and the tail stays put; the purge loop knows to
+		 * stop at it. */
+		if (first_in_queue && trans->error == EOK) {
 			journal->start = trans->start_iblock +
 				trans->alloc_blocks;
 			wrap(&journal->jbd_fs->sb, journal->start);
