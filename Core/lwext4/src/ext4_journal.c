@@ -1980,6 +1980,49 @@ int jbd_journal_stop(struct jbd_journal *journal)
 	 * the disk.*/
 	jbd_journal_purge_cp_trans(journal, true, false);
 
+	/* The purge stops when a checkpoint cannot be completed -- a read of
+	 * the log failed, or a home write did (trans->error). Whatever it
+	 * left on the queue exists on the medium only as log records, and
+	 * the superblock writes below would declare that log replayed: the
+	 * change would be in neither the log nor its home. Keep the on-disk
+	 * state exactly as it is -- EXT4_FINCOM_RECOVER set, the published
+	 * tail still covering the unflushed transactions -- and report the
+	 * failure. The next mount replays them, which is what recovery is
+	 * for. The in-memory structures are still torn down: this journal
+	 * session is over either way. */
+	if (!TAILQ_EMPTY(&journal->cp_queue)) {
+		struct jbd_trans *trans;
+		int err = EIO;
+		while ((trans = TAILQ_FIRST(&journal->cp_queue))) {
+			struct jbd_buf *jbd_buf;
+			if (trans->error != EOK)
+				err = trans->error;
+			/* Unhook the completion callbacks before the
+			 * structures they point into are freed: the block
+			 * cache outlives this journal session, and its
+			 * unmount flush would call end_write on a freed
+			 * jbd_buf (measured: use-after-free under ASan).
+			 * The buffers stay dirty -- writing them home is
+			 * still correct and the log still covers them. */
+			TAILQ_FOREACH(jbd_buf, &trans->buf_queue, buf_node) {
+				struct ext4_block block;
+				struct ext4_buf *buf = ext4_bcache_find_get(
+						jbd_fs->bdev->bc, &block,
+						jbd_buf->block_rec->lba);
+				if (!buf)
+					continue;
+				if (buf->end_write_arg == jbd_buf) {
+					buf->end_write = NULL;
+					buf->end_write_arg = NULL;
+				}
+				ext4_block_set(jbd_fs->bdev, &block);
+			}
+			TAILQ_REMOVE(&journal->cp_queue, trans, trans_node);
+			jbd_journal_free_trans(journal, trans, false);
+		}
+		return err;
+	}
+
 	/* There should be no block record in this journal
 	 * session. */
 	if (!RB_EMPTY(&journal->block_rec_root))
