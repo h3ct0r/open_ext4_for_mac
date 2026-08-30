@@ -1,0 +1,93 @@
+A failed checkpoint stays in the log
+
+Checkpointing writes a committed transaction's blocks to their home
+locations and then advances the log tail past it. The completion callback,
+jbd_trans_end_write, recorded a failed write in trans->error -- and nothing
+anywhere read that field. The count of attempted buffers completed, the
+tail advanced, and the journal stopped covering a block that never reached
+its home. Structurally the same bug as the replay half fixed by 0028/0030,
+on the checkpoint side; it is also what a mid-checkpoint device pull leaves
+behind, which is exactly the pull-test's scenario.
+
+Measured with the bad-sector model (every write covering one inode-table
+block refused, everything else fine): forty freshly created files, a script
+that exits 0, needs_recovery cleared -- and e2fsck finds every one of the
+forty inodes "deleted/unused" behind a directory that still names them.
+The journal held the only good copy and the superblock said it was not
+needed.
+
+Three changes, one rule -- the tail never moves past a transaction whose
+error is set:
+
+* jbd_trans_end_write's completion branch advances the tail only when
+  trans->error == EOK; an errored transaction stays first on the queue;
+
+* the purge loop stops at a complete-but-errored transaction instead of
+  retiring it -- everything behind it stays covered too;
+
+* jbd_journal_flush_trans reports write failures in its return value (the
+  cache-resident flush result was discarded outright), so a purge that
+  could not finish knows it immediately.
+
+An errored transaction now parks on the checkpoint queue until unmount;
+patch 0032 teaches jbd_journal_stop what to do with it. With both applied,
+the bad-sector run keeps EXT4_FINCOM_RECOVER set and the next mount -- the
+red cell in Tests/run_eio_tests.sh runs it with the medium healthy again --
+replays the checkpoint and hands back all forty files, e2fsck-clean.
+
+diff --git a/src/ext4_journal.c b/src/ext4_journal.c
+--- a/src/ext4_journal.c
++++ b/src/ext4_journal.c
+@@ -1860,8 +1860,17 @@ static int jbd_journal_flush_trans(struct jbd_trans *trans)
+ 			r = ext4_blocks_set_direct(fs->bdev, tmp_data,
+ 					jbd_buf->block_rec->lba, 1);
+ 			jbd_trans_end_write(fs->bdev->bc, buf, r, jbd_buf);
+-		} else
+-			ext4_block_flush_buf(fs->bdev, buf);
++			if (r != EOK)
++				rc = r;
++		} else {
++			/* The flush reports through end_write either way;
++			 * this return value is the caller's copy of it. It
++			 * was discarded, so a failed home write flushed
++			 * "successfully" as far as the purge could see. */
++			int r = ext4_block_flush_buf(fs->bdev, buf);
++			if (r != EOK)
++				rc = r;
++		}
+ 
+ 		if (buf)
+ 			ext4_block_set(fs->bdev, &block);
+@@ -1900,6 +1909,14 @@ jbd_journal_purge_cp_trans(struct jbd_journal *journal,
+ 		} else {
+ 			if (trans->data_cnt ==
+ 					trans->written_cnt) {
++				/* Every buffer was attempted; not every one
++				 * landed. The log is the only copy of the
++				 * ones that failed, so the tail must not
++				 * move past this transaction -- nor past
++				 * anything behind it. Recovery redoes the
++				 * whole thing on the next mount. */
++				if (trans->error != EOK)
++					break;
+ 				journal->start =
+ 					trans->start_iblock +
+ 					trans->alloc_blocks;
+@@ -2723,8 +2740,15 @@ static void jbd_trans_end_write(struct ext4_bcache *bc __unused,
+ 		 * we will shift the start of the journal to the next
+ 		 * transaction, and remove subsequent written
+ 		 * transactions from checkpoint queue until we find
+-		 * an unwritten one. */
+-		if (first_in_queue) {
++		 * an unwritten one.
++		 *
++		 * Unless a write failed. trans->error was recorded above and
++		 * then never read anywhere: the count completed, the tail
++		 * advanced, and the journal stopped covering a block that
++		 * never reached its home. The errored transaction stays on
++		 * the queue and the tail stays put; the purge loop knows to
++		 * stop at it. */
++		if (first_in_queue && trans->error == EOK) {
+ 			journal->start = trans->start_iblock +
+ 				trans->alloc_blocks;
+ 			wrap(&journal->jbd_fs->sb, journal->start);

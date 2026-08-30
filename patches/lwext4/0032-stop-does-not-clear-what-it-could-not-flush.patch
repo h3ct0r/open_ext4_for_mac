@@ -1,0 +1,81 @@
+Stop does not clear what it could not flush
+
+jbd_journal_stop purges the checkpoint queue, then unconditionally cleared
+EXT4_FINCOM_RECOVER and published start = 0 -- even when the purge had
+broken off because a checkpoint could not be read back from the log (patch
+0021's case) or could not be written home (patch 0031's). A change the
+superblock then disowned existed in neither the log it declared replayed
+nor the home location it never reached.
+
+Stop now checks what the purge left behind. A non-empty checkpoint queue
+means the on-disk journal is still the only copy of something: the
+superblock writes are skipped entirely -- the medium keeps saying "replay
+me" -- and stop returns the first recorded error, which the bridge's
+unmount now propagates instead of discarding. The next mount replays the
+log from the still-published tail; recovery redoes what checkpointing
+could not.
+
+The in-memory teardown still happens: the session is over either way. One
+subtlety found by ASan rather than foresight: the leftover buffers'
+completion callbacks point into the jbd_buf structures being freed, and
+the block cache outlives the journal session -- its unmount flush was
+calling end_write on freed memory. The callbacks are unhooked first; the
+buffers stay dirty, and writing them home later is still correct because
+the log still covers them.
+
+Red cell shared with 0031 in Tests/run_eio_tests.sh: after the bad-sector
+run, needs_recovery must still be set on the medium.
+
+diff --git a/src/ext4_journal.c b/src/ext4_journal.c
+--- a/src/ext4_journal.c
++++ b/src/ext4_journal.c
+@@ -1980,6 +1980,49 @@ int jbd_journal_stop(struct jbd_journal *journal)
+ 	 * the disk.*/
+ 	jbd_journal_purge_cp_trans(journal, true, false);
+ 
++	/* The purge stops when a checkpoint cannot be completed -- a read of
++	 * the log failed, or a home write did (trans->error). Whatever it
++	 * left on the queue exists on the medium only as log records, and
++	 * the superblock writes below would declare that log replayed: the
++	 * change would be in neither the log nor its home. Keep the on-disk
++	 * state exactly as it is -- EXT4_FINCOM_RECOVER set, the published
++	 * tail still covering the unflushed transactions -- and report the
++	 * failure. The next mount replays them, which is what recovery is
++	 * for. The in-memory structures are still torn down: this journal
++	 * session is over either way. */
++	if (!TAILQ_EMPTY(&journal->cp_queue)) {
++		struct jbd_trans *trans;
++		int err = EIO;
++		while ((trans = TAILQ_FIRST(&journal->cp_queue))) {
++			struct jbd_buf *jbd_buf;
++			if (trans->error != EOK)
++				err = trans->error;
++			/* Unhook the completion callbacks before the
++			 * structures they point into are freed: the block
++			 * cache outlives this journal session, and its
++			 * unmount flush would call end_write on a freed
++			 * jbd_buf (measured: use-after-free under ASan).
++			 * The buffers stay dirty -- writing them home is
++			 * still correct and the log still covers them. */
++			TAILQ_FOREACH(jbd_buf, &trans->buf_queue, buf_node) {
++				struct ext4_block block;
++				struct ext4_buf *buf = ext4_bcache_find_get(
++						jbd_fs->bdev->bc, &block,
++						jbd_buf->block_rec->lba);
++				if (!buf)
++					continue;
++				if (buf->end_write_arg == jbd_buf) {
++					buf->end_write = NULL;
++					buf->end_write_arg = NULL;
++				}
++				ext4_block_set(jbd_fs->bdev, &block);
++			}
++			TAILQ_REMOVE(&journal->cp_queue, trans, trans_node);
++			jbd_journal_free_trans(journal, trans, false);
++		}
++		return err;
++	}
++
+ 	/* There should be no block record in this journal
+ 	 * session. */
+ 	if (!RB_EMPTY(&journal->block_rec_root))

@@ -1,0 +1,77 @@
+Replay reports every failure
+
+Patch 0028 gave the tag-replay callback an error channel (info->rc) so a
+failed batched write could no longer finish recovery as if it had not.
+Three exits of jbd_replay_block_tags() still returned silently:
+
+* the fallback journal-block read, taken when the read-ahead window could
+  not be allocated -- skipping an unreadable logged block means finishing
+  recovery without it, then clearing the journal that still held it;
+
+* the target-block fetch on the legacy write path, same consequence;
+
+* the superblock branch. This is the live one: superblock updates are
+  journaled (patch 0023), so every volume that crashed with one in flight
+  replays through here. The write's failure was discarded, recovery then
+  RELOADED the superblock from the medium -- the stale copy its own write
+  had just failed to replace -- cleared EXT4_FINCOM_RECOVER over it, and
+  the journaled content (an orphan-list head, free counts) was gone for
+  good, behind a mount that reported success. Measured with an aimed EIO:
+  the volume ends e2fsck-dirty and stays that way.
+
+All three now park their error in info->rc, which jbd_iterate_log() already
+turns into a failed recovery: the journal is kept, the mount is refused,
+and the next mount replays from the start.
+
+Tests/run_eio_tests.sh sweeps an EIO across every superblock write of a
+recovery mount and requires the end state -- after a clean remount -- to be
+a volume e2fsck accepts.
+
+diff --git a/src/ext4_journal.c b/src/ext4_journal.c
+--- a/src/ext4_journal.c
++++ b/src/ext4_journal.c
+@@ -1301,9 +1301,15 @@ static void jbd_replay_block_tags(struct jbd_fs *jbd_fs,
+ 			return;
+ 		}
+ 	} else {
++		/* The fallback path when the window could not be allocated.
++		 * Skipping an unreadable logged block silently -- the old
++		 * behavior -- means finishing recovery without it and then
++		 * clearing the journal that still held it. */
+ 		r = jbd_block_get(jbd_fs, &journal_block, *this_block);
+-		if (r != EOK)
++		if (r != EOK) {
++			info->rc = r;
+ 			return;
++		}
+ 		jdata = journal_block.data;
+ 		have_block = true;
+ 	}
+@@ -1320,8 +1326,10 @@ static void jbd_replay_block_tags(struct jbd_fs *jbd_fs,
+ 		}
+ 
+ 		r = ext4_block_get_noread(fs->bdev, &ext4_block, tag_info->block);
+-		if (r != EOK)
++		if (r != EOK) {
++			info->rc = r;
+ 			goto out;
++		}
+ 
+ 		memcpy(ext4_block.data,
+ 			jdata,
+@@ -1345,8 +1353,14 @@ static void jbd_replay_block_tags(struct jbd_fs *jbd_fs,
+ 		/* Mark system as mounted */
+ 		ext4_set16(&fs->sb, state, state);
+ 		r = ext4_sb_write(fs->bdev, &fs->sb);
+-		if (r != EOK)
++		if (r != EOK) {
++			/* The live gap: superblock updates are journaled
++			 * (patch 0023), so this branch runs on every replay
++			 * of one. Losing this write and then clearing the
++			 * journal undid exactly what 0023 preserved. */
++			info->rc = r;
+ 			goto out;
++		}
+ 
+ 		/*Update mount count*/
+ 		ext4_set16(&fs->sb, mount_count, mount_count);

@@ -98,6 +98,17 @@ typedef struct {
     uint64_t eio_read_at;            /* 0 disables */
     uint64_t eio_write_at;           /* 0 disables */
     bool     eio_sticky;
+
+    /*
+     * The bad-sector model: every I/O covering this byte offset fails, other
+     * I/O succeeds. Ordinal injection cannot express this -- the block cache
+     * legitimately *retries* a failed write-back from a later flush point, so
+     * a once-only fault at the right ordinal is healed by the very next
+     * attempt, and what a dying medium actually serves is a region that
+     * fails every time. 1-based-ish: UINT64_MAX disables (offset 0 is real).
+     */
+    uint64_t eio_read_off;
+    uint64_t eio_write_off;
     uint32_t       reorder_seed;
     uint32_t       rng;             /* seeded; drives eviction and the crash */
     int            reorder_drop;     /* percent of the pending queue lost */
@@ -431,6 +442,12 @@ static int file_read(void *ctx, void *buf, uint64_t off, size_t len)
                 (unsigned long long)c->reads, (unsigned long long)off, len);
         return EIO;
     }
+    if (c->eio_read_off != UINT64_MAX &&
+        off <= c->eio_read_off && c->eio_read_off < off + len) {
+        fprintf(stderr, "EIO-INJECT read #%llu off=%llu len=%zu\n",
+                (unsigned long long)c->reads, (unsigned long long)off, len);
+        return EIO;
+    }
     media_charge(c, len);
     ssize_t n = pread(c->fd, buf, len, (off_t)off);
     if (n != (ssize_t)len)
@@ -451,6 +468,12 @@ static int file_write(void *ctx, const void *buf, uint64_t off, size_t len)
     if (c->eio_write_at &&
         (c->write_ops == c->eio_write_at ||
          (c->eio_sticky && c->write_ops >= c->eio_write_at))) {
+        fprintf(stderr, "EIO-INJECT write #%llu off=%llu len=%zu\n",
+                (unsigned long long)c->write_ops, (unsigned long long)off, len);
+        return EIO;
+    }
+    if (c->eio_write_off != UINT64_MAX &&
+        off <= c->eio_write_off && c->eio_write_off < off + len) {
         fprintf(stderr, "EIO-INJECT write #%llu off=%llu len=%zu\n",
                 (unsigned long long)c->write_ops, (unsigned long long)off, len);
         return EIO;
@@ -1109,6 +1132,13 @@ int main(int argc, char **argv)
     if (eio_w)
         fc.eio_write_at = strtoull(eio_w, NULL, 10);
     fc.eio_sticky = getenv("EXT4DUMP_EIO_STICKY") != NULL;
+    fc.eio_read_off = fc.eio_write_off = UINT64_MAX;
+    const char *eio_ro = getenv("EXT4DUMP_EIO_READ_OFF");
+    if (eio_ro)
+        fc.eio_read_off = strtoull(eio_ro, NULL, 10);
+    const char *eio_wo = getenv("EXT4DUMP_EIO_WRITE_OFF");
+    if (eio_wo)
+        fc.eio_write_off = strtoull(eio_wo, NULL, 10);
 
     /* EXT4DUMP_TRACE_WRITES was the old name for the stderr form. */
     const char *trace_env = getenv("EXT4DUMP_TRACE");

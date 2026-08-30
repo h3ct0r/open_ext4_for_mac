@@ -178,6 +178,122 @@ else
   done
 fi
 
+# ------------------------------------- replay of the superblock, write refused --
+# Superblock updates are journaled (patch 0023), so recovery replays them
+# through a dedicated branch that writes the superblock's home directly. That
+# write's failure used to be discarded: recovery then RELOADED the superblock
+# from the medium -- the stale copy its own write had just failed to replace
+# -- cleared the RECOVER flag over it, and the journaled content (an orphan
+# list head, free counts) was gone for good. Measured: one aimed EIO left a
+# volume e2fsck rejects, behind a mount that reported success.
+#
+# The cell sweeps EVERY write to the superblock's home during a recovery
+# mount (off=1024 in the trace: the probe read is widened to the same spot,
+# so the offset identifies the block). For each, the invariant is the end
+# state: whatever the injected mount reported, a clean remount afterwards
+# must leave a volume e2fsck accepts -- either the failure kept the journal
+# (and the remount replays it), or the write landed elsewhere first. Losing
+# data quietly is the only wrong answer.
+note ""
+note "replay of the superblock against a write the medium refused"
+note ""
+
+img=$(fresh sbreplay 4)
+awk 'BEGIN{ for (i = 0; i < 120; i++) {
+  printf "create /f%d\n", i;
+  if (i % 20 == 10) printf "rm-open /f%d\n", i - 5;
+} }' > "$WORK/sbload.txt"
+EXT4DUMP_FAIL_AFTER=60 "$DUMP" "$img" script "$WORK/sbload.txt" >/dev/null 2>&1
+if ! dumpe2fs -h "$img" 2>/dev/null | grep -q needs_recovery; then
+  bad "superblock-replay fixture: the cut left a clean journal"
+else
+  cp "$img" "$WORK/sb-trc.img"
+  ords=$(EXT4DUMP_TRACE=- "$DUMP" "$WORK/sb-trc.img" label TRC 2>&1 >/dev/null \
+         | sed -n 's/^TRC W seq=\([0-9]*\) off=1024 .*/\1/p')
+  if [ -z "$ords" ]; then
+    bad "no superblock writes found in the recovery mount trace"
+  fi
+  swept=0; dirty=0
+  for seq in $ords; do
+    cp "$img" "$WORK/sb-red.img"
+    EXT4DUMP_EIO_WRITE_AT=$((seq + 1)) \
+      "$DUMP" "$WORK/sb-red.img" label EIO >/dev/null 2>"$WORK/sb-red.err"
+    grep -q '^EIO-INJECT write' "$WORK/sb-red.err" || continue
+    swept=$((swept + 1))
+    "$DUMP" "$WORK/sb-red.img" label OK2 >/dev/null 2>&1
+    if ! e2fsck -fn "$WORK/sb-red.img" >/dev/null 2>&1; then
+      dirty=$((dirty + 1))
+      note "        write #$((seq + 1)) refused -> volume stays damaged"
+    fi
+  done
+  if [ "$swept" -eq 0 ]; then
+    bad "superblock-write sweep never fired an injection"
+  elif [ "$dirty" -eq 0 ]; then
+    ok "every refused superblock write is survivable ($swept swept)"
+  else
+    bad "a refused superblock write loses journaled state for good" \
+        "$dirty of $swept sweep points end e2fsck-dirty"
+  fi
+fi
+
+# ------------------------------------------- a checkpoint onto a bad sector --
+# The bad-sector model (EXT4DUMP_EIO_WRITE_OFF): every write covering one
+# offset fails, everything else succeeds. Ordinal injection cannot express
+# this -- the block cache legitimately retries a failed write-back at the
+# next flush point, so a once-only fault is healed by its own retry.
+#
+# The victim offset is a home location that checkpointing writes (an inode
+# table block). The journal holds the only good copy; with the home dead,
+# the tail must not advance past the transaction and unmount must not clear
+# the RECOVER flag. It did both: trans->error was recorded by the completion
+# callback and read by nothing, so the count completed, the tail moved, stop
+# declared the log replayed -- and forty files' inodes were gone behind a
+# script that exited 0 ("Entry 'f0' in / has deleted/unused inode 12", forty
+# times). The remount here runs with the medium healthy again: recovery gets
+# to redo what checkpointing could not.
+note ""
+note "a checkpoint whose home writes keep failing"
+note ""
+
+img=$(fresh cp 4)
+awk 'BEGIN{ for (i = 0; i < 40; i++) printf "create /f%d\n", i }' > "$WORK/cpload.txt"
+
+# Pick the victim: the most-written non-journal block of a clean run.
+debugfs -R "blocks <8>" "$img" 2>/dev/null | tr ' ' '\n' | grep -v '^$' > "$WORK/cp-jb.txt"
+cp "$img" "$WORK/cp-trc.img"
+victim=$(EXT4DUMP_TRACE=- "$DUMP" "$WORK/cp-trc.img" script "$WORK/cpload.txt" 2>&1 >/dev/null \
+  | awk 'NR==FNR { jb[$1] = 1; next }
+         /^TRC W / { split($4, a, "="); off = a[2] + 0; blk = int(off / 4096);
+                     if (off >= 4096 && !(blk in jb)) n[off]++ }
+         END { best = ""; for (o in n) if (best == "" || n[o] > n[best]) best = o;
+               print best }' "$WORK/cp-jb.txt" -)
+if [ -z "$victim" ]; then
+  bad "checkpoint fixture: no home write found in the trace"
+else
+  cp "$img" "$WORK/cp-red.img"
+  EXT4DUMP_EIO_WRITE_OFF=$victim \
+    "$DUMP" "$WORK/cp-red.img" script "$WORK/cpload.txt" >/dev/null 2>"$WORK/cp-red.err"
+  if ! grep -q '^EIO-INJECT write' "$WORK/cp-red.err"; then
+    bad "bad-sector fault never fired (offset $victim)"
+  else
+    if dumpe2fs -h "$WORK/cp-red.img" 2>/dev/null | grep -q needs_recovery; then
+      ok "the journal still covers the failed checkpoint"
+    else
+      bad "the tail advanced past a checkpoint that never landed" \
+          "needs_recovery cleared with home block at $victim unwritten"
+    fi
+    "$DUMP" "$WORK/cp-red.img" label OK2 >/dev/null 2>&1
+    if e2fsck -fn "$WORK/cp-red.img" >/dev/null 2>&1 \
+       && "$DUMP" "$WORK/cp-red.img" stat /f0 >/dev/null 2>&1 \
+       && "$DUMP" "$WORK/cp-red.img" stat /f39 >/dev/null 2>&1; then
+      ok "recovery redoes what checkpointing could not"
+    else
+      bad "files written before the bad sector are gone for good" \
+          "$(e2fsck -fn "$WORK/cp-red.img" 2>&1 | grep -Ei 'deleted|wrong|differ' | head -2 | tr '\n' ' ')"
+    fi
+  fi
+fi
+
 # --------------------------------------------------- a read that fails midway --
 # A file of five blocks whose last block the medium refuses. ext4b_read used
 # to report the four successful blocks as rc 0 -- indistinguishable from EOF,
