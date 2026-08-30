@@ -466,6 +466,13 @@ static int write_bgroups(struct ext4_blockdev *bd, struct fs_aux_info *aux_info,
 
 		ext4_bg_set_used_dirs_count(bg_desc, aux_info->sb, 0);
 
+/* Both flags on every group: the descriptors say the bitmaps and
+		 * tables are underived, which is true of all of them at this
+		 * point. init_bgs() below then really initialises the two that
+		 * cannot be left that way -- group 0, and the last group, whose
+		 * bitmap carries the padding past the end of the volume -- and
+		 * clearing the flag is part of that work, so it must be set
+		 * here first or the initialiser skips them. */
 		ext4_bg_set_flag(bg_desc,
 				 EXT4_BLOCK_GROUP_BLOCK_UNINIT |
 				 EXT4_BLOCK_GROUP_INODE_UNINIT);
@@ -607,20 +614,52 @@ static int mkfs_init(struct ext4_blockdev *bd, struct ext4_mkfs_info *info)
 	return r;
 }
 
+/* Touch group 0 and nothing else.
+ *
+ * This walked every group, and getting a reference to a group is precisely
+ * what runs the lazy initialisation: ext4_fs_get_block_group_ref sees
+ * INODE_UNINIT, writes the inode bitmap, zeroes the whole inode table, and
+ * clears the flag. Walking all of them therefore did eagerly, at format
+ * time, the work the design defers -- 128 MB of zeros for an 8 GB volume,
+ * written as one 2 MB burst per group scattered across the medium 128 MB
+ * apart.
+ *
+ * On a USB stick that pattern is close to the worst case: each burst lands
+ * in a different erase block, so the controller pays a read-modify-erase
+ * cycle for every one. Measured on a DataTraveler 3.0: 0.4 MB/s and just
+ * under four minutes, against seconds for the same volume from mke2fs,
+ * which leaves the tables uninitialised exactly as the descriptors here
+ * already say they are.
+ *
+ * Nothing needs the walk. The loop that builds the descriptors has already
+ * written both bitmaps and checksummed each descriptor with its UNINIT
+ * flags set, and the groups a filesystem actually uses are initialised when
+ * they are first referenced -- which is where the cost belongs, and where
+ * it is paid a group at a time rather than for the whole medium up front.
+ * Group 0 is the exception: the root inode and the reserved inodes live
+ * there, so it is about to be used regardless. */
 static int init_bgs(struct ext4_fs *fs)
 {
-	int r = EOK;
 	struct ext4_block_group_ref ref;
-	uint32_t i;
-	uint32_t bg_count = ext4_block_group_cnt(&fs->sb);
-	for (i = 0; i < bg_count; ++i) {
-		r = ext4_fs_get_block_group_ref(fs, i, &ref);
-		if (r != EOK)
-			break;
+	uint32_t last = ext4_block_group_cnt(&fs->sb) - 1;
+	uint32_t groups[2] = { 0, last };
+	int r = EOK;
 
+	/* Group 0 holds the root and the reserved inodes, so it is about to be
+	 * used whatever happens. The last group is initialised for a different
+	 * reason: its bitmap is the one that cannot be derived, because it
+	 * carries both the group's own metadata and the padding past the end of
+	 * the volume. Deriving it would hand out blocks the medium does not
+	 * have, and e2fsck says so ("Block bitmap differences" over the tail).
+	 * Writing it here is what makes the other sixty-two groups safe to
+	 * leave alone. */
+	for (unsigned i = 0; i < (last == 0 ? 1u : 2u); i++) {
+		r = ext4_fs_get_block_group_ref(fs, groups[i], &ref);
+		if (r != EOK)
+			return r;
 		r = ext4_fs_put_block_group_ref(&ref);
 		if (r != EOK)
-			break;
+			return r;
 	}
 	return r;
 }
