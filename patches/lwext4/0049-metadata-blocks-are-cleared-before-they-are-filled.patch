@@ -1,0 +1,87 @@
+Metadata blocks are cleared before they are filled
+
+ext4_buf_alloc uses malloc, and block_get_noread hands the slot back as
+it is, so a caller that writes only part of a new metadata block sends the
+rest of whatever the slot last held to the medium -- and the block's
+checksum is then computed over it. ext4_dir_idx.c states this rule
+explicitly where it initialises a new leaf, and four places did not follow
+it:
+
+* the dx leaf split's new data block: only the entries moved into it are
+  written, and the last one's rec_len is stretched to cover the rest
+* the new index node: eight bytes cleared, the entries past the ones
+  copied in left as they were
+* ext4_ext_split_node: header and moved entries only
+* ext4_ext_grow_indepth: 60 bytes of a whole block
+
+Honest about the impact, because I tried to demonstrate it and could not.
+The test planted a recognisable pattern in a large file, deleted it, then
+forced directory splits and searched the new metadata blocks for it: no
+hits, before the change or after. The reason is structural -- file data
+is written straight to the medium and never enters the block cache, so a
+recycled cache slot holds old metadata, not user content. What reaches
+the disk is uninitialised heap, which is a real thing to stop writing and
+a real thing to keep out of a checksum, but on this driver it is not a
+route from one file's data to another's.
+
+The fix is the rule the file already documents, applied to the four
+places that missed it. Write suite 114, format 35, bounds 23, e2fsck
+clean throughout.
+--- a/src/ext4_extent.c
++++ b/src/ext4_extent.c
+@@ -1070,6 +1070,11 @@
+ 						  newblock);
+ 		if (ret != EOK)
+ 			goto cleanup;
++
++		/* Only the header and the entries moved here are written; the
++		 * rest of the block would otherwise go to the medium as
++		 * whatever the cache slot last held. */
++		memset(bh.data, 0, ext4_sb_get_block_size(&inode_ref->fs->sb));
+ 
+ 		if (i == depth) {
+ 			/* start copy from next extent */
+@@ -1419,6 +1424,14 @@
+ 
+ 	/* # */
+ 	err = ext4_trans_block_get_noread(inode_ref->fs->bdev, &bh, newblock);
++	if (err == EOK) {
++		/* _noread hands back whatever the cache slot held. Only the
++		 * first 60 bytes are written below, so without this the rest
++		 * of the block reaches the medium as recycled heap -- another
++		 * file's data, in the general case -- and the block's checksum
++		 * is computed over it. */
++		memset(bh.data, 0, ext4_sb_get_block_size(&inode_ref->fs->sb));
++	}
+ 	if (err != EOK) {
+ 		ext4_ext_free_blocks(inode_ref, newblock, 1, 0);
+ 		return err;
+--- a/src/ext4_dir_idx.c
++++ b/src/ext4_dir_idx.c
+@@ -984,6 +984,14 @@
+ 	struct ext4_block new_data_block_tmp;
+ 	rc = ext4_trans_block_get_noread(inode_ref->fs->bdev, &new_data_block_tmp,
+ 				   new_fblock);
++	if (rc == EOK) {
++		/* The same rule the leaf initialiser above states: _noread
++		 * returns the cache slot's previous contents, only the entries
++		 * moved here are written, and the last one's rec_len is
++		 * stretched to cover the remainder -- so anything left in it
++		 * is both written to disk and covered by the checksum. */
++		memset(new_data_block_tmp.data, 0, block_size);
++	}
+ 	if (rc != EOK) {
+ 		ext4_free(sort);
+ 		ext4_free(entry_buffer);
+@@ -1137,7 +1145,10 @@
+ 		struct ext4_dir_idx_node *new_node = (void *)b.data;
+ 		struct ext4_dir_idx_entry *new_en = new_node->entries;
+ 
+-		memset(&new_node->fake, 0, sizeof(struct ext4_fake_dir_entry));
++		/* Clear the whole node, not just its fake entry: the entries
++		 * past the ones copied in below are otherwise recycled heap on
++		 * the medium. */
++		memset(new_node, 0, block_size);
+ 		new_node->fake.entry_length = block_size;
+ 
+ 		/* Split leaf node */
