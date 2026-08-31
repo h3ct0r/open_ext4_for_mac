@@ -337,6 +337,56 @@ else
         "preallocated=${pr:-?} extents against plain=${pl:-?}; adjacent written runs are not merging"
 fi
 
+# --- every ordinary operation, and its effect ------------------------------
+# setAttributes returned success and did nothing for the whole life of this
+# driver, because nothing here ever checked an operation's EFFECT -- only that
+# it did not error. These are the cheapest possible guards against the next one
+# of those: do the thing, then look.
+echo ""
+echo "ordinary operations"
+OPSIMG="$WORK/ops.img"
+make_volume "$OPSIMG" $((32 * 32768 + 5000))
+attach_and_mount "$OPSIMG"
+
+opck() {  # opck <name> <got> <want>
+    if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "got '$2', wanted '$3'"; fi
+}
+
+echo "hello" > "$MNT/f.txt"
+opck "a file reads back what was written"  "$(cat "$MNT/f.txt")" "hello"
+mkdir -p "$MNT/d/sub"
+opck "mkdir -p creates the whole path"     "$([ -d "$MNT/d/sub" ] && echo y)" "y"
+mv "$MNT/f.txt" "$MNT/g.txt"
+opck "rename moves the name"               "$([ -f "$MNT/g.txt" ] && [ ! -e "$MNT/f.txt" ] && echo y)" "y"
+ln "$MNT/g.txt" "$MNT/h.txt" 2>/dev/null
+opck "a hard link raises the link count"   "$(stat -f %l "$MNT/g.txt")" "2"
+ln -s g.txt "$MNT/s.txt" 2>/dev/null
+opck "a symlink keeps its target"          "$(readlink "$MNT/s.txt")" "g.txt"
+printf 'more' >> "$MNT/g.txt"
+opck "append lands at the end"             "$(cat "$MNT/g.txt")" "$(printf 'hello\nmore')"
+rm "$MNT/h.txt"
+opck "unlink removes the name"             "$([ ! -e "$MNT/h.txt" ] && echo y)" "y"
+rmdir "$MNT/d/sub"
+opck "rmdir removes the directory"         "$([ ! -e "$MNT/d/sub" ] && echo y)" "y"
+xattr -w user.k v1 "$MNT/g.txt" 2>/dev/null
+opck "an xattr reads back"                 "$(xattr -p user.k "$MNT/g.txt" 2>/dev/null)" "v1"
+xattr -d user.k "$MNT/g.txt" 2>/dev/null
+opck "an xattr can be removed"             "$(xattr "$MNT/g.txt" 2>/dev/null | grep -c user.k)" "0"
+touch "$MNT/d/x"; echo z > "$MNT/d/y"
+opck "a directory lists what it holds"     "$(ls "$MNT/d" | tr '\n' ' ' | xargs)" "x y"
+python3 -c "
+f = open('$MNT/sp.bin', 'wb'); f.seek(1048576); f.write(b'END'); f.close()" 2>/dev/null
+opck "a sparse write sets the size"        "$(stat -f %z "$MNT/sp.bin")" "1048579"
+opck "a hole reads back as zeros"          "$(python3 -c "print(open('$MNT/sp.bin','rb').read(16) == b'\x00' * 16)")" "True"
+echo "over" > "$MNT/o1"; echo "written" > "$MNT/o2"; mv -f "$MNT/o2" "$MNT/o1"
+opck "rename over an existing name wins"   "$(cat "$MNT/o1")" "written"
+
+remount "$OPSIMG"
+opck "contents survive a remount"          "$(cat "$MNT/g.txt")" "$(printf 'hello\nmore')"
+opck "a symlink survives a remount"        "$(readlink "$MNT/s.txt")" "g.txt"
+opck "a listing survives a remount"        "$(ls "$MNT/d" | tr '\n' ' ' | xargs)" "x y"
+detach_volume
+
 # --- setAttributes actually sets attributes ---------------------------------
 # It did not. FSKit reports what the caller asked for through isValid(_:), and
 # uses consumedAttributes for the FILESYSTEM to report back what it applied.
