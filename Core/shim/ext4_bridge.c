@@ -3594,7 +3594,40 @@ int ext4b_write(ext4b_device *dev,
             }
         }
 
-        if (lblk < have_blocks) {
+        /*
+         * have_blocks comes from the file SIZE, and preallocated space lives
+         * past i_size -- F_PREALLOCATE reserves blocks without growing the
+         * file. So a block that macOS reserved is invisible here, and the
+         * trailing partial block of a preallocated write was classified as
+         * past-the-end and appended instead of mapped: the tail landed
+         * somewhere else entirely and its own blocks stayed unwritten, which
+         * reads back as zeros. Whole blocks escaped this because the fast
+         * path above maps them itself; only the tail fell through.
+         *
+         * Ask the extent map before concluding a block is past the end.
+         */
+        bool     already_mapped = false;
+        bool     tail_unwritten = false;
+        ext4_fsblk_t mapped_at  = 0;
+        if (lblk >= have_blocks &&
+            ext4_inode_has_flag(ref.inode, EXT4_INODE_FLAG_EXTENTS)) {
+            uint32_t n_lb = 0;
+            bool     unwr = false;
+            if (ext4_extent_map_range(&ref, lblk, 1, &mapped_at, &n_lb,
+                                      &unwr) == EOK && mapped_at != 0 &&
+                n_lb > 0) {
+                already_mapped = true;
+                tail_unwritten = unwr;
+            }
+        }
+
+        if (already_mapped) {
+            /* The extent map already named the block. Not through
+             * init_inode_dblk_idx: that reports an unwritten extent as a hole
+             * and hands back 0, which the guard below turns into EIO -- so the
+             * tail was dropped and the file came back short. */
+            fblk = mapped_at;
+        } else if (lblk < have_blocks) {
             /* Within the allocated range: map, allocating if it is a hole. */
             r = ext4_fs_init_inode_dblk_idx(&ref, lblk, &fblk);
         } else {
@@ -3663,13 +3696,44 @@ int ext4b_write(ext4b_device *dev,
             *out_written += run_bytes;
             run_bytes = 0;
 
-            r = ext4_block_writebytes(&dev->bdev,
-                                      (uint64_t)fblk * bsize + in_off,
-                                      src, chunk);
-            if (r != EOK)
-                break;
-            ext4_bcache_update_if_cached(dev->bdev.bc, fblk, in_off, src,
-                                         chunk);
+            if (tail_unwritten) {
+                /*
+                 * Allocated but unwritten -- preallocated space. There is
+                 * nothing on the medium to merge with: an unwritten extent
+                 * reads as zeros whatever its blocks hold. So compose the
+                 * whole block, zeros plus this chunk, write it, and mark it
+                 * written only afterwards. Marking first would publish
+                 * whatever the blocks held for their previous owner, and
+                 * writing only the chunk would leave the rest of the block
+                 * holding it.
+                 */
+                uint8_t *whole = calloc(1, bsize);
+                if (!whole) {
+                    r = ENOMEM;
+                    break;
+                }
+                memcpy(whole + in_off, src, chunk);
+                r = ext4_block_writebytes(&dev->bdev,
+                                          (uint64_t)fblk * bsize, whole,
+                                          bsize);
+                if (r == EOK)
+                    ext4_bcache_update_if_cached(dev->bdev.bc, fblk, 0,
+                                                 whole, bsize);
+                free(whole);
+                if (r != EOK)
+                    break;
+                r = ext4_extent_mark_written(&ref, lblk, 1);
+                if (r != EOK)
+                    break;
+            } else {
+                r = ext4_block_writebytes(&dev->bdev,
+                                          (uint64_t)fblk * bsize + in_off,
+                                          src, chunk);
+                if (r != EOK)
+                    break;
+                ext4_bcache_update_if_cached(dev->bdev.bc, fblk, in_off, src,
+                                             chunk);
+            }
             *out_written += chunk;
         }
 

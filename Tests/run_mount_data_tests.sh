@@ -118,6 +118,15 @@ make_volume() {  # make_volume <image> <blocks>
 # uses before every large copy, which takes a different branch again --
 # ext4_bridge.c writes into the still-unwritten extent and marks it written
 # afterwards, skipping the zeroing pass. That branch had no test at all.
+#
+# The prealloc-tail rows exist because every size above is either sub-block or
+# an exact multiple of 4096, and that omission hid a live data-corruption bug
+# for the whole of this suite's first day. A preallocated write whose LAST
+# bytes are a partial block put that tail at the start of the write instead of
+# at its own offset, because the block was classified as past-the-end:
+# have_blocks comes from i_size, and preallocated space lies beyond i_size.
+# Real files are not multiples of the block size, so this hit almost
+# everything a user copied while every cell here stayed green.
 CASES=$(cat <<'EOF'
 sub-block|1000|
 one-block|4096|
@@ -127,6 +136,11 @@ eight-megabytes|8388608|
 preallocated-1m|1048576|--prealloc
 preallocated-8m|8388608|--prealloc
 preallocated-64m|67108864|--prealloc
+prealloc-tail-4097|4097|--prealloc
+prealloc-tail-5000|5000|--prealloc
+prealloc-tail-131313|131313|--prealloc
+prealloc-tail-40424|40424|--prealloc
+prealloc-tail-3000001|3000001|--prealloc
 EOF
 )
 
@@ -235,6 +249,33 @@ run_geometry() {  # run_geometry <label> <blocks>
 run_geometry "even-groups"   $((32 * 32768))
 echo ""
 run_geometry "partial-group" $((32 * 32768 + 5000))
+
+# --- the real copy path, not a synthetic one --------------------------------
+# `cp` goes through copyfile(3), which is what Finder uses and what the field
+# report came from. It found the preallocated-tail bug when every synthetic
+# size in this suite passed, because those sizes were block multiples and real
+# files are not. Keeping it means the suite exercises whatever copyfile
+# actually does today rather than our model of it.
+echo ""
+echo "the real copy path"
+CPIMG="$WORK/copyfile.img"
+CPSRC="$WORK/cpsrc"
+mkdir -p "$CPSRC"
+for n in 40424 131313 1052136 3000001; do
+    "$DATA" write "$CPSRC/f$n.bin" "$n" "$n" >/dev/null 2>&1
+done
+make_volume "$CPIMG" $((32 * 32768 + 5000))
+attach_and_mount "$CPIMG"
+cp "$CPSRC"/*.bin "$MNT/" 2>/dev/null
+assert_mounted "after cp"
+remount "$CPIMG"
+if out=$("$ROOT/scripts/verify_copy.sh" "$CPSRC" "$MNT" 2>&1); then
+    ok "cp(1) preserves every byte of every file"
+else
+    bad "cp(1) preserves every byte of every file" \
+        "$(grep -E '^(DIFFERS|MISSING|SIZE)' <<<"$out" | head -3 | tr '\n' ' ')"
+fi
+detach_volume
 
 # --- surprise removal while data is in flight -------------------------------
 # The field event this driver exists to survive: the stick is pulled mid-write.
