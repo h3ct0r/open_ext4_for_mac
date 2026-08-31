@@ -98,6 +98,37 @@ struct Ext4MacApp {
             }
             exit(0)
 
+        case "version", "--version", "-v":
+            // Which source the installed bundles were built from. The point is
+            // to answer "is the thing on disk today's code?" without inference:
+            // a stale extension has cost three debugging sessions, once via a
+            // log line that read exactly like the new build and was not.
+            let appID = Bundle.main.object(forInfoDictionaryKey: "Ext4BuildID")
+                        as? String ?? "unknown"
+            print("app:       \(appID)")
+            print("bundle:    \(Bundle.main.bundleURL.path)")
+
+            // ExtensionKit puts the appex under Contents/Extensions, not
+            // Contents/PlugIns, so builtInPlugInsURL does not find it.
+            let extDir = Bundle.main.bundleURL
+                .appendingPathComponent("Contents/Extensions")
+            let appexes = (try? FileManager.default.contentsOfDirectory(
+                                at: extDir, includingPropertiesForKeys: nil)) ?? []
+            if appexes.isEmpty {
+                print("extension: none found in \(extDir.path)")
+            }
+            for appex in appexes where appex.pathExtension == "appex" {
+                let id = Bundle(url: appex)?
+                            .object(forInfoDictionaryKey: "Ext4BuildID")
+                         as? String ?? "unknown"
+                print("extension: \(id)  (\(appex.lastPathComponent))")
+            }
+            print("")
+            print("A running extension keeps serving a mounted volume from the")
+            print("binary it started with, so installing a new bundle does not")
+            print("replace it until the volume is ejected and re-attached.")
+            exit(0)
+
         case "help", "-h", "--help":
             usage(0)
         default:
@@ -113,6 +144,7 @@ struct Ext4MacApp {
         Ext4Mac                     is the extension installed and enabled?
         Ext4Mac unlock /dev/diskN   unlock an encrypted (LUKS) volume
         Ext4Mac forget <uuid|disk>  forget a volume's key again
+        Ext4Mac version             which build the installed bundles are
         Ext4Mac list                which volumes are unlocked
         Ext4Mac mount /dev/diskN    mount a volume whose key is stored
         Ext4Mac menu                watch for encrypted volumes and ask

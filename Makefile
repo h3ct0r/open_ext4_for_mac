@@ -447,7 +447,7 @@ typecheck: core
 
 extension: $(APPEX)
 
-$(APPEX): $(SWIFT_SRCS) $(CORE_LIB) Extension/Info.plist
+$(APPEX): $(SWIFT_SRCS) $(CORE_LIB) Extension/Info.plist $(BUILD)/.build-id
 	@if [ "$(CONFIG)" = "debug" ] && [ -z "$(ALLOW_DEBUG_APPEX)" ]; then \
 	  echo "refusing to build the appex against a debug/ASan core."; \
 	  echo "the shipping extension must be a release build; set"; \
@@ -459,6 +459,7 @@ $(APPEX): $(SWIFT_SRCS) $(CORE_LIB) Extension/Info.plist
 	swiftc $(SWIFT_SRCS) $(SWIFTFLAGS) $(CORE_LIB) \
 	    -o "$(APPEX)/Contents/MacOS/$(EXT_NAME)"
 	@cp Extension/Info.plist "$(APPEX)/Contents/Info.plist"
+	@plutil -replace Ext4BuildID -string "$(BUILD_ID)" "$(APPEX)/Contents/Info.plist"
 	@echo "built $(APPEX)"
 
 # The container app exists only to host the extension: macOS discovers FSKit
@@ -466,9 +467,19 @@ $(APPEX): $(SWIFT_SRCS) $(CORE_LIB) Extension/Info.plist
 # System Settings > General > Login Items & Extensions.
 app: extension $(BUILD)/$(APP_NAME).app/Contents/Info.plist $(BUILD)/$(APP_NAME).app/Contents/MacOS/$(APP_NAME)
 
-$(BUILD)/$(APP_NAME).app/Contents/Info.plist: App/Info.plist
+# Stamping the plists has to notice a new commit even when no source file
+# changed, or the bundle keeps claiming the revision it was first built at --
+# which is the same stale-identity problem the stamp exists to solve.
+$(BUILD)/.build-id: FORCE
+	@mkdir -p $(BUILD)
+	@printf '%s' "$(BUILD_ID)" | cmp -s - $@ 2>/dev/null || printf '%s' "$(BUILD_ID)" > $@
+
+FORCE:
+
+$(BUILD)/$(APP_NAME).app/Contents/Info.plist: App/Info.plist $(BUILD)/.build-id
 	@mkdir -p $(dir $@)
 	@cp $< $@
+	@plutil -replace Ext4BuildID -string "$(BUILD_ID)" $@
 
 # The app links the core so it can read a LUKS header and run the key
 # derivation itself: a gigabyte of argon2id belongs in an ordinary application,
