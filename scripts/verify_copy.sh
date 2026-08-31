@@ -24,12 +24,22 @@ fi
 [ -d "$SRC" ] || { echo "no such directory: $SRC" >&2; exit 2; }
 [ -d "$DST" ] || { echo "no such directory: $DST" >&2; exit 2; }
 
-total=0; same=0; missing=0; sized=0; differ=0
+total=0; same=0; missing=0; sized=0; differ=0; skipped=0
 
 # -print0 / read -d '' so spaces and unicode in names survive; this corpus is
 # full of both.
 while IFS= read -r -d '' f; do
     rel="${f#"$SRC"/}"
+    base="$(basename "$rel")"
+
+    # Finder's own bookkeeping, which it does not copy in a drag: .DS_Store
+    # holds a folder's view settings, and ._name is an AppleDouble carrying
+    # resource forks onto filesystems without them. Counting them as losses
+    # made a clean 407-file run report a failure.
+    case "$base" in
+        .DS_Store|._*) skipped=$((skipped + 1)); continue ;;
+    esac
+
     dst="$DST/$rel"
     total=$((total + 1))
 
@@ -72,6 +82,7 @@ done < <(find "$SRC" -type f -print0)
 
 echo
 echo "checked $total file(s): $same identical, $differ different, $missing missing, $sized wrong size"
+[ "$skipped" -gt 0 ] && echo "(skipped $skipped Finder metadata file(s): .DS_Store / ._*)"
 [ $((differ + missing + sized)) -eq 0 ] && { echo "every file survived the copy"; exit 0; }
 echo "the copy did not preserve every file"
 exit 1
