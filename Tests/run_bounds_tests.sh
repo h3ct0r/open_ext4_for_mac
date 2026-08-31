@@ -383,7 +383,15 @@ eb, el, shi, slo = struct.unpack_from('<IHHI', ib, 12)
 struct.pack_into('<IHHI', ib, 12, eb, 30000, 0, tot - 100)
 f.seek(off + 40); f.write(bytes(ib)); f.close()
 EOF
-"$DUMP" "$IMG" rm /victim >/dev/null 2>&1
+rmout=$("$DUMP" "$IMG" rm /victim 2>&1)
+# lwext4's own debug output is compiled out of this build, so a refusal has to
+# come through the shim's logger or nobody in the field can see it -- and the
+# range is the only clue to whatever produced it.
+if grep -q "past the end of a .* volume" <<<"$rmout"; then
+  ok "the refused range is reported, not silently dropped"
+else
+  bad "the refused range is reported" "$(tail -2 <<<"$rmout" | tr '\n' ' ')"
+fi
 out=$("$DUMP" "$IMG" groups 2>&1); rc=$?
 if grep -q "claim more free blocks than they hold" <<<"$out"; then
   bad "freeing past the end of the volume leaves no impossible group" \

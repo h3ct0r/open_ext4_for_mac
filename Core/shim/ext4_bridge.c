@@ -733,6 +733,25 @@ int ext4b_format(ext4b_device *dev, const ext4b_format_options *opts)
     return EOK;
 }
 
+/*
+ * A free that ran past the end of the volume, refused by the allocator.
+ *
+ * The guard stops the damage -- crediting groups that do not exist, which
+ * leaves a descriptor claiming more free blocks than its group holds -- but
+ * the range is what identifies whatever produced it, and lwext4's own
+ * debug output is compiled out of this build. So it comes here.
+ */
+void ext4b_report_bad_free(uint64_t first, uint32_t count, uint64_t blocks)
+{
+    bridge_logf(3, "refused a free of %u block(s) at %llu: the range ends at "
+                   "%llu, past the end of a %llu-block volume. The accounting "
+                   "is protected; the extent that produced this range is not "
+                   "-- e2fsck is the fix [build %s]",
+                count, (unsigned long long)first,
+                (unsigned long long)(first + count - 1),
+                (unsigned long long)blocks, EXT4B_BUILD_ID);
+}
+
 /* ================================================================ mount == */
 
 /*
