@@ -167,6 +167,37 @@ exists to close, both of which have cost a day each:
 Accounting lines in the log carry `[build <rev>]` for the same reason: a log
 line should say which code produced it rather than leave it to inference.
 
+### Reading the write-run meter
+
+`data write runs: N runs, M MB, avg B blocks` measures how long a contiguous
+run the shim could hand the medium. 256 blocks is the ceiling, because the
+largest write request macOS issues is 1 MB.
+
+**A short average is not by itself an allocator problem.** The meter is bounded
+by the file, so a 16 KB file cannot produce a run longer than 4 blocks no
+matter how healthy allocation is. A copy of many small files therefore reports
+a small average by construction, and reading that as fragmentation sent one
+investigation the wrong way -- a broken free map was blamed for short runs, and
+repairing it made the average *worse* because the workload had changed.
+
+To ask whether the allocator itself is healthy, remove the workload variable:
+one large file onto a freshly formatted volume.
+
+```bash
+build/bin/datafile write /Volumes/<vol>/one.bin 536870912 77
+```
+
+Measured on a fresh 4 GB volume, 512 MB in one file: **avg 252 blocks, longest
+256** -- at the ceiling, both for a plain write and for a preallocated one. If
+you see that, allocation is not the problem and the slow copy is somewhere
+else.
+
+One asymmetry worth knowing: the same 512 MB lands in **10 extents** when
+written plainly and **256** when preallocated, because each conversion splits
+the extent it lands in. That costs extent-tree depth rather than contiguity --
+and it is what makes the three-way split in `ext4_ext_convert_to_initialized`
+reachable at all (patch 0055).
+
 ### Free-space accounting
 
 `df` on a mounted volume can report nonsense -- more available space than the
