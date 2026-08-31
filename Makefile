@@ -675,3 +675,15 @@ install: sign
 	  echo "the module is installed but FSKit still does not list it."; \
 	  echo "Run 'make check-extension' for the diagnosis."; \
 	fi
+# Say which revision was just installed, and whether anything is still running
+# the previous one. An extension serving a mounted volume keeps the binary it
+# started with, so an install can be complete and correct while every log line
+# still comes from the old code -- which has now misled two rounds of
+# debugging.
+	@echo ""
+	@/Applications/$(APP_NAME).app/Contents/MacOS/$(APP_NAME) version 2>/dev/null \
+	  | sed 's/^/  /' || echo "  (installed app has no version verb yet)"
+	@if pgrep -x $(EXT_NAME) >/dev/null 2>&1; then \
+	  echo "  an $(EXT_NAME) process is still running the PREVIOUS build."; \
+	  echo "  Eject and replug the volume before reading any log line."; \
+	fi
