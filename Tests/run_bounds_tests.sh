@@ -221,6 +221,94 @@ else
   bad "a bad superblock checksum is reported as damage" "$(head -2 <<<"$out")"
 fi
 
+# --- inspection commands neither fail nor write ------------------------------
+echo
+echo "read-only commands stay read-only"
+# Every suite reads these verbs' stdout and asserts on its content; almost none
+# looks at the exit code (68 call sites capture output, 6 check status). So a
+# change that made the mount dirty -- correct output, then a failed write-back
+# at unmount -- passed 114 cells while every read-only command exited 1. The
+# cause was auditing group descriptors through ext4_fs_get_block_group_ref,
+# which initializes and dirties any group still flagged BLOCK_UNINIT rather
+# than merely reading it.
+#
+# The exit code is only half the guard. On a read-write mount that same change
+# writes silently instead of failing, so the image itself must come back
+# byte-identical.
+# Sized for many groups on purpose. A small fixture has one block group, and
+# group 0 is always written out at format, so nothing is left flagged
+# BLOCK_UNINIT -- the very state that made the regression fire. Every fixture
+# in the suite was single-group, which is why 114 cells stayed green against a
+# build where this failed. Sparse, so it costs bytes, not gigabytes.
+IMG="$WORK/readonly.img"
+rm -f "$IMG"; python3 -c "open('$IMG','wb').truncate(4*1024*1024*1024)" 2>/dev/null \
+  || python3 -c "import sys;open(sys.argv[1],'wb').truncate(4*1024*1024*1024)" "$IMG"
+"$DUMP" "$IMG" format 4 >/dev/null 2>&1
+uninit() { dumpe2fs "$1" 2>/dev/null | grep -c 'BLOCK_UNINIT'; }
+fresh_uninit=$(uninit "$IMG")
+if [ "${fresh_uninit:-0}" -gt 1 ]; then
+  ok "the fixture keeps $fresh_uninit groups uninitialized after format"
+else
+  bad "the fixture keeps groups uninitialized after format" \
+      "uninit groups=${fresh_uninit:-none} (is something materializing them?)"
+fi
+"$DUMP" "$IMG" mkdir /d              >/dev/null 2>&1
+"$DUMP" "$IMG" create /d/f 0644      >/dev/null 2>&1
+"$DUMP" "$IMG" write /d/f "content"  >/dev/null 2>&1
+"$DUMP" "$IMG" setxattr /d/f user.k v >/dev/null 2>&1
+# Writing one small file touches group 0, which format already initialized, so
+# a healthy build consumes no lazy groups here. The regression consumes all of
+# them on any read-write mount -- measured separately from inspection so each
+# failure names the thing that actually caused it.
+written_uninit=$(uninit "$IMG")
+if [ "$fresh_uninit" = "$written_uninit" ]; then
+  ok "writing one small file consumes no lazy groups ($written_uninit intact)"
+else
+  bad "writing one small file consumes no lazy groups" \
+      "uninit groups $fresh_uninit -> $written_uninit"
+fi
+
+before=$(md5 -q "$IMG" 2>/dev/null || md5sum "$IMG" | cut -d' ' -f1)
+
+ro_failed=""
+while read -r verb args; do
+  [ -z "$verb" ] && continue
+  if ! "$DUMP" "$IMG" $verb $args >/dev/null 2>&1; then
+    ro_failed="$ro_failed $verb"
+  fi
+done <<'VERBS'
+probe
+ls /
+stat /d/f
+cat /d/f
+extents /d/f
+xattr /d/f
+orphans
+check
+df
+VERBS
+
+if [ -z "$ro_failed" ]; then
+  ok "every read-only command exits 0 on a healthy volume"
+else
+  bad "every read-only command exits 0 on a healthy volume" "failed:$ro_failed"
+fi
+
+after=$(md5 -q "$IMG" 2>/dev/null || md5sum "$IMG" | cut -d' ' -f1)
+if [ "$before" = "$after" ]; then
+  ok "inspecting a volume leaves it byte-identical"
+else
+  bad "inspecting a volume leaves it byte-identical" "$before -> $after"
+fi
+
+after_uninit=$(uninit "$IMG")
+if [ "$written_uninit" = "$after_uninit" ]; then
+  ok "inspection consumes no lazily-initialized groups ($after_uninit intact)"
+else
+  bad "inspection consumes no lazily-initialized groups" \
+      "uninit groups $written_uninit -> $after_uninit"
+fi
+
 # --- a failed assertion reports through the logger, not stdout --------------
 echo
 echo "assertion failure reporting"
