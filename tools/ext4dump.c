@@ -1182,6 +1182,21 @@ static int run_write_command(ext4b_device *dev, int argc, char **argv)
 
 int main(int argc, char **argv)
 {
+    /*
+     * Which build this is, answered without a volume.
+     *
+     * The app reports its revision from a plist the Makefile re-stamps on
+     * every commit; this one is compiled into the core, and the two are only
+     * the same fact if the core was rebuilt. When they drift, a hardware
+     * session reads as fresh while the code under it is not -- so preflight
+     * checks this against the working tree before anything is measured.
+     */
+    if (argc == 2 && (strcmp(argv[1], "version") == 0 ||
+                      strcmp(argv[1], "--version") == 0)) {
+        printf("%s\n", EXT4B_BUILD_ID);
+        return 0;
+    }
+
     if (argc < 3) {
         fprintf(stderr,
             "usage: %s <image> <command> [args]\n"
@@ -1197,6 +1212,8 @@ int main(int argc, char **argv)
             "  df                 free/available space as the OS is told it\n"
             "  groups [bad]       per-group free counts the allocator uses\n"
             "                     ('bad' lists only the groups that differ)\n"
+            "  version            the build this tool was compiled at\n"
+            "                     (used alone, without an image)\n"
             "  orphans            show the head of the orphan list\n"
             "  check              walk the tree and cross-check what it says\n"
             "                     (not e2fsck: no repair, no allocation data)\n"

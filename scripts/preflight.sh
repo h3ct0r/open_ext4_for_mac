@@ -31,6 +31,25 @@ echo ""
 # they used to fail mid-run with a message that blamed the device.
 if [ -x "$ROOT/build/bin/ext4dump" ]; then
   ok "ext4dump is built"
+
+  # ...and built from what is checked out right now. The revision is compiled
+  # into the core, while the app and extension carry theirs in a plist the
+  # Makefile re-stamps every commit. Those are only the same fact if the core
+  # was actually rebuilt, and when they drift the accounting lines keep naming
+  # an older commit while `Ext4Mac version` names the current one -- so the
+  # session looks fresh and measures the previous build. That has cost a day.
+  built=$("$ROOT/build/bin/ext4dump" version 2>/dev/null)
+  head=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null)
+  git -C "$ROOT" diff --quiet 2>/dev/null || head="$head-dirty"
+  if [ -z "$built" ] || [ -z "$head" ]; then
+    bad "ext4dump reports the revision it was built from" \
+        "built='${built:-none}' head='${head:-unknown}'"
+  elif [ "$built" = "$head" ]; then
+    ok "ext4dump was built from the current tree ($built)"
+  else
+    bad "ext4dump was built from the current tree" \
+        "binary says $built, tree is $head -- run: make tools"
+  fi
 else
   bad "ext4dump is not built" "run: make tools"
 fi

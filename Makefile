@@ -231,12 +231,16 @@ $(OBJ)/lwext4/%.o: $(LWEXT4_DIR)/src/%.c $(LWEXT4_HEADERS) $(PATCH_STAMP)
 	$(CC) $(TARGET_FLAG) $(LWEXT4_CFLAGS) -c $< -o $@
 
 # Shipping shim: no test hooks, no getenv.
-$(OBJ)/shim/%.o: $(SHIM_DIR)/%.c $(SHIM_DIR)/ext4_bridge.h $(LWEXT4_HEADERS) $(PATCH_STAMP)
+# The build id is compiled in, so these have to rebuild when the revision
+# changes even though no source file did -- otherwise the log lines keep
+# naming the commit they were first built at while the re-stamped plists name
+# the current one, and a hardware session reads as fresh when it is not.
+$(OBJ)/shim/%.o: $(SHIM_DIR)/%.c $(SHIM_DIR)/ext4_bridge.h $(LWEXT4_HEADERS) $(PATCH_STAMP) $(BUILD)/.build-id
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(SHIM_CFLAGS) -c $< -o $@
 
 # Test shim: EXT4B_TEST_HOOKS exposes the orphan-inspection API the suites use.
-$(OBJ)/shim-test/%.o: $(SHIM_DIR)/%.c $(SHIM_DIR)/ext4_bridge.h $(LWEXT4_HEADERS) $(PATCH_STAMP)
+$(OBJ)/shim-test/%.o: $(SHIM_DIR)/%.c $(SHIM_DIR)/ext4_bridge.h $(LWEXT4_HEADERS) $(PATCH_STAMP) $(BUILD)/.build-id
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(SHIM_CFLAGS) -DEXT4B_TEST_HOOKS=1 -c $< -o $@
 
@@ -277,7 +281,7 @@ test-crypto: $(BUILD)/bin/cryptotest
 # The tool is compiled with EXT4B_TEST_HOOKS so the header exposes the
 # orphan-inspection declarations it calls, and links the test library that
 # actually defines them.
-$(BUILD)/bin/ext4dump: tools/ext4dump.c $(CORE_TEST_LIB)
+$(BUILD)/bin/ext4dump: tools/ext4dump.c $(CORE_TEST_LIB) $(BUILD)/.build-id
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(CFLAGS) -DEXT4B_TEST_HOOKS=1 $< $(CORE_TEST_LIB) -o $@
 
