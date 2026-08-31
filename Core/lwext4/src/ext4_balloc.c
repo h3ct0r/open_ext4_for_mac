@@ -229,6 +229,9 @@ int ext4_balloc_free_block(struct ext4_inode_ref *inode_ref, ext4_fsblk_t baddr)
 	return rc;
 }
 
+/* Defined by the shim, which owns the logger; see ext4b_assert_fail. */
+void ext4b_report_bad_free(uint64_t first, uint32_t count, uint64_t blocks);
+
 int ext4_balloc_free_blocks(struct ext4_inode_ref *inode_ref,
 			    ext4_fsblk_t first, uint32_t count)
 {
@@ -237,6 +240,37 @@ int ext4_balloc_free_blocks(struct ext4_inode_ref *inode_ref,
 	ext4_fsblk_t start_block = first;
 	struct ext4_fs *fs = inode_ref->fs;
 	struct ext4_sblock *sb = &fs->sb;
+
+	/*
+	 * Refuse a range that is not wholly inside the volume.
+	 *
+	 * The group ids below are a division, and the loop then walks from the
+	 * first to the last. Nothing here checked that the last one exists, so
+	 * a range running past the end of the medium -- from a corrupt extent,
+	 * or an extent tree walked with a bad length -- walked group ids that
+	 * do not, crediting the superblock a bitmap block's worth of free space
+	 * per iteration and writing the credit into whatever the descriptor
+	 * table's address arithmetic pointed at.
+	 *
+	 * Observed on an 8 GB volume: freeing one extent that overhung the end
+	 * left the last group claiming more free blocks than the group holds,
+	 * which is the shape a field volume arrived in. The blocks in such a
+	 * range were never ours to free, so the honest answer is to refuse the
+	 * call rather than to clamp it and free the part that happens to land.
+	 */
+	uint64_t blocks_cnt = ext4_sb_get_blocks_cnt(sb);
+	if (count == 0)
+		return EOK;
+	if (first < ext4_get32(sb, first_data_block) ||
+	    first >= blocks_cnt || (uint64_t)count > blocks_cnt - first) {
+		/* Through the shim rather than ext4_dbg, which this build
+		 * compiles out (CONFIG_DEBUG_PRINTF=0) -- and a refusal nobody
+		 * can see is how a corrupt range stays unattributed. The range
+		 * itself is the clue to whatever produced it, so it is what
+		 * gets reported. Same arrangement as ext4b_assert_fail. */
+		ext4b_report_bad_free((uint64_t)first, count, blocks_cnt);
+		return EINVAL;
+	}
 
 	/* Compute indexes */
 	uint32_t bg_first = ext4_balloc_get_bgid_of_block(sb, first);
