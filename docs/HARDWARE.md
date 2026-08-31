@@ -216,12 +216,35 @@ Two further guesses were tested and are also wrong:
 | 110 files, volume filled to 69%, `cp`   | 3.3%           |
 | 407 files, volume filled to 74%, Finder | **89.2%**      |
 
-So it is not preallocation, not the number of files, and not how full the
-volume is. The remaining difference is the copy engine itself: Finder rather
-than `cp(1)`, copying many files at once instead of one after another. That is
-untested and is where to look next -- and it is worth remembering that `cp`
-found a corruption bug `datafile` could not, so the tool used to copy has
-already mattered once.
+The copy engine was tested too, by driving Finder itself through AppleScript
+over the same corpus and volume, and it makes no difference either:
+
+| shape (512 MB volume, 378 MB corpus, 200 files)   | non-contiguous |
+|---------------------------------------------------|----------------|
+| `cp(1)`                                            | 2.3%           |
+| **Finder**, scripted, same corpus                  | **2.3%**       |
+| `cp` with a second writer hammering the volume     | 0.5%           |
+
+So five explanations have now been measured and refuted: preallocation, file
+count, volume fullness, the copy engine, and concurrent background writes. None
+of them reproduces anything near 89% on a disk image.
+
+The one remaining difference is **the medium**: every reproduction above runs on
+an hdiutil image, where writes reach APFS through the page cache, and the field
+number comes from a physical USB stick. That is not obviously an allocation
+input -- allocation is a filesystem decision -- but it is the only variable
+left, and it is plausible if a slower device changes the size or ordering of
+the writes FSKit delivers, since the file is extended per delivery.
+
+Testing it needs hardware: the same corpus onto the same-sized volume, once on
+the stick and once on an image, in one sitting. Until then the honest position
+is that this is unexplained, not attributed.
+
+**Beware measuring a Finder copy by file count.** Finder creates every
+destination file early, so a wait loop that counts names finishes long before
+the data lands; unmounting there truncates the copy and measures nothing. The
+first run of this comparison reported 0.9% and 4124 blocks for a 378 MB corpus
+that way. Wait on bytes.
 
 One consequence of 0057 worth knowing: merging can leave a tree deeper than its
 contents now need, so `e2fsck -fn` may say `extent tree could be shorter.
