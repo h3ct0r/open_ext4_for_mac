@@ -13,6 +13,7 @@
 #include <ext4_dir.h>
 #include <ext4_inode.h>
 #include <ext4_super.h>
+#include <ext4_block_group.h>
 #include <ext4_extent.h>
 #include <ext4_blockdev.h>
 #include <ext4_bcache.h>
@@ -264,6 +265,7 @@ struct ext4b_device {
     bool     journal_running;
     /* Said once per mount, not once per statfs: Finder asks continually. */
     bool     warned_free_blocks;
+    uint64_t warned_free_at;    /* last impossible count reported */
 
     /* Journal batching. `txn_ops` counts mutations accumulated in the
      * currently open transaction; `txn_batch` is how many are allowed to
@@ -710,6 +712,86 @@ int ext4b_format(ext4b_device *dev, const ext4b_format_options *opts)
 
 /* ================================================================ mount == */
 
+/*
+ * The superblock carries a cached total of free blocks; the group descriptors
+ * carry the per-group counts the allocator actually works from. They are two
+ * records of one fact, and only one of them can be trusted at a time.
+ *
+ * A stick in the field reported more free blocks than the volume has, and the
+ * count climbed as files were copied. Six offline reproductions of that
+ * workload -- including the same partial-last-group geometry, preallocation,
+ * xattrs, tail trimming and delete/rewrite cycles -- all came back exact, so
+ * the divergence has not been cornered yet. This prints, in one line at mount,
+ * which of the two records is wrong, which is the fork the offline work could
+ * not resolve: a bad cached sum is cosmetic until e2fsck, while bad descriptor
+ * counts are what fragment allocation down to eight-block runs.
+ */
+static void bridge_audit_free_accounting(ext4b_device *dev)
+{
+    struct ext4_fs *fs = dev->bdev.fs;
+    if (!fs)
+        return;
+
+    uint64_t sb_free = ext4_sb_get_free_blocks_cnt(&fs->sb);
+    uint64_t total   = ext4_sb_get_blocks_cnt(&fs->sb);
+    uint32_t groups  = ext4_block_group_cnt(&fs->sb);
+    uint64_t sum     = 0;
+
+    /*
+     * The descriptors are read straight out of their table rather than
+     * through ext4_fs_get_block_group_ref, because that call is not a read:
+     * referencing a group still flagged BLOCK_UNINIT makes it initialize the
+     * bitmap, clear the flag and dirty the descriptor. Auditing every group
+     * through it would materialize the whole volume at mount -- undoing the
+     * lazy format, and failing outright on a read-only mount, which is how
+     * this was caught.
+     */
+    uint32_t bsize    = ext4_sb_get_block_size(&fs->sb);
+    uint32_t dsc_size = ext4_sb_get_desc_size(&fs->sb);
+    uint32_t dsc_cnt  = bsize / dsc_size;
+
+    /*
+     * Descriptor-table addressing is mirrored here for the ordinary layout
+     * only; lwext4 keeps its own version static. META_BG scatters the table
+     * across the volume, so rather than guess at an address the audit simply
+     * declines to run -- a missing diagnostic beats a confident wrong one.
+     */
+    if (ext4_sb_feature_incom(&fs->sb, EXT4_FINCOM_META_BG))
+        return;
+
+    uint32_t first_data = ext4_get32(&fs->sb, first_data_block);
+
+    for (uint32_t i = 0; i < groups; i++) {
+        uint64_t block_id = first_data + (i / dsc_cnt) + 1;
+        uint32_t offset   = (i % dsc_cnt) * dsc_size;
+        struct ext4_block block;
+
+        if (ext4_block_get(fs->bdev, &block, block_id) != EOK)
+            return;                       /* a read error is its own report */
+        sum += ext4_bg_get_free_blocks_count(
+                   (struct ext4_bgroup *)(block.data + offset), &fs->sb);
+        if (ext4_block_set(fs->bdev, &block) != EOK)
+            return;
+    }
+
+    if (sb_free == sum && sb_free <= total) {
+        bridge_logf(1, "free-space accounting agrees: %llu of %llu blocks "
+                       "free across %u group(s)",
+                    (unsigned long long)sb_free,
+                    (unsigned long long)total, groups);
+        return;
+    }
+
+    bridge_logf(3, "free-space accounting disagrees: the superblock says %llu "
+                   "free, the %u group descriptors sum to %llu, and the volume "
+                   "holds %llu blocks%s -- e2fsck is the fix",
+                (unsigned long long)sb_free, groups,
+                (unsigned long long)sum, (unsigned long long)total,
+                sum > total ? "; the descriptors themselves are impossible"
+                            : (sb_free > total ? "; only the cached total is "
+                                                 "impossible" : ""));
+}
+
 int ext4b_mount(ext4b_device *dev, bool read_only)
 {
     if (!dev)
@@ -839,6 +921,7 @@ int ext4b_mount(ext4b_device *dev, bool read_only)
         }
     }
 
+    bridge_audit_free_accounting(dev);
     return EOK;
 }
 
@@ -997,14 +1080,26 @@ int ext4b_statfs(ext4b_device *dev, ext4b_statfs_info *out)
      * volume passes for a slow driver.
      */
     if (out->free_blocks > out->total_blocks) {
-        if (!dev->warned_free_blocks) {
-            dev->warned_free_blocks = true;
+        /*
+         * Reported once per mount and then again whenever the count climbs
+         * another 4096 blocks. The one-shot version cost a diagnosis: it
+         * caught the first crossing at 1,922,214 and stayed silent while the
+         * count grew to 2,320,442, hiding the fact that the number *drifts
+         * upward as the volume is written* rather than arriving broken.
+         */
+        if (!dev->warned_free_blocks ||
+            out->free_blocks > dev->warned_free_at + 4096) {
             bridge_logf(3, "free block count (%llu) exceeds the volume size "
-                           "(%llu blocks): the superblock's accounting is "
-                           "corrupt, allocation will be poor, and e2fsck is "
-                           "the fix",
+                           "(%llu blocks) by %llu%s: the superblock's "
+                           "accounting is corrupt, allocation will be poor, "
+                           "and e2fsck is the fix",
                         (unsigned long long)out->free_blocks,
-                        (unsigned long long)out->total_blocks);
+                        (unsigned long long)out->total_blocks,
+                        (unsigned long long)(out->free_blocks -
+                                             out->total_blocks),
+                        dev->warned_free_blocks ? " (still growing)" : "");
+            dev->warned_free_blocks = true;
+            dev->warned_free_at = out->free_blocks;
         }
         out->free_blocks = out->total_blocks;
     }
@@ -1025,8 +1120,14 @@ int ext4b_statfs(ext4b_device *dev, ext4b_statfs_info *out)
         if (to_le32(fs->sb.features_incompatible) & EXT4_FINCOM_64BIT)
             reserved |= (uint64_t)to_le32(fs->sb.reserved_blocks_count_hi) << 32;
     }
-    out->avail_blocks = (st.free_blocks_count > reserved)
-                      ? st.free_blocks_count - reserved
+    /*
+     * Derived from the clamped free count, not from st.free_blocks_count.
+     * Clamping only free left available holding the raw value, so df kept
+     * printing "Avail 8.9Gi" against a "Size 7.3Gi" volume -- the clamp
+     * looked ineffective because the number df shows never went through it.
+     */
+    out->avail_blocks = (out->free_blocks > reserved)
+                      ? out->free_blocks - reserved
                       : 0;
     return EOK;
 }

@@ -147,6 +147,59 @@ else
   bad "statfs available never exceeds free" "free=$free avail=$avail"
 fi
 
+# --- a volume claiming more free space than it has --------------------------
+echo
+echo "statfs impossible free count"
+# A stick in the field reported 2,045,724 free blocks against 1,920,357 total,
+# which df renders as a negative block count and Disk Utility as 106.5% free.
+# The count is clamped so the OS is never handed an impossible number -- and
+# `available` has to follow the clamped value, not the raw one. It did not:
+# clamping only `free` left df still printing "Avail 8.9Gi" for a 7.3Gi
+# volume, which made the clamp look ineffective for a week.
+IMG="$WORK/statfs-impossible.img"; new_vol "$IMG" 4 4096
+python3 - "$IMG" <<'EOF'
+import struct, sys
+# The superblock carries a crc32c of itself, so a field cannot be edited in
+# place without re-stamping it -- an unstamped edit is rejected at mount as an
+# unsupported feature, which never reaches the accounting code under test.
+T = []
+for i in range(256):
+    c = i
+    for _ in range(8):
+        c = (c >> 1) ^ (0x82F63B78 if c & 1 else 0)
+    T.append(c)
+def crc32c(buf, crc=0xFFFFFFFF):
+    for b in buf:
+        crc = (crc >> 8) ^ T[(crc ^ b) & 0xFF]
+    return crc
+f = open(sys.argv[1], 'r+b')
+f.seek(1024); sb = bytearray(f.read(1024))
+total = struct.unpack_from('<I', sb, 4)[0]
+struct.pack_into('<I', sb, 12,    total + 400085)    # free blocks > total
+struct.pack_into('<I', sb, 0xE8,  0)                 # and its high half
+struct.pack_into('<I', sb, 0x3FC, crc32c(bytes(sb[:0x3FC])))
+f.seek(1024); f.write(sb); f.close()
+EOF
+out=$("$DUMP" "$IMG" df 2>&1); rc=$?
+tot=$(sed -nE 's/^total: *([0-9]+) blocks.*/\1/p' <<<"$out")
+fre=$(sed -nE 's/^free: *([0-9]+) blocks.*/\1/p' <<<"$out")
+avl=$(sed -nE 's/^available: *([0-9]+) blocks.*/\1/p' <<<"$out")
+if [ -n "$avl" ] && [ -n "$tot" ] && [ "$avl" -le "$tot" ] && [ "$avl" -le "$fre" ]; then
+  ok "available ($avl) follows the clamp, not the raw count (total $tot)"
+else
+  bad "available follows the clamped free count" "total=$tot free=$fre avail=$avl rc=$rc"
+fi
+if [ -n "$fre" ] && [ "$fre" -le "$tot" ]; then
+  ok "free ($fre) is clamped to the volume size"
+else
+  bad "free is clamped to the volume size" "total=$tot free=$fre"
+fi
+if grep -q "only the cached total is impossible" <<<"$out"; then
+  ok "the audit names which record is wrong (the cached total)"
+else
+  bad "the audit names which record is wrong" "$(grep -i accounting <<<"$out" | head -1)"
+fi
+
 # --- a failed assertion reports through the logger, not stdout --------------
 echo
 echo "assertion failure reporting"

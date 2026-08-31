@@ -1194,6 +1194,7 @@ int main(int argc, char **argv)
             "  cat <path>         write file contents to stdout\n"
             "  extents <path>     show the logical->physical extent map\n"
             "  xattr <path>       list extended attributes\n"
+            "  df                 free/available space as the OS is told it\n"
             "  orphans            show the head of the orphan list\n"
             "  check              walk the tree and cross-check what it says\n"
             "                     (not e2fsck: no repair, no allocation data)\n"
@@ -1268,6 +1269,15 @@ int main(int argc, char **argv)
         io_stats_ctx = &fc;
         atexit(io_stats_report);
     }
+
+    /* Alignment, forced. The aligned read/write path exists for raw
+     * character devices, which means it runs only on real hardware and never
+     * in a suite -- the exact shape of code that is wrong for a week without
+     * anyone noticing. This makes a plain file demand the same alignment, so
+     * the path can be tested where testing is cheap. */
+    const char *align_env = getenv("EXT4DUMP_FORCE_ALIGN");
+    if (align_env)
+        fc.align = (uint32_t)strtoul(align_env, NULL, 10);
 
     /* EIO injection; see file_ctx. */
     const char *eio_r = getenv("EXT4DUMP_EIO_READ_AT");
@@ -1648,6 +1658,40 @@ int main(int argc, char **argv)
             if (res.problems)
                 printf("first:       %s\n", res.first_problem);
             rc = res.problems ? 1 : 0;
+        }
+
+    } else if (strcmp(cmd, "df") == 0) {
+        /*
+         * What the volume tells the OS about its own free space, straight
+         * from the same call FSKit makes. A stick reported more available
+         * space than the volume has size, which df rendered as a negative
+         * block count -- and the reason the clamp on `free` looked
+         * ineffective was that `available` is a separate number that was
+         * not going through it. Both are printed here, with the impossible
+         * ones named, so a bad accounting state is visible without root
+         * and without unmounting.
+         */
+        ext4b_statfs_info st;
+        r = ext4b_statfs(dev, &st);
+        if (r != 0) { fprintf(stderr, "df: %s\n", ext4b_strerror(r)); rc = 1; }
+        else {
+            printf("block size:  %u\n", st.block_size);
+            printf("total:       %llu blocks\n",
+                   (unsigned long long)st.total_blocks);
+            printf("free:        %llu blocks%s\n",
+                   (unsigned long long)st.free_blocks,
+                   st.free_blocks > st.total_blocks ? "  IMPOSSIBLE" : "");
+            printf("available:   %llu blocks%s\n",
+                   (unsigned long long)st.avail_blocks,
+                   st.avail_blocks > st.total_blocks ? "  IMPOSSIBLE" :
+                   (st.avail_blocks > st.free_blocks ? "  IMPOSSIBLE" : ""));
+            printf("inodes:      %u total, %u free%s\n",
+                   st.total_inodes, st.free_inodes,
+                   st.free_inodes > st.total_inodes ? "  IMPOSSIBLE" : "");
+            rc = (st.free_blocks > st.total_blocks ||
+                  st.avail_blocks > st.total_blocks ||
+                  st.avail_blocks > st.free_blocks ||
+                  st.free_inodes > st.total_inodes) ? 1 : 0;
         }
 
     } else if (strcmp(cmd, "orphans") == 0) {

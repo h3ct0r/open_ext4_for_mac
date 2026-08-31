@@ -145,6 +145,31 @@ stick again, in this order:
    drives the identical core, and the media model prices it like the stick
    it came from.
 
+### Free-space accounting
+
+`df` on a mounted volume can report nonsense -- more available space than the
+volume has size -- and a broken free-space picture is also what collapses
+allocation into short runs, so a copy that should stream crawls instead. The
+numbers the OS is given come from one call, and the tool exposes it:
+
+```bash
+build/bin/ext4dump corpse.img df
+```
+
+It prints total/free/available, marks any impossible value `IMPOSSIBLE`, and
+exits non-zero if one appears. Mounting also logs one line naming *which*
+record is wrong:
+
+- *"free-space accounting agrees"* -- the superblock's cached total and the
+  group descriptors match; look elsewhere.
+- *"only the cached total is impossible"* -- the descriptors are fine, so
+  allocation is healthy and the bad number is cosmetic until `e2fsck -fy`.
+- *"the descriptors themselves are impossible"* -- the allocator is working
+  from a broken map; expect short runs and poor throughput.
+
+The distinction matters because the two have different causes and only the
+second explains slow copies.
+
 ## 4. When it wedges
 
 Known states, from mildest to worst (docs/STATUS.md has the histories):
