@@ -176,7 +176,7 @@ f = open(sys.argv[1], 'r+b')
 f.seek(1024); sb = bytearray(f.read(1024))
 total = struct.unpack_from('<I', sb, 4)[0]
 struct.pack_into('<I', sb, 12,    total + 400085)    # free blocks > total
-struct.pack_into('<I', sb, 0xE8,  0)                 # and its high half
+struct.pack_into('<I', sb, 0x158, 0)                 # and its high half
 struct.pack_into('<I', sb, 0x3FC, crc32c(bytes(sb[:0x3FC])))
 f.seek(1024); f.write(sb); f.close()
 EOF
@@ -198,6 +198,27 @@ if grep -q "only the cached total is impossible" <<<"$out"; then
   ok "the audit names which record is wrong (the cached total)"
 else
   bad "the audit names which record is wrong" "$(grep -i accounting <<<"$out" | head -1)"
+fi
+
+# --- a damaged superblock is not reported as an unsupported one -------------
+echo
+echo "damaged superblock wording"
+# lwext4 folds its superblock-checksum test into the same boolean that reports
+# feature problems, so a damaged superblock came back as "unsupported
+# filesystem feature" -- which sends the user hunting for a missing driver
+# feature instead of running e2fsck.
+IMG="$WORK/statfs-damaged.img"; new_vol "$IMG" 4 4096
+python3 - "$IMG" <<'EOF'
+import struct, sys
+f = open(sys.argv[1], 'r+b')
+f.seek(1024 + 12); f.write(struct.pack('<I', 999999))   # edited, not re-stamped
+f.close()
+EOF
+out=$("$DUMP" "$IMG" df 2>&1 || true)
+if grep -q "superblock is damaged" <<<"$out"; then
+  ok "a bad superblock checksum is reported as damage, not as a missing feature"
+else
+  bad "a bad superblock checksum is reported as damage" "$(head -2 <<<"$out")"
 fi
 
 # --- a failed assertion reports through the logger, not stdout --------------

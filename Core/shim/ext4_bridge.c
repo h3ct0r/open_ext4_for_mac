@@ -443,6 +443,7 @@ void ext4b_set_txn_batch(ext4b_device *dev, uint32_t batch)
 #define SBF_BLOCKS_COUNT_HI    0x150
 #define SBF_FREE_BLOCKS_HI     0x158
 #define SBF_CHECKSUM_SEED      0x270
+#define SBF_CHECKSUM           0x3FC
 
 #define EXT_MAGIC 0xEF53
 
@@ -553,6 +554,24 @@ int ext4b_probe(ext4b_device *dev, ext4b_probe_info *out)
         snprintf(out->unsupported, sizeof(out->unsupported),
                  "superblock claims %llu blocks, larger than the device",
                  (unsigned long long)out->block_count);
+        return EOK;
+    }
+
+    /*
+     * A damaged superblock reads as an unsupported one. lwext4 folds its
+     * checksum test into ext4_sb_check, the same boolean that reports feature
+     * problems, so a volume whose superblock checksum does not match is
+     * refused as "unsupported filesystem feature" -- sending the user to look
+     * for a driver that supports it, when the superblock is simply damaged and
+     * e2fsck is the fix. Checked here, before the feature gate, because a
+     * corrupt superblock is also the reason feature bits cannot be believed.
+     */
+    if ((out->feature_ro_compat & 0x0400) &&      /* METADATA_CSUM */
+        rd32(sb, SBF_CHECKSUM) != ext4_crc32c(EXT4_CRC32_INIT, sb, SBF_CHECKSUM)) {
+        out->verdict = EXT4B_PROBE_UNSUPPORTED;
+        snprintf(out->unsupported, sizeof(out->unsupported),
+                 "superblock checksum mismatch: the superblock is damaged, "
+                 "not unsupported (e2fsck is the fix)");
         return EOK;
     }
 
