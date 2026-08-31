@@ -1,0 +1,56 @@
+A volume claims the extended attributes it uses
+
+mkfs never set EXT4_FCOM_EXT_ATTR, and the driver writes extended
+attribute blocks regardless. Without that flag an i_file_acl is illegal by
+definition, so e2fsck reports every file that has one:
+
+  Inode 12, i_blocks is 88, should be 80.
+  i_file_acl for inode 12 (/a.bin) is 2, should be zero.
+  Block bitmap differences:  -2
+
+Three complaints about one block: the pointer, the i_blocks that counts
+it, and the bitmap bit that holds it. The attributes themselves are
+written correctly and read back correctly, by this driver and by Linux --
+the volume simply was not claiming the feature it was using.
+
+macOS makes that a certainty rather than an edge case. It attaches
+com.apple.quarantine, com.apple.provenance and
+com.apple.metadata:kMDItemWhereFroms to very nearly everything, so a
+Finder copy of 408 ordinary files produced 408 inodes e2fsck wanted to
+strip -- and a volume that reported "still has errors" while every byte
+of file data on it verified byte-exact against the originals.
+
+mke2fs sets this flag by default, which is why a volume formatted on
+Linux and written by us never showed it, and why the differential suite
+against Linux never caught it: those fixtures are made by mke2fs.
+
+--- a/src/ext4_mkfs.c
++++ b/src/ext4_mkfs.c
+@@ -996,6 +996,27 @@
+ 		break;
+ 	}
+ 
++	/*
++	 * ext_attr, on every generation this writes.
++	 *
++	 * It is what makes an extended-attribute block legal. Without it
++	 * e2fsck reads any i_file_acl as an error and offers to clear it --
++	 * "i_file_acl for inode N is X, should be zero" -- along with the
++	 * i_blocks that counts the block and the bitmap bit that holds it.
++	 * The attributes themselves are written correctly and read back
++	 * correctly, by us and by Linux; the volume is simply not claiming the
++	 * feature it is using.
++	 *
++	 * That is not a corner case here. macOS attaches xattrs to very nearly
++	 * everything -- com.apple.quarantine, com.apple.provenance,
++	 * com.apple.metadata:kMDItemWhereFroms -- so a Finder copy of 408
++	 * ordinary files produced 408 inodes e2fsck wanted to strip, and a
++	 * volume that reported "still has errors" while every byte of data on
++	 * it was intact. mke2fs sets this flag by default, which is why a
++	 * volume formatted on Linux never shows it.
++	 */
++	info->feat_compat |= EXT4_FCOM_EXT_ATTR;
++
+ 	/*TODO: handle this features some day...*/
+ 	info->feat_incompat &= ~EXT4_FINCOM_META_BG;
+ 	info->feat_incompat &= ~EXT4_FINCOM_FLEX_BG;

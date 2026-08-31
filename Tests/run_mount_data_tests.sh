@@ -264,6 +264,15 @@ mkdir -p "$CPSRC"
 for n in 40424 131313 1052136 3000001; do
     "$DATA" write "$CPSRC/f$n.bin" "$n" "$n" >/dev/null 2>&1
 done
+# macOS attaches these to very nearly every file it touches, so a real copy
+# always carries them and cp(1) brings them along. Without them this cell was
+# only testing file data, and it missed a volume that reported "still has
+# errors" for 408 files whose bytes were all intact: mkfs was not claiming
+# ext_attr, which makes every i_file_acl illegal to e2fsck.
+xattr -w com.apple.quarantine "0081;68deb4c6;Chrome;TESTGUID" "$CPSRC/f40424.bin"
+xattr -w com.apple.metadata:kMDItemWhereFroms "https://example.invalid/x" \
+      "$CPSRC/f131313.bin"
+xattr -w user.plain "value" "$CPSRC/f1052136.bin" 2>/dev/null
 make_volume "$CPIMG" $((32 * 32768 + 5000))
 attach_and_mount "$CPIMG"
 cp "$CPSRC"/*.bin "$MNT/" 2>/dev/null
@@ -275,7 +284,24 @@ else
     bad "cp(1) preserves every byte of every file" \
         "$(grep -E '^(DIFFERS|MISSING|SIZE)' <<<"$out" | head -3 | tr '\n' ' ')"
 fi
+# Did the attributes actually make the crossing? A cell that only checks data
+# would pass on a volume where every xattr was silently dropped.
+if [ -n "$(xattr "$MNT/f40424.bin" 2>/dev/null)" ]; then
+    ok "extended attributes survive the copy"
+else
+    bad "extended attributes survive the copy" "the copy carries none"
+fi
 detach_volume
+
+# e2fsck, which is where the missing ext_attr feature showed up. The cell
+# above passed for a day while every file on the volume carried an xattr
+# block e2fsck wanted to strip.
+if out=$(e2fsck -fn "$CPIMG" 2>&1); then
+    ok "e2fsck finds nothing to repair after a copy carrying xattrs"
+else
+    bad "e2fsck finds nothing to repair after a copy carrying xattrs" \
+        "$(grep -E 'i_file_acl|i_blocks|Block bitmap' <<<"$out" | head -2 | tr '\n' ' ')"
+fi
 
 # --- surprise removal while data is in flight -------------------------------
 # The field event this driver exists to survive: the stick is pulled mid-write.
