@@ -2470,9 +2470,16 @@ static uint32_t jbd_journal_alloc_block(struct jbd_journal *journal,
 		 * not imagined -- the trace of the failing cut shows exactly
 		 * the journal superblock dropped while reused log space
 		 * landed. */
-		jbd_write_sb(journal->jbd_fs);
-		(void)ext4_block_barrier(journal->jbd_fs->bdev);
-		journal->published_start = journal->start;
+		/* Only a write that landed publishes anything. Advancing
+		 * published_start after a failed one records a tail the medium
+		 * never received; the branch above then sees published_start
+		 * abreast of start and skips the write that would have fixed
+		 * it, so recovery reads from a position the superblock does not
+		 * name. Leaving it put costs one more attempt next lap. */
+		if (jbd_write_sb(journal->jbd_fs) == EOK) {
+			(void)ext4_block_barrier(journal->jbd_fs->bdev);
+			journal->published_start = journal->start;
+		}
 	}
 
 	/* The other way the head reaches the tail: `start` kept pace in
@@ -2486,9 +2493,16 @@ static uint32_t jbd_journal_alloc_block(struct jbd_journal *journal,
 	if (journal->last == journal->published_start &&
 	    journal->last != journal->start) {
 		(void)ext4_block_barrier(journal->jbd_fs->bdev);
-		jbd_write_sb(journal->jbd_fs);
-		(void)ext4_block_barrier(journal->jbd_fs->bdev);
-		journal->published_start = journal->start;
+		/* Only a write that landed publishes anything. Advancing
+		 * published_start after a failed one records a tail the medium
+		 * never received; the branch above then sees published_start
+		 * abreast of start and skips the write that would have fixed
+		 * it, so recovery reads from a position the superblock does not
+		 * name. Leaving it put costs one more attempt next lap. */
+		if (jbd_write_sb(journal->jbd_fs) == EOK) {
+			(void)ext4_block_barrier(journal->jbd_fs->bdev);
+			journal->published_start = journal->start;
+		}
 	}
 
 	return start_block;
