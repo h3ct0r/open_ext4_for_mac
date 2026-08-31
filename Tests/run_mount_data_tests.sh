@@ -531,12 +531,31 @@ fi
 echo ""
 echo "the out-of-range guard"
 since=$(( $(date +%s) - STARTED_AT + 5 ))
-if /usr/bin/log show --last "${since}s" --predicate 'subsystem == "dev.h3ct0r.ext4"' \
-       --info 2>/dev/null | grep -q "refused a free of"; then
+logwin=$(/usr/bin/log show --last "${since}s" \
+         --predicate 'subsystem == "dev.h3ct0r.ext4"' --info 2>/dev/null)
+
+if grep -q "refused a free of" <<<"$logwin"; then
     bad "no legitimate write produces an out-of-range free" \
         "the allocator refused a free during this run"
 else
     ok "no legitimate write produces an out-of-range free"
+fi
+
+# closeVolume used to drop ext4b_unmount's result and say "volume closed"
+# regardless. It reports now -- so an ordinary run must show the success line
+# and no failures. The failure path itself has no natural trigger from out
+# here: a force-detached device still unmounts cleanly, and the extension has
+# no fault injection because fskitd launches it and environment variables do
+# not reach it. It was proved by hand instead, by making ext4b_unmount return
+# 5 in a throwaway build; this guards the half that can be automated.
+if grep -q "unmount failed" <<<"$logwin"; then
+    bad "no volume in this run failed to unmount" \
+        "$(grep -o 'unmount failed.*' <<<"$logwin" | head -1)"
+elif grep -q "volume closed" <<<"$logwin"; then
+    ok "every volume in this run closed with its unmount result checked"
+else
+    bad "every volume in this run closed with its unmount result checked" \
+        "no close was logged at all, so the result was not observed"
 fi
 
 finish

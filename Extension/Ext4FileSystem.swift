@@ -363,11 +363,35 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         // Carried across the concurrency boundary as an integer: OpaquePointer
         // is not Sendable, and the executor guarantees serial access anyway.
         let handle = UInt(bitPattern: dev)
-        try? await executor.run {
-            _ = ext4b_unmount(OpaquePointer(bitPattern: handle))
+
+        // The result is the whole point of ext4b_unmount. It drains the
+        // transaction, stops the journal and writes the superblock back, and
+        // reports the FIRST failure among them -- its own comment records a
+        // stick that failed its final write-back and ejected "clean". Dropping
+        // it with `_ =` inside a `try?` discarded that twice over, and the line
+        // below still said the volume closed.
+        //
+        // The teardown still runs to the end either way: a device left
+        // half-registered is worse than any single failed step. What changes is
+        // that the failure is now said out loud, which is the difference
+        // between a user who knows to re-copy and one who does not.
+        var unmountRC: Int32 = 0
+        do {
+            unmountRC = try await executor.run {
+                ext4b_unmount(OpaquePointer(bitPattern: handle))
+            }
+        } catch {
+            Ext4Log.error("closing the volume: unmount never ran (\(error))")
+            unmountRC = -1
         }
         bridge.close()
-        Ext4Log.info("volume closed")
+        if unmountRC != 0 {
+            Ext4Log.error("unmount failed (\(unmountRC)) while closing the "
+                          + "volume: something it was asked to write may not "
+                          + "have reached the medium")
+        } else {
+            Ext4Log.info("volume closed")
+        }
     }
 
     func unloadResource(resource: FSResource, options: FSTaskOptions) async throws {
