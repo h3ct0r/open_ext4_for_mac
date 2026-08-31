@@ -764,6 +764,35 @@ void ext4b_report_bad_free(uint64_t first, uint32_t count, uint64_t blocks)
                 (unsigned long long)blocks, EXT4B_BUILD_ID);
 }
 
+/*
+ * lwext4's own diagnostics, for the two levels worth hearing.
+ *
+ * Called from the ext4_dbg macro when CONFIG_DEBUG_PRINTF is off, which is
+ * every build here. Only "[warn]" and "[error]" are passed on: the rest is
+ * per-block tracing that would bury the log and, in an appex, cost work to
+ * produce for nobody.
+ */
+void ext4b_report_dbg(const char *fmt, ...)
+{
+    if (!fmt)
+        return;
+    if (strncmp(fmt, DBG_WARN, 6) != 0 && strncmp(fmt, DBG_ERROR, 7) != 0)
+        return;
+
+    char msg[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof msg, fmt, ap);
+    va_end(ap);
+
+    /* These carry a trailing newline for printf; the logger adds its own. */
+    size_t n = strlen(msg);
+    while (n > 0 && (msg[n - 1] == '\n' || msg[n - 1] == '\r'))
+        msg[--n] = '\0';
+
+    bridge_logf(3, "core: %s [build %s]", msg, EXT4B_BUILD_ID);
+}
+
 /* ================================================================ mount == */
 
 /*

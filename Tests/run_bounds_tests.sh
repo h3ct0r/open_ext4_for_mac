@@ -406,6 +406,31 @@ else
       "$(tail -3 <<<"$out" | tr '\n' ' ')"
 fi
 
+# --- the core stays quiet on a healthy volume -------------------------------
+# lwext4's DBG_WARN lines were compiled out of this build, so twenty-two
+# "extent block checksum failed" reports per suite run went unheard -- all of
+# them spurious, from checksumming the in-inode extent root as though it were a
+# block. Now that the level reaches the logger, the channel is only worth
+# having if it is silent when nothing is wrong: one false positive per file
+# teaches everyone to ignore the next real one.
+echo
+echo "core diagnostics on a healthy volume"
+IMG="$WORK/quiet.img"; new_vol "$IMG" 4 4096
+qout=$( { "$DUMP" "$IMG" mkdir /q
+          "$DUMP" "$IMG" create /q/f 0644
+          "$DUMP" "$IMG" write /q/f "some bytes"
+          "$DUMP" "$IMG" setxattr /q/f user.k v
+          "$DUMP" "$IMG" ls /
+          "$DUMP" "$IMG" stat /q/f
+          "$DUMP" "$IMG" extents /q/f; } 2>&1 )
+qn=$(grep -cE "\[(warn|error)\]" <<<"$qout")
+if [ "$qn" = 0 ]; then
+  ok "an ordinary workload provokes no core warnings"
+else
+  bad "an ordinary workload provokes no core warnings" \
+      "$(grep -oE '\[(warn|error)\].*' <<<"$qout" | sort -u | head -2 | tr '\n' ' ')"
+fi
+
 # --- a damaged superblock is not reported as an unsupported one -------------
 echo
 echo "damaged superblock wording"

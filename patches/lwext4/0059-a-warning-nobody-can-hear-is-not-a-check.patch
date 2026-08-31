@@ -1,0 +1,86 @@
+A warning nobody can hear is not a check
+
+CONFIG_DEBUG_PRINTF is off in every build here, because a sandboxed FSKit
+extension has no stdout to print to. ext4_dbg therefore compiled to
+nothing, and with it went every DBG_WARN in the tree -- including
+twenty-two "checksum failed" sites across seven files. The volumes paid to
+compute those checksums and nobody ever learned the answer.
+
+The two loud levels now reach the shim's logger, the same arrangement
+ext4b_assert_fail already uses and for the same reason. Level is a string
+prefix rather than part of the mask, so the filtering is done on the
+format string; DBG_INFO and unprefixed tracing stay silent, being
+per-block and enough to bury a log.
+
+Turning them on immediately proved the point, in the other direction.
+Twenty-two warnings appeared in one run of the write suite, all identical
+and all false: "Extent block checksum failed. Blocknr: 0". Block 0 is the
+extent header living in the inode's own i_block, where sixty bytes hold
+four extents and nothing else -- find_ext4_extent_tail() then points just
+past them, at whatever the inode has there, and the comparison is against
+noise. The root's integrity comes from the inode checksum, which covers it
+already. Only a real extent block carries a tail, so only a real block is
+checked now.
+
+Both halves matter and neither works alone. A check whose failure is
+invisible is not a check; a check that cries wolf on every extent-mapped
+file is worse, because the first true report reads as more of the same.
+With the root exempted, every suite runs silent -- write, bounds, format,
+preallocation, orphan, all zero -- and a cell in each of the offline and
+mounted suites now asserts that silence, so the next warning to appear
+means something.
+
+--- a/include/ext4_debug.h
++++ b/include/ext4_debug.h
+@@ -157,7 +157,26 @@
+ 		}                                                              \
+ 	} while (0)
+ #else
+-#define ext4_dbg(m, ...) do { } while (0)
++/* Diagnostics still matter where stdout does not exist.
++ *
++ * A sandboxed FSKit extension has nowhere to printf, so this was compiled to
++ * nothing -- and with it went every DBG_WARN in the tree, including
++ * twenty-two "checksum failed" reports. A checksum whose failure is invisible
++ * is not a check: the volume carries the cost of computing it and nobody ever
++ * learns the answer.
++ *
++ * The two loud levels now reach the shim's logger, which is the same
++ * arrangement ext4b_assert_fail already uses and for the same reason. Level is
++ * a string prefix here rather than part of the mask, so the filtering is done
++ * on the format string by the shim; DBG_INFO and unprefixed chatter stay
++ * silent, being per-block and enough to bury a log.
++ */
++void ext4b_report_dbg(const char *fmt, ...);
++#define ext4_dbg(m, ...)                                                       \
++	do {                                                                   \
++		(void)(m);                                                     \
++		ext4b_report_dbg(__VA_ARGS__);                                 \
++	} while (0)
+ #endif
+ 
+ #if CONFIG_DEBUG_ASSERT
+--- a/src/ext4_extent.c
++++ b/src/ext4_extent.c
+@@ -772,8 +772,19 @@
+ 		goto corrupted;
+ 	}
+ 
+-	tail = find_ext4_extent_tail(eh);
+-	if (ext4_sb_feature_ro_com(sb, EXT4_FRO_COM_METADATA_CSUM)) {
++	/* Only a real extent BLOCK carries a tail checksum. pblk 0 is the
++	 * header living in the inode's own i_block, where the sixty bytes hold
++	 * four extents and nothing else: find_ext4_extent_tail() then points
++	 * just past them, at whatever the inode has there, and the comparison
++	 * is against noise. The root's integrity comes from the inode
++	 * checksum, which covers it already.
++	 *
++	 * This fired on every extent-mapped file -- twenty-two times in one
++	 * suite run -- and was invisible until DBG_WARN was routed to the
++	 * logger. A check that cries wolf on healthy volumes is worse than no
++	 * check, because the first real one gets read as more of the same. */
++	if (pblk != 0 && ext4_sb_feature_ro_com(sb, EXT4_FRO_COM_METADATA_CSUM)) {
++		tail = find_ext4_extent_tail(eh);
+ 		if (tail->et_checksum !=
+ 		    to_le32(ext4_ext_block_csum(inode_ref, eh))) {
+ 			ext4_dbg(DEBUG_EXTENT,

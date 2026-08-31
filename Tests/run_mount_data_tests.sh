@@ -577,6 +577,13 @@ fi
 # no fault injection because fskitd launches it and environment variables do
 # not reach it. It was proved by hand instead, by making ext4b_unmount return
 # 5 in a throwaway build; this guards the half that can be automated.
+if grep -qE "core: \[(warn|error)\]" <<<"$logwin"; then
+    bad "the core logs no warnings during an ordinary mounted workload" \
+        "$(grep -oE 'core: \[(warn|error)\][^[]*' <<<"$logwin" | sort -u | head -2 | tr '\n' ' ')"
+else
+    ok "the core logs no warnings during an ordinary mounted workload"
+fi
+
 if grep -q "unmount failed" <<<"$logwin"; then
     bad "no volume in this run failed to unmount" \
         "$(grep -o 'unmount failed.*' <<<"$logwin" | head -1)"
