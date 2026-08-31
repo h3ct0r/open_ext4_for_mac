@@ -1,0 +1,65 @@
+A tail is published only once it has landed
+
+Two places advanced journal->published_start immediately after calling
+jbd_write_sb and without looking at what it returned. If that write failed
+the tail was recorded as published anyway -- and the first of the two
+branches fires only when published_start has fallen behind start, so
+believing it abreast suppresses the very write that would have corrected
+it. Recovery then reads from a position the superblock on the medium does
+not name.
+
+Both comments already explain why the ordering matters, in detail and
+from measurement: a torn image whose superblock said "start at 361,
+sequence 607" while block 361 held sequence 936 replays nothing at all.
+The write's own result was the one part not consulted.
+
+published_start now moves only when the write returned EOK. A failure
+leaves it where it was, which costs one more attempt next lap round the
+ring -- the cheap outcome, against a journal that cannot be replayed.
+
+Found by auditing the carried-over backlog rather than from a failure:
+the item said "a journal superblock write whose failure still advances
+the published tail", and it was accurate.
+
+--- a/src/ext4_journal.c
++++ b/src/ext4_journal.c
+@@ -2470,9 +2470,16 @@
+ 		 * not imagined -- the trace of the failing cut shows exactly
+ 		 * the journal superblock dropped while reused log space
+ 		 * landed. */
+-		jbd_write_sb(journal->jbd_fs);
+-		(void)ext4_block_barrier(journal->jbd_fs->bdev);
+-		journal->published_start = journal->start;
++		/* Only a write that landed publishes anything. Advancing
++		 * published_start after a failed one records a tail the medium
++		 * never received; the branch above then sees published_start
++		 * abreast of start and skips the write that would have fixed
++		 * it, so recovery reads from a position the superblock does not
++		 * name. Leaving it put costs one more attempt next lap. */
++		if (jbd_write_sb(journal->jbd_fs) == EOK) {
++			(void)ext4_block_barrier(journal->jbd_fs->bdev);
++			journal->published_start = journal->start;
++		}
+ 	}
+ 
+ 	/* The other way the head reaches the tail: `start` kept pace in
+@@ -2486,9 +2493,16 @@
+ 	if (journal->last == journal->published_start &&
+ 	    journal->last != journal->start) {
+ 		(void)ext4_block_barrier(journal->jbd_fs->bdev);
+-		jbd_write_sb(journal->jbd_fs);
+-		(void)ext4_block_barrier(journal->jbd_fs->bdev);
+-		journal->published_start = journal->start;
++		/* Only a write that landed publishes anything. Advancing
++		 * published_start after a failed one records a tail the medium
++		 * never received; the branch above then sees published_start
++		 * abreast of start and skips the write that would have fixed
++		 * it, so recovery reads from a position the superblock does not
++		 * name. Leaving it put costs one more attempt next lap. */
++		if (jbd_write_sb(journal->jbd_fs) == EOK) {
++			(void)ext4_block_barrier(journal->jbd_fs->bdev);
++			journal->published_start = journal->start;
++		}
+ 	}
+ 
+ 	return start_block;
