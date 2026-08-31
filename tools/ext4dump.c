@@ -871,7 +871,7 @@ static luks_device *open_luks(file_ctx *fc, const char *keyfile, bool writable,
 
 static bool is_write_cmd(const char *c)
 {
-    static const char *w[] = { "prealloc",
+    static const char *w[] = { "prealloc", "trim",
                                "mkdir", "create", "write", "append", "put", "rm",
                                "mv", "ln", "symlink", "truncate", "chmod",
                                "chown", "setxattr", "rmxattr", "script",
@@ -1137,6 +1137,20 @@ static int run_write_command(ext4b_device *dev, int argc, char **argv)
         r = ext4b_preallocate(dev, ino, off, len, &got);
         if (r != 0) { fprintf(stderr, "prealloc: %s\n", ext4b_strerror(r)); rc = 1; }
         else printf("preallocated %llu bytes\n", (unsigned long long)got);
+
+    } else if (strcmp(cmd, "trim") == 0) {
+        /*
+         * Release the tail of a preallocation, which is what the mounted
+         * driver does at the end of every Finder copy. It had no verb here,
+         * so no offline suite had ever driven it -- and the field volume
+         * failed with "trim preallocation 791: I/O error" while its free
+         * count climbed by a whole block group at a time.
+         */
+        if (argc < 4) { fprintf(stderr, "trim needs <path>\n"); rc = 2; return rc; }
+        uint32_t ino = resolve(dev, argv[3], NULL);
+        if (!ino) { rc = 1; return rc; }
+        r = ext4b_trim_preallocation(dev, ino);
+        if (r != 0) { fprintf(stderr, "trim: %s\n", ext4b_strerror(r)); rc = 1; }
 
     } else if (strcmp(cmd, "truncate") == 0) {
         if (argc < 5) { fprintf(stderr, "truncate needs <path> <size>\n"); rc = 2; return rc; }

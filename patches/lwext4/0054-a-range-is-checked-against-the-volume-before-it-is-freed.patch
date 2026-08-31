@@ -1,0 +1,65 @@
+A range is checked against the volume before it is freed
+
+ext4_balloc_free_blocks turned its arguments into a first and last group
+id by division and then walked from one to the other. Nothing established
+that the last group exists. A range running past the end of the medium --
+from a corrupt extent, or an extent tree walked with a bad length -- was
+therefore walked as if those groups were there: each iteration credited
+the superblock a bitmap block's worth of free space and wrote the same
+credit through the descriptor table's address arithmetic, into whatever
+that pointed at.
+
+The result is a descriptor claiming more free blocks than its group holds,
+which is the state an 8 GB stick arrived in after copying files: three
+groups impossible, the cached total climbing past the size of the volume,
+and allocation collapsing to eight-block runs because the allocator was
+scanning groups for blocks that do not exist.
+
+Reproduced by planting one extent that overhangs the end of the volume and
+removing the file: before this, the last group ends up claiming more than
+it holds; after it, the in-range blocks are still freed and the accounting
+stays exact.
+
+Refused rather than clamped. Blocks outside the volume were never this
+inode's to free, so freeing the part of the range that happens to land is
+not a more forgiving version of the same call -- it is a different one, and
+it would hide the corrupt extent that produced the range.
+
+--- a/src/ext4_balloc.c
++++ b/src/ext4_balloc.c
+@@ -238,6 +238,35 @@
+ 	struct ext4_fs *fs = inode_ref->fs;
+ 	struct ext4_sblock *sb = &fs->sb;
+ 
++	/*
++	 * Refuse a range that is not wholly inside the volume.
++	 *
++	 * The group ids below are a division, and the loop then walks from the
++	 * first to the last. Nothing here checked that the last one exists, so
++	 * a range running past the end of the medium -- from a corrupt extent,
++	 * or an extent tree walked with a bad length -- walked group ids that
++	 * do not, crediting the superblock a bitmap block's worth of free space
++	 * per iteration and writing the credit into whatever the descriptor
++	 * table's address arithmetic pointed at.
++	 *
++	 * Observed on an 8 GB volume: freeing one extent that overhung the end
++	 * left the last group claiming more free blocks than the group holds,
++	 * which is the shape a field volume arrived in. The blocks in such a
++	 * range were never ours to free, so the honest answer is to refuse the
++	 * call rather than to clamp it and free the part that happens to land.
++	 */
++	uint64_t blocks_cnt = ext4_sb_get_blocks_cnt(sb);
++	if (count == 0)
++		return EOK;
++	if (first < ext4_get32(sb, first_data_block) ||
++	    first >= blocks_cnt || (uint64_t)count > blocks_cnt - first) {
++		ext4_dbg(DEBUG_BALLOC,
++			 DBG_ERROR "refusing to free %" PRIu32 " block(s) at %"
++			 PRIu64 ": past the end of a %" PRIu64 "-block volume\n",
++			 count, (uint64_t)first, blocks_cnt);
++		return EINVAL;
++	}
++
+ 	/* Compute indexes */
+ 	uint32_t bg_first = ext4_balloc_get_bgid_of_block(sb, first);
+ 

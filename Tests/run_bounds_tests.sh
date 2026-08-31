@@ -342,6 +342,62 @@ else
       "$(grep -iE 'accounting|agrees' <<<"$out" | head -1)"
 fi
 
+# --- freeing a range that overhangs the volume ------------------------------
+echo
+echo "out-of-range free"
+# ext4_balloc_free_blocks divided its arguments into a first and last group id
+# and walked between them without establishing that the last one exists. A
+# range past the end of the medium was walked as if those groups were there,
+# crediting a bitmap block's worth of free space per iteration through the
+# descriptor table's address arithmetic. That is how a field volume ended up
+# with groups claiming more free blocks than they hold.
+# Sized so the last group is PARTIAL (33 groups, the last holding 5000 of
+# 32768 blocks). A volume whose size divides evenly by the group size has no
+# overhang for the walk to get wrong, and this cell passes against the unfixed
+# core on such a fixture -- the same blind spot that let a single-block-group
+# suite miss the lazy-group bug.
+IMG="$WORK/oob-free.img"
+rm -f "$IMG"; python3 -c "open('$IMG','wb').truncate((32*32768+5000)*4096)"
+"$DUMP" "$IMG" format 4 >/dev/null 2>&1
+"$DUMP" "$IMG" create /victim 0644 >/dev/null 2>&1
+dd if=/dev/zero of="$WORK/payload" bs=1m count=4 2>/dev/null
+"$DUMP" "$IMG" put /victim "$WORK/payload" >/dev/null 2>&1
+python3 - "$IMG" <<'EOF'
+import sys, struct
+f = open(sys.argv[1], 'r+b')
+f.seek(1024); sb = f.read(1024)
+bs  = 1024 << struct.unpack_from('<I', sb, 24)[0]
+isz = struct.unpack_from('<H', sb, 88)[0]
+fdb = struct.unpack_from('<I', sb, 20)[0]
+tot = struct.unpack_from('<I', sb, 4)[0]
+inc = struct.unpack_from('<I', sb, 96)[0]
+dsz = struct.unpack_from('<H', sb, 254)[0] if (inc & 0x80) else 32
+if dsz == 0: dsz = 32
+f.seek((fdb + 1) * bs)
+itbl = struct.unpack_from('<I', f.read(dsz), 8)[0]
+off = itbl * bs + (12 - 1) * isz          # inode 12, the file just created
+f.seek(off + 40); ib = bytearray(f.read(60))
+assert struct.unpack_from('<H', ib, 0)[0] == 0xF30A, "not an extent inode"
+eb, el, shi, slo = struct.unpack_from('<IHHI', ib, 12)
+# Start just inside the volume, run 30000 blocks past its end.
+struct.pack_into('<IHHI', ib, 12, eb, 30000, 0, tot - 100)
+f.seek(off + 40); f.write(bytes(ib)); f.close()
+EOF
+"$DUMP" "$IMG" rm /victim >/dev/null 2>&1
+out=$("$DUMP" "$IMG" groups 2>&1); rc=$?
+if grep -q "claim more free blocks than they hold" <<<"$out"; then
+  bad "freeing past the end of the volume leaves no impossible group" \
+      "$(grep 'claim more' <<<"$out" | head -1)"
+else
+  ok "freeing past the end of the volume leaves no impossible group"
+fi
+if [ "$rc" -eq 0 ]; then
+  ok "the accounting still adds up after an out-of-range free"
+else
+  bad "the accounting still adds up after an out-of-range free" \
+      "$(tail -3 <<<"$out" | tr '\n' ' ')"
+fi
+
 # --- a damaged superblock is not reported as an unsupported one -------------
 echo
 echo "damaged superblock wording"
