@@ -790,7 +790,9 @@ void ext4b_report_dbg(const char *fmt, ...)
     while (n > 0 && (msg[n - 1] == '\n' || msg[n - 1] == '\r'))
         msg[--n] = '\0';
 
-    bridge_logf(3, "core: %s [build %s]", msg, EXT4B_BUILD_ID);
+    /* bridge_logf already prefixes "core:"; adding another produced
+     * "core: core: [warn]" in the field. */
+    bridge_logf(3, "%s [build %s]", msg, EXT4B_BUILD_ID);
 }
 
 /* ================================================================ mount == */

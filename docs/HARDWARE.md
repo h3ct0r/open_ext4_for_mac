@@ -167,6 +167,34 @@ exists to close, both of which have cost a day each:
 Accounting lines in the log carry `[build <rev>]` for the same reason: a log
 line should say which code produced it rather than leave it to inference.
 
+### Core warnings in the log
+
+Since patch `0059`, lwext4's own `[warn]` and `[error]` lines reach the log
+instead of being compiled out. On a healthy volume there should be **none** --
+every offline suite runs silent, and both the offline and mounted suites assert
+it. So a `core: [warn]` line means something.
+
+With one expected exception. Reading a volume whose **journal has not been
+replayed** shows structures caught mid-update, and their checksums legitimately
+do not match:
+
+```
+core: free-space accounting disagrees ... the journal is unreplayed
+core: [warn]  Inode checksum failed.Inode: 12
+```
+
+That is the check working, not failing: the journal holds the correct copies and
+replay would fix them. Read the accounting line above it before reading anything
+into the checksum line -- a read-only mount does not replay, so this is the
+normal appearance of a crash snapshot.
+
+It is also the constraint on the work still outstanding. `ext4_balloc.c` and
+twenty-one other sites currently continue after a failed checksum, and
+`ext4_balloc.c` goes further and writes a fresh checksum over the bitmap it just
+modified. Making those failures *act* is the obvious fix and must not be done
+naively: on a pre-recovery mount they are expected, and refusing there would
+turn every recoverable crash into an unmountable volume.
+
 ### Reading the write-run meter
 
 `data write runs: N runs, M MB, avg B blocks` measures how long a contiguous
