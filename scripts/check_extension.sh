@@ -65,7 +65,37 @@ step "FSKit status" "$status"
 # The only trustworthy test is to ask it to do something. A scratch image
 # avoids touching any real disk.
 work=$(mktemp -d)
-trap 'umount "$work/mnt" 2>/dev/null; [ -n "${dev:-}" ] && hdiutil detach "$dev" -force >/dev/null 2>&1; rm -rf "$work"' EXIT
+
+# The extension does not always release the device the moment umount returns,
+# so a detach issued immediately after can lose that race and fail. That
+# failure used to be swallowed, and the backing file was deleted anyway --
+# which turns a transient failure into an attached image pointing at a file
+# that no longer exists, visible in `diskutil list` forever and cleanable only
+# by hand. One such PROBE device was found still attached days later.
+#
+# So: retry, and if it still will not detach, keep the backing file and say
+# what to run. A leak that announces itself can be cleaned up; a silent one
+# accumulates.
+cleanup() {
+    umount "$work/mnt" 2>/dev/null
+    if [ -n "${dev:-}" ]; then
+        for _ in 1 2 3 4 5; do
+            if hdiutil detach "$dev" -force >/dev/null 2>&1; then
+                dev=""
+                break
+            fi
+            sleep 1
+        done
+        if [ -n "${dev:-}" ]; then
+            echo "  note: $dev is still attached (detach lost the race)."
+            echo "        run: hdiutil detach $dev -force"
+            echo "        backing file kept: $work/probe.img"
+            return 0
+        fi
+    fi
+    rm -rf "$work"
+}
+trap cleanup EXIT
 
 export PATH="/opt/homebrew/opt/e2fsprogs/sbin:/opt/homebrew/opt/e2fsprogs/bin:$PATH"
 if ! command -v mke2fs >/dev/null; then
