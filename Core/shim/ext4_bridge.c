@@ -736,6 +736,101 @@ int ext4b_format(ext4b_device *dev, const ext4b_format_options *opts)
 /* ================================================================ mount == */
 
 /*
+ * One group descriptor, read straight out of the descriptor table.
+ *
+ * Never through ext4_fs_get_block_group_ref: that call is not a read, because
+ * referencing a group still flagged BLOCK_UNINIT makes it initialize the
+ * bitmap, clear the flag and dirty the descriptor. Walking every group through
+ * it would materialize the whole volume -- undoing the lazy format, and
+ * failing outright on a read-only mount, which is how this was caught.
+ *
+ * The addressing is mirrored here for the ordinary layout only, lwext4 keeping
+ * its own version static. META_BG scatters the table across the volume, so
+ * rather than guess at an address this declines: a missing diagnostic beats a
+ * confident wrong one.
+ *
+ * The descriptor is read field by field while its block is held rather than
+ * copied out whole, because a descriptor is 32 or 64 bytes depending on the
+ * volume and struct ext4_bgroup is the larger of the two -- copying blindly
+ * would read past the end of the last descriptor in a block.
+ */
+static int bridge_read_group_info(struct ext4_fs *fs, uint32_t i,
+                                  ext4b_group_info *out)
+{
+    if (ext4_sb_feature_incom(&fs->sb, EXT4_FINCOM_META_BG))
+        return ENOTSUP;
+
+    uint32_t bsize      = ext4_sb_get_block_size(&fs->sb);
+    uint32_t dsc_size   = ext4_sb_get_desc_size(&fs->sb);
+    uint32_t dsc_cnt    = bsize / dsc_size;
+    uint32_t first_data = ext4_get32(&fs->sb, first_data_block);
+
+    uint64_t block_id = first_data + (i / dsc_cnt) + 1;
+    uint32_t offset   = (i % dsc_cnt) * dsc_size;
+    struct ext4_block block;
+
+    if (ext4_block_get(fs->bdev, &block, block_id) != EOK)
+        return EIO;
+
+    struct ext4_bgroup *bg = (struct ext4_bgroup *)(block.data + offset);
+    out->index        = i;
+    out->blocks       = ext4_blocks_in_group_cnt(&fs->sb, i);
+    out->free_blocks  = ext4_bg_get_free_blocks_count(bg, &fs->sb);
+    out->block_uninit = ext4_bg_has_flag(bg, EXT4_BLOCK_GROUP_BLOCK_UNINIT);
+    out->inode_uninit = ext4_bg_has_flag(bg, EXT4_BLOCK_GROUP_INODE_UNINIT);
+
+    if (ext4_block_set(fs->bdev, &block) != EOK)
+        return EIO;
+    return EOK;
+}
+
+int ext4b_free_blocks_raw(ext4b_device *dev,
+                          uint64_t *free_blocks, uint64_t *total_blocks)
+{
+    if (!dev || !free_blocks || !total_blocks)
+        return EINVAL;
+    if (!dev->mounted || !dev->bdev.fs)
+        return ENODEV;
+    *free_blocks  = ext4_sb_get_free_blocks_cnt(&dev->bdev.fs->sb);
+    *total_blocks = ext4_sb_get_blocks_cnt(&dev->bdev.fs->sb);
+    return EOK;
+}
+
+int ext4b_group_count(ext4b_device *dev, uint32_t *out)
+{
+    if (!dev || !out)
+        return EINVAL;
+    if (!dev->mounted || !dev->bdev.fs)
+        return ENODEV;
+    if (ext4_sb_feature_incom(&dev->bdev.fs->sb, EXT4_FINCOM_META_BG))
+        return ENOTSUP;
+    *out = ext4_block_group_cnt(&dev->bdev.fs->sb);
+    return EOK;
+}
+
+int ext4b_group_stats(ext4b_device *dev, uint32_t first,
+                      ext4b_group_info *out, uint32_t max, uint32_t *filled)
+{
+    if (!dev || !out || !filled)
+        return EINVAL;
+    if (!dev->mounted || !dev->bdev.fs)
+        return ENODEV;
+
+    struct ext4_fs *fs = dev->bdev.fs;
+    uint32_t groups = ext4_block_group_cnt(&fs->sb);
+    uint32_t n = 0;
+
+    *filled = 0;
+    for (uint32_t i = first; i < groups && n < max; i++, n++) {
+        int r = bridge_read_group_info(fs, i, &out[n]);
+        if (r != EOK)
+            return r;
+    }
+    *filled = n;
+    return EOK;
+}
+
+/*
  * The superblock carries a cached total of free blocks; the group descriptors
  * carry the per-group counts the allocator actually works from. They are two
  * records of one fact, and only one of them can be trusted at a time.
@@ -760,41 +855,11 @@ static void bridge_audit_free_accounting(ext4b_device *dev)
     uint32_t groups  = ext4_block_group_cnt(&fs->sb);
     uint64_t sum     = 0;
 
-    /*
-     * The descriptors are read straight out of their table rather than
-     * through ext4_fs_get_block_group_ref, because that call is not a read:
-     * referencing a group still flagged BLOCK_UNINIT makes it initialize the
-     * bitmap, clear the flag and dirty the descriptor. Auditing every group
-     * through it would materialize the whole volume at mount -- undoing the
-     * lazy format, and failing outright on a read-only mount, which is how
-     * this was caught.
-     */
-    uint32_t bsize    = ext4_sb_get_block_size(&fs->sb);
-    uint32_t dsc_size = ext4_sb_get_desc_size(&fs->sb);
-    uint32_t dsc_cnt  = bsize / dsc_size;
-
-    /*
-     * Descriptor-table addressing is mirrored here for the ordinary layout
-     * only; lwext4 keeps its own version static. META_BG scatters the table
-     * across the volume, so rather than guess at an address the audit simply
-     * declines to run -- a missing diagnostic beats a confident wrong one.
-     */
-    if (ext4_sb_feature_incom(&fs->sb, EXT4_FINCOM_META_BG))
-        return;
-
-    uint32_t first_data = ext4_get32(&fs->sb, first_data_block);
-
     for (uint32_t i = 0; i < groups; i++) {
-        uint64_t block_id = first_data + (i / dsc_cnt) + 1;
-        uint32_t offset   = (i % dsc_cnt) * dsc_size;
-        struct ext4_block block;
-
-        if (ext4_block_get(fs->bdev, &block, block_id) != EOK)
-            return;                       /* a read error is its own report */
-        sum += ext4_bg_get_free_blocks_count(
-                   (struct ext4_bgroup *)(block.data + offset), &fs->sb);
-        if (ext4_block_set(fs->bdev, &block) != EOK)
-            return;
+        ext4b_group_info g;
+        if (bridge_read_group_info(fs, i, &g) != EOK)
+            return;              /* META_BG or a read error is its own report */
+        sum += g.free_blocks;
     }
 
     if (sb_free == sum && sb_free <= total) {

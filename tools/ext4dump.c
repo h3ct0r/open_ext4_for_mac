@@ -1195,6 +1195,8 @@ int main(int argc, char **argv)
             "  extents <path>     show the logical->physical extent map\n"
             "  xattr <path>       list extended attributes\n"
             "  df                 free/available space as the OS is told it\n"
+            "  groups [bad]       per-group free counts the allocator uses\n"
+            "                     ('bad' lists only the groups that differ)\n"
             "  orphans            show the head of the orphan list\n"
             "  check              walk the tree and cross-check what it says\n"
             "                     (not e2fsck: no repair, no allocation data)\n"
@@ -1692,6 +1694,97 @@ int main(int argc, char **argv)
                   st.avail_blocks > st.total_blocks ||
                   st.avail_blocks > st.free_blocks ||
                   st.free_inodes > st.total_inodes) ? 1 : 0;
+        }
+
+    } else if (strcmp(cmd, "groups") == 0) {
+        /*
+         * The per-group free counts, which are the record the allocator works
+         * from. `df` reports the superblock's cached total; the two are one
+         * fact kept twice, and when a volume reports more free space than it
+         * has, only this breakdown says which of them is wrong and where.
+         *
+         * The flags matter to that question: a lazy format leaves most groups
+         * BLOCK_UNINIT, and whether the damaged groups are the lazily
+         * initialised ones is the difference between a bug in that series and
+         * a bug in ordinary allocation.
+         */
+        bool only_bad = (argc > 3 && strcmp(argv[3], "bad") == 0);
+        uint32_t groups = 0;
+        r = ext4b_group_count(dev, &groups);
+        if (r != 0) {
+            fprintf(stderr, "groups: %s\n", ext4b_strerror(r));
+            rc = 1;
+        } else {
+            ext4b_group_info *g = calloc(groups ? groups : 1, sizeof(*g));
+            uint32_t filled = 0;
+            if (!g) {
+                fprintf(stderr, "groups: out of memory\n");
+                rc = 1;
+            } else if ((r = ext4b_group_stats(dev, 0, g, groups, &filled)) != 0) {
+                fprintf(stderr, "groups: %s\n", ext4b_strerror(r));
+                rc = 1;
+                free(g);
+            } else {
+                ext4b_statfs_info st;
+                uint64_t sum = 0, blocks = 0;
+                uint32_t impossible = 0, uninit = 0;
+
+                printf("%6s %10s %10s %10s  %s\n",
+                       "group", "blocks", "free", "used", "flags");
+                for (uint32_t i = 0; i < filled; i++) {
+                    bool bad = g[i].free_blocks > g[i].blocks;
+                    sum    += g[i].free_blocks;
+                    blocks += g[i].blocks;
+                    if (bad) impossible++;
+                    if (g[i].block_uninit) uninit++;
+                    if (only_bad && !bad)
+                        continue;
+                    printf("%6u %10u %10u %10lld  %s%s%s\n",
+                           g[i].index, g[i].blocks, g[i].free_blocks,
+                           (long long)g[i].blocks - (long long)g[i].free_blocks,
+                           g[i].block_uninit ? "BLOCK_UNINIT " : "",
+                           g[i].inode_uninit ? "INODE_UNINIT" : "",
+                           bad ? "  IMPOSSIBLE" : "");
+                }
+
+                printf("\n%u group(s), %u still BLOCK_UNINIT\n",
+                       filled, uninit);
+                printf("descriptors sum to: %llu free of %llu blocks%s\n",
+                       (unsigned long long)sum, (unsigned long long)blocks,
+                       sum > blocks ? "  IMPOSSIBLE" : "");
+
+                /*
+                 * The raw counter, not the one statfs reports: statfs clamps
+                 * free to the volume size so the OS is never handed an
+                 * impossible number, which would hide exactly the value this
+                 * command exists to show.
+                 */
+                uint64_t sb_free = 0, sb_total = 0;
+                if (ext4b_free_blocks_raw(dev, &sb_free, &sb_total) == 0) {
+                    printf("superblock says:    %llu free of %llu blocks%s\n",
+                           (unsigned long long)sb_free,
+                           (unsigned long long)sb_total,
+                           sb_free > sb_total ? "  IMPOSSIBLE" : "");
+                    if (sb_free != sum) {
+                        printf("the two disagree by %lld block(s)\n",
+                               (long long)sb_free - (long long)sum);
+                        rc = 1;
+                    } else {
+                        printf("the two agree\n");
+                    }
+                    if (ext4b_statfs(dev, &st) == 0 &&
+                        st.free_blocks != sb_free)
+                        printf("(df reports %llu, clamped to the volume "
+                               "size)\n",
+                               (unsigned long long)st.free_blocks);
+                }
+                if (impossible || sum > blocks) {
+                    printf("%u group(s) claim more free blocks than they "
+                           "hold\n", impossible);
+                    rc = 1;
+                }
+                free(g);
+            }
         }
 
     } else if (strcmp(cmd, "orphans") == 0) {

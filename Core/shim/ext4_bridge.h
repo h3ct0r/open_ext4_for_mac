@@ -185,6 +185,47 @@ typedef struct {
 
 int ext4b_statfs(ext4b_device *dev, ext4b_statfs_info *out);
 
+/*
+ * The per-group free-block counts, which are the record the allocator
+ * actually works from. `ext4b_statfs` reports the superblock's cached total;
+ * when that total and these counts disagree, only this breakdown says which
+ * groups carry the damage, and whether they are the ones a lazy format left
+ * flagged BLOCK_UNINIT.
+ *
+ * Descriptors are read straight out of the table, never through
+ * ext4_fs_get_block_group_ref: that call is not a read, because referencing a
+ * group still flagged BLOCK_UNINIT makes it initialize the bitmap, clear the
+ * flag and dirty the descriptor. Inspecting a volume must not rewrite it.
+ *
+ * Both calls return ENOTSUP on a META_BG volume, where the descriptor table is
+ * scattered rather than contiguous and this addressing would not hold.
+ */
+typedef struct {
+    uint32_t index;         /* which group */
+    uint32_t blocks;        /* blocks it holds; the last group is short */
+    uint32_t free_blocks;   /* what its descriptor claims is free */
+    bool     block_uninit;  /* bitmap never materialised (lazy format) */
+    bool     inode_uninit;
+} ext4b_group_info;
+
+/*
+ * The superblock's free-block counter as it is actually stored, uncooked.
+ * ext4b_statfs clamps what it reports so the OS is never handed a free count
+ * larger than the volume holds -- right for df, and wrong for a diagnostic,
+ * because the clamp hides the very number worth seeing.
+ */
+int ext4b_free_blocks_raw(ext4b_device *dev,
+                          uint64_t *free_blocks, uint64_t *total_blocks);
+
+int ext4b_group_count(ext4b_device *dev, uint32_t *out);
+
+/*
+ * Fills `out` with the descriptors for groups [first, first + max), stopping
+ * at the end of the volume, and reports how many landed in `*filled`.
+ */
+int ext4b_group_stats(ext4b_device *dev, uint32_t first,
+                      ext4b_group_info *out, uint32_t max, uint32_t *filled);
+
 /* ------------------------------------------------------------------ inode -- */
 
 #define EXT4B_ROOT_INO 2

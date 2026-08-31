@@ -200,6 +200,32 @@ else
   bad "the audit names which record is wrong" "$(grep -i accounting <<<"$out" | head -1)"
 fi
 
+# The clamp that keeps df honest also hides the corrupt value, which is the
+# one worth seeing when the question is how far the accounting has drifted.
+# `groups` reports the counter as stored and sets its exit code on the
+# disagreement, so a damaged volume is detectable in a script.
+gout=$("$DUMP" "$IMG" groups bad 2>&1); grc=$?
+raw=$(sed -nE 's/^superblock says: +([0-9]+) free.*/\1/p' <<<"$gout")
+sumd=$(sed -nE 's/^descriptors sum to: +([0-9]+) free.*/\1/p' <<<"$gout")
+if [ "$raw" = "$((tot + 400085))" ]; then
+  ok "groups reports the stored count ($raw), not the clamped one"
+else
+  bad "groups reports the stored count, not the clamped one" \
+      "expected $((tot + 400085)), got ${raw:-none}"
+fi
+if [ -n "$sumd" ] && [ "$sumd" -le "$tot" ]; then
+  ok "the descriptors still sum to something possible ($sumd)"
+else
+  bad "the descriptors still sum to something possible" "sum=${sumd:-none} total=$tot"
+fi
+# Exactly 1, not merely non-zero: an unrecognised verb also exits non-zero,
+# so "not 0" would pass against a build that has no such command.
+if [ "$grc" -eq 1 ]; then
+  ok "groups exits 1 when the two records disagree"
+else
+  bad "groups exits 1 when the two records disagree" "rc=$grc"
+fi
+
 # --- a damaged superblock is not reported as an unsupported one -------------
 echo
 echo "damaged superblock wording"
@@ -286,6 +312,7 @@ xattr /d/f
 orphans
 check
 df
+groups
 VERBS
 
 if [ -z "$ro_failed" ]; then
@@ -307,6 +334,31 @@ if [ "$written_uninit" = "$after_uninit" ]; then
 else
   bad "inspection consumes no lazily-initialized groups" \
       "uninit groups $written_uninit -> $after_uninit"
+fi
+
+# Which groups are lazy, counted by us and by e2fsprogs independently. The
+# mount-time audit reports one sum for the whole volume, which says that the
+# accounting is wrong but not where; this is the breakdown that says where,
+# and it is only trustworthy if it agrees with a tool that does not share our
+# descriptor-addressing code.
+gout=$("$DUMP" "$IMG" groups 2>/dev/null)
+g_uninit=$(sed -nE 's/^[0-9]+ group\(s\), ([0-9]+) still BLOCK_UNINIT$/\1/p' <<<"$gout")
+if [ -n "$g_uninit" ] && [ "$g_uninit" = "$after_uninit" ]; then
+  ok "groups counts the same $g_uninit lazy groups dumpe2fs does"
+else
+  bad "groups counts the same lazy groups dumpe2fs does" \
+      "groups=${g_uninit:-none} dumpe2fs=$after_uninit"
+fi
+if grep -q "^the two agree$" <<<"$gout"; then
+  ok "the per-group counts add up to the cached total on a healthy volume"
+else
+  bad "the per-group counts add up to the cached total" \
+      "$(grep -E 'disagree|superblock says' <<<"$gout" | head -2 | tr '\n' ' ')"
+fi
+if grep -qE '^ +[0-9]+ +[0-9]+ +[0-9]+ +[0-9]+ ' <<<"$gout"; then
+  ok "the breakdown names groups individually, not just a total"
+else
+  bad "the breakdown names groups individually" "$(head -3 <<<"$gout")"
 fi
 
 # --- a failed assertion reports through the logger, not stdout --------------
