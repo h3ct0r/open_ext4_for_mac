@@ -1982,6 +1982,30 @@ static int ext4_ext_convert_to_initialized(struct ext4_inode_ref *inode_ref,
 					       EXT4_EXT_MARK_UNWRIT1 |
 						   EXT4_EXT_MARK_UNWRIT2);
 		if (err == EOK) {
+			/*
+			 * Re-find before the second split. The first one can
+			 * grow the tree -- a leaf that is already full is split
+			 * to make room -- and ext4_ext_split_extent_at reads
+			 * (*ppath)[depth].extent directly, without looking it
+			 * up. So the path handed to it here may point into a
+			 * leaf that no longer holds `split`, and the second
+			 * split then rewrites the wrong extent, leaving a tree
+			 * whose index no longer agrees with its leaves.
+			 *
+			 * Only this three-way case is exposed, because only it
+			 * splits twice; and only a caller converting the MIDDLE
+			 * of an unwritten extent reaches it, which is what
+			 * ext4_extent_mark_written() (patch 0046) does for every
+			 * preallocated write. e2fsck calls the result "invalid
+			 * extent node", and a 64 MB file copied into
+			 * preallocated space then reads back EIO.
+			 *
+			 * Linux does the same re-find at the same point, for the
+			 * same stated reason.
+			 */
+			err = ext4_find_extent(inode_ref, split, ppath, 0);
+		}
+		if (err == EOK) {
 			err = ext4_ext_split_extent_at(inode_ref, ppath, split,
 						       EXT4_EXT_MARK_UNWRIT1);
 		}
