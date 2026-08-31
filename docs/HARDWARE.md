@@ -192,11 +192,27 @@ Measured on a fresh 4 GB volume, 512 MB in one file: **avg 252 blocks, longest
 you see that, allocation is not the problem and the slow copy is somewhere
 else.
 
-One asymmetry worth knowing: the same 512 MB lands in **10 extents** when
-written plainly and **256** when preallocated, because each conversion splits
-the extent it lands in. That costs extent-tree depth rather than contiguity --
-and it is what makes the three-way split in `ext4_ext_convert_to_initialized`
-reachable at all (patch 0055).
+One asymmetry worth knowing, and currently an open item: a preallocated write
+fragments the extent tree, because each `mark_written` splits the extent it
+lands in -- roughly one extent per write chunk.
+
+| size      | written plainly | preallocated |
+|-----------|-----------------|--------------|
+| 1,052,136 | 1 extent        | 2            |
+| 3,000,001 | 1 extent        | 4            |
+| 512 MB    | 10 extents      | 256          |
+
+Since macOS preallocates before every Finder copy, essentially every copied
+file ends with more than one extent -- which is what `e2fsck` counts as
+"non-contiguous", and why a freshly copied corpus reports 89% of files that
+way while allocation itself is healthy (252-block runs, see above). It also
+draws `extent tree could be narrower. Optimize?` from `e2fsck -fn`, which is a
+suggestion rather than an error.
+
+This is not corruption and costs tree depth rather than contiguity, but it is
+what made the three-way split in `ext4_ext_convert_to_initialized` reachable at
+all (patch 0055). Merging adjacent written extents after conversion, the way
+Linux does, is the obvious next step and has not been done.
 
 ### Free-space accounting
 
