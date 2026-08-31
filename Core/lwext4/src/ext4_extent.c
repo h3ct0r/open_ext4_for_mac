@@ -1958,6 +1958,80 @@ restore_extent_len:
 	return err;
 }
 
+/* Fold the extent after `ex` into it, if the two are one run.
+ *
+ * Returns true when an entry was absorbed, leaving `ex` longer and the leaf
+ * one entry shorter. The state test lives in ext4_ext_can_append: a written
+ * and an unwritten extent never merge, because the survivor would carry one
+ * state for both runs.
+ */
+static bool ext4_ext_merge_next(struct ext4_extent_header *eh,
+				struct ext4_extent *ex)
+{
+	struct ext4_extent *last = EXT_LAST_EXTENT(eh);
+
+	if (ex >= last || !ext4_ext_can_append(ex, ex + 1))
+		return false;
+
+	uint16_t len = ext4_ext_get_actual_len(ex) +
+		       ext4_ext_get_actual_len(ex + 1);
+	bool unwritten = ext4_ext_is_unwritten(ex);
+
+	ex->block_count = to_le16(len);
+	if (unwritten)
+		ext4_ext_mark_unwritten(ex);
+
+	if (ex + 1 < last)
+		memmove(ex + 1, ex + 2,
+			(size_t)(last - (ex + 1)) *
+				sizeof(struct ext4_extent));
+
+	eh->entries_count = to_le16(to_le16(eh->entries_count) - 1);
+	return true;
+}
+
+/* Put back together what converting a range took apart.
+ *
+ * ext4_ext_convert_to_initialized splits an extent to change the state of a
+ * piece of it, and a caller converting a preallocated file a chunk at a time
+ * therefore left one extent per chunk: 3 MB in four where a plain write of the
+ * same bytes is one, 512 MB in 256 against ten. Since macOS preallocates
+ * before every large copy, that was every copied file. Nothing was wrong with
+ * the result -- it is a valid tree, and the data reads back correctly -- but it
+ * is deeper than it needs to be, e2fsck asks to narrow it, and depth is what
+ * exposed the stale-path bug this file carries a fix for.
+ *
+ * Backwards first, so `ex` ends up pointing at the surviving entry either way.
+ * The leaf's first extent is never the one absorbed, so the parent index keeps
+ * its key and no correction upward is needed.
+ */
+static int ext4_ext_try_to_merge(struct ext4_inode_ref *inode_ref,
+				 struct ext4_extent_path *path)
+{
+	int32_t depth = ext_depth(inode_ref->inode);
+	struct ext4_extent_header *eh = path[depth].header;
+	struct ext4_extent *ex = path[depth].extent;
+	bool merged = false;
+
+	if (!eh || !ex)
+		return EOK;
+
+	while (ex > EXT_FIRST_EXTENT(eh) &&
+	       ext4_ext_merge_next(eh, ex - 1)) {
+		ex--;
+		merged = true;
+	}
+
+	while (ext4_ext_merge_next(eh, ex))
+		merged = true;
+
+	if (!merged)
+		return EOK;
+
+	path[depth].extent = ex;
+	return ext4_ext_dirty(inode_ref, path + depth);
+}
+
 static int ext4_ext_convert_to_initialized(struct ext4_inode_ref *inode_ref,
 					   struct ext4_extent_path **ppath,
 					   ext4_lblk_t split, uint32_t blocks)
@@ -2232,6 +2306,14 @@ int ext4_extent_mark_written(struct ext4_inode_ref *inode_ref,
 
 	err = ext4_ext_convert_to_initialized(inode_ref, &path, iblock,
 					      blocks_count);
+	if (err == EOK) {
+		/* Re-find before merging: the conversion split the extent and
+		 * may have split the leaf with it, so the path in hand can
+		 * point at the wrong one. */
+		err = ext4_find_extent(inode_ref, iblock, &path, 0);
+		if (err == EOK)
+			err = ext4_ext_try_to_merge(inode_ref, path);
+	}
 out:
 	if (path) {
 		ext4_ext_drop_refs(inode_ref, path, 0);
