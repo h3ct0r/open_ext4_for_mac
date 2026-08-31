@@ -202,17 +202,31 @@ lands in -- roughly one extent per write chunk.
 | 3,000,001 | 1 extent        | 4            |
 | 512 MB    | 10 extents      | 256          |
 
-Since macOS preallocates before every Finder copy, essentially every copied
-file ends with more than one extent -- which is what `e2fsck` counts as
-"non-contiguous", and why a freshly copied corpus reports 89% of files that
-way while allocation itself is healthy (252-block runs, see above). It also
-draws `extent tree could be narrower. Optimize?` from `e2fsck -fn`, which is a
-suggestion rather than an error.
+Patch 0057 folds those runs back together, and in isolation it works: a 3 MB
+preallocated file goes from four extents to one.
 
-This is not corruption and costs tree depth rather than contiguity, but it is
-what made the three-way split in `ext4_ext_convert_to_initialized` reachable at
-all (patch 0055). Merging adjacent written extents after conversion, the way
-Linux does, is the obvious next step and has not been done.
+**It does not explain a corpus that reports 89% non-contiguous, and neither
+does anything else measured so far.** That number was blamed on this
+fragmentation and it survived the fix unchanged (89.1% before, 89.2% after).
+Two further guesses were tested and are also wrong:
+
+| shape                                   | non-contiguous |
+|-----------------------------------------|----------------|
+| 60 files, roomy volume, `cp`            | 2.7%           |
+| 110 files, volume filled to 69%, `cp`   | 3.3%           |
+| 407 files, volume filled to 74%, Finder | **89.2%**      |
+
+So it is not preallocation, not the number of files, and not how full the
+volume is. The remaining difference is the copy engine itself: Finder rather
+than `cp(1)`, copying many files at once instead of one after another. That is
+untested and is where to look next -- and it is worth remembering that `cp`
+found a corruption bug `datafile` could not, so the tool used to copy has
+already mattered once.
+
+One consequence of 0057 worth knowing: merging can leave a tree deeper than its
+contents now need, so `e2fsck -fn` may say `extent tree could be shorter.
+Optimize?`. On the field corpus that is 16 inodes. It is a suggestion, not an
+error, and the tree is not collapsed back -- an open item.
 
 ### Free-space accounting
 
