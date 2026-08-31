@@ -46,7 +46,13 @@ else
   OPT := -O2 -g
 endif
 
-CFLAGS := $(OPT) -fno-common -Wall $(INCLUDES) $(LWEXT4_DEFS)
+# Which source a running binary was built from. The signed-bundle CDHash that
+# check_install_freshness.sh compares cannot be embedded in the binary it
+# signs, and a stale installed extension has now cost three debugging sessions
+# -- most recently a field log line that looked like today's build and was not.
+BUILD_ID := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git diff --quiet 2>/dev/null || echo -dirty)
+
+CFLAGS := $(OPT) -fno-common -Wall $(INCLUDES) $(LWEXT4_DEFS) -DEXT4B_BUILD_ID=\"$(BUILD_ID)\"
 # lwext4 is third-party embedded C; its warnings are not actionable for us.
 LWEXT4_CFLAGS := $(CFLAGS) -Wno-everything
 SHIM_CFLAGS   := $(CFLAGS) -Wextra -Wno-unused-parameter

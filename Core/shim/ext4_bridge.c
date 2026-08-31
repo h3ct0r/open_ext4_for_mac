@@ -427,6 +427,10 @@ void ext4b_set_txn_batch(ext4b_device *dev, uint32_t batch)
  * hand rather than via lwext4 so that probing never mounts and never trusts
  * structure sizes on untrusted media. */
 #define SB_OFFSET              1024
+#ifndef EXT4B_BUILD_ID
+#define EXT4B_BUILD_ID "unknown"
+#endif
+
 #define SB_SIZE                1024
 #define SBF_INODES_COUNT       0x000
 #define SBF_BLOCKS_COUNT_LO    0x004
@@ -795,9 +799,9 @@ static void bridge_audit_free_accounting(ext4b_device *dev)
 
     if (sb_free == sum && sb_free <= total) {
         bridge_logf(1, "free-space accounting agrees: %llu of %llu blocks "
-                       "free across %u group(s)",
+                       "free across %u group(s) [build %s]",
                     (unsigned long long)sb_free,
-                    (unsigned long long)total, groups);
+                    (unsigned long long)total, groups, EXT4B_BUILD_ID);
         return;
     }
 
@@ -809,6 +813,7 @@ static void bridge_audit_free_accounting(ext4b_device *dev)
                 sum > total ? "; the descriptors themselves are impossible"
                             : (sb_free > total ? "; only the cached total is "
                                                  "impossible" : ""));
+    bridge_logf(3, "  (reported by build %s)", EXT4B_BUILD_ID);
 }
 
 int ext4b_mount(ext4b_device *dev, bool read_only)
@@ -1111,12 +1116,13 @@ int ext4b_statfs(ext4b_device *dev, ext4b_statfs_info *out)
             bridge_logf(3, "free block count (%llu) exceeds the volume size "
                            "(%llu blocks) by %llu%s: the superblock's "
                            "accounting is corrupt, allocation will be poor, "
-                           "and e2fsck is the fix",
+                           "and e2fsck is the fix [build %s]",
                         (unsigned long long)out->free_blocks,
                         (unsigned long long)out->total_blocks,
                         (unsigned long long)(out->free_blocks -
                                              out->total_blocks),
-                        dev->warned_free_blocks ? " (still growing)" : "");
+                        dev->warned_free_blocks ? " (still growing)" : "",
+                        EXT4B_BUILD_ID);
             dev->warned_free_blocks = true;
             dev->warned_free_at = out->free_blocks;
         }
