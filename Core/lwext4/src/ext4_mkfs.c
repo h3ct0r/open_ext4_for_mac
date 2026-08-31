@@ -996,6 +996,27 @@ int ext4_mkfs(struct ext4_fs *fs, struct ext4_blockdev *bd,
 		break;
 	}
 
+	/*
+	 * ext_attr, on every generation this writes.
+	 *
+	 * It is what makes an extended-attribute block legal. Without it
+	 * e2fsck reads any i_file_acl as an error and offers to clear it --
+	 * "i_file_acl for inode N is X, should be zero" -- along with the
+	 * i_blocks that counts the block and the bitmap bit that holds it.
+	 * The attributes themselves are written correctly and read back
+	 * correctly, by us and by Linux; the volume is simply not claiming the
+	 * feature it is using.
+	 *
+	 * That is not a corner case here. macOS attaches xattrs to very nearly
+	 * everything -- com.apple.quarantine, com.apple.provenance,
+	 * com.apple.metadata:kMDItemWhereFroms -- so a Finder copy of 408
+	 * ordinary files produced 408 inodes e2fsck wanted to strip, and a
+	 * volume that reported "still has errors" while every byte of data on
+	 * it was intact. mke2fs sets this flag by default, which is why a
+	 * volume formatted on Linux never shows it.
+	 */
+	info->feat_compat |= EXT4_FCOM_EXT_ATTR;
+
 	/*TODO: handle this features some day...*/
 	info->feat_incompat &= ~EXT4_FINCOM_META_BG;
 	info->feat_incompat &= ~EXT4_FINCOM_FLEX_BG;
