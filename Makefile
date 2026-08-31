@@ -52,7 +52,10 @@ endif
 # -- most recently a field log line that looked like today's build and was not.
 BUILD_ID := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git diff --quiet 2>/dev/null || echo -dirty)
 
-CFLAGS := $(OPT) -fno-common -Wall $(INCLUDES) $(LWEXT4_DEFS) -DEXT4B_BUILD_ID=\"$(BUILD_ID)\"
+# EXTRA_CFLAGS is an injection point for one-off diagnostic builds, e.g.
+#   make EXTRA_CFLAGS=-DEXT4B_NO_UNWRITTEN_FASTPATH=1 app
+# Changing it does not invalidate objects, so clear build/obj when switching.
+CFLAGS := $(OPT) -fno-common -Wall $(INCLUDES) $(LWEXT4_DEFS) -DEXT4B_BUILD_ID=\"$(BUILD_ID)\" $(EXTRA_CFLAGS)
 # lwext4 is third-party embedded C; its warnings are not actionable for us.
 LWEXT4_CFLAGS := $(CFLAGS) -Wno-everything
 SHIM_CFLAGS   := $(CFLAGS) -Wextra -Wno-unused-parameter

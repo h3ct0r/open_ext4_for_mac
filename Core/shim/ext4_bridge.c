@@ -32,6 +32,18 @@
 #include <stdarg.h>
 #include <time.h>
 #include <pthread.h>
+
+/*
+ * Build switch for bisecting the unwritten-extent fast path (patches
+ * 0045-0046). With it set, a write into preallocated space takes the ordinary
+ * route -- convert the extent, which zeroes it, then write -- instead of
+ * writing into the still-unwritten extent and marking it written afterwards.
+ * Slower by roughly a factor of two on the medium, and the thing to compare
+ * against when a corruption suite reports a rate rather than a reproduction.
+ */
+#ifndef EXT4B_NO_UNWRITTEN_FASTPATH
+#define EXT4B_NO_UNWRITTEN_FASTPATH 0
+#endif
 #include <stdatomic.h>
 
 /* One volume per extension instance (FSUnaryFileSystem), so fixed names are
@@ -3520,7 +3532,7 @@ int ext4b_write(ext4b_device *dev,
          * the commit barriers behind the data write, so the medium learns
          * the blocks are live only after it has their contents.
          */
-        if (in_off == 0 && remaining >= bsize) {
+        if (!EXT4B_NO_UNWRITTEN_FASTPATH && in_off == 0 && remaining >= bsize) {
             uint32_t want = (uint32_t)(remaining / bsize);
             uint32_t mapped = 0;
             bool is_unwritten = false;
