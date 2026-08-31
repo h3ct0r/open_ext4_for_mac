@@ -145,6 +145,28 @@ stick again, in this order:
    drives the identical core, and the media model prices it like the stick
    it came from.
 
+### Which build is actually running
+
+```bash
+/Applications/Ext4Mac.app/Contents/MacOS/Ext4Mac version
+```
+
+Prints the git revision stamped into the installed app and extension at build
+time; `make install` prints the same thing when it finishes. Two traps this
+exists to close, both of which have cost a day each:
+
+- A **mounted volume keeps the extension process it started with**, so a fresh
+  install changes nothing until the volume is ejected and re-attached. Until
+  then every log line comes from the old binary and reads exactly like the new
+  one.
+- The work may be on a **branch the build does not use**. Sessions run in a
+  worktree under `.claude/worktrees/`, while builds come from `master` in the
+  main checkout. If they have diverged, `make install` installs a tree that
+  never contained the change under discussion.
+
+Accounting lines in the log carry `[build <rev>]` for the same reason: a log
+line should say which code produced it rather than leave it to inference.
+
 ### Free-space accounting
 
 `df` on a mounted volume can report nonsense -- more available space than the
