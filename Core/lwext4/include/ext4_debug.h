@@ -157,7 +157,26 @@ uint32_t ext4_dmask_get(void);
 		}                                                              \
 	} while (0)
 #else
-#define ext4_dbg(m, ...) do { } while (0)
+/* Diagnostics still matter where stdout does not exist.
+ *
+ * A sandboxed FSKit extension has nowhere to printf, so this was compiled to
+ * nothing -- and with it went every DBG_WARN in the tree, including
+ * twenty-two "checksum failed" reports. A checksum whose failure is invisible
+ * is not a check: the volume carries the cost of computing it and nobody ever
+ * learns the answer.
+ *
+ * The two loud levels now reach the shim's logger, which is the same
+ * arrangement ext4b_assert_fail already uses and for the same reason. Level is
+ * a string prefix here rather than part of the mask, so the filtering is done
+ * on the format string by the shim; DBG_INFO and unprefixed chatter stay
+ * silent, being per-block and enough to bury a log.
+ */
+void ext4b_report_dbg(const char *fmt, ...);
+#define ext4_dbg(m, ...)                                                       \
+	do {                                                                   \
+		(void)(m);                                                     \
+		ext4b_report_dbg(__VA_ARGS__);                                 \
+	} while (0)
 #endif
 
 #if CONFIG_DEBUG_ASSERT

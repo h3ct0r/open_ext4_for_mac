@@ -772,8 +772,19 @@ static int ext4_ext_check(struct ext4_inode_ref *inode_ref,
 		goto corrupted;
 	}
 
-	tail = find_ext4_extent_tail(eh);
-	if (ext4_sb_feature_ro_com(sb, EXT4_FRO_COM_METADATA_CSUM)) {
+	/* Only a real extent BLOCK carries a tail checksum. pblk 0 is the
+	 * header living in the inode's own i_block, where the sixty bytes hold
+	 * four extents and nothing else: find_ext4_extent_tail() then points
+	 * just past them, at whatever the inode has there, and the comparison
+	 * is against noise. The root's integrity comes from the inode
+	 * checksum, which covers it already.
+	 *
+	 * This fired on every extent-mapped file -- twenty-two times in one
+	 * suite run -- and was invisible until DBG_WARN was routed to the
+	 * logger. A check that cries wolf on healthy volumes is worse than no
+	 * check, because the first real one gets read as more of the same. */
+	if (pblk != 0 && ext4_sb_feature_ro_com(sb, EXT4_FRO_COM_METADATA_CSUM)) {
+		tail = find_ext4_extent_tail(eh);
 		if (tail->et_checksum !=
 		    to_le32(ext4_ext_block_csum(inode_ref, eh))) {
 			ext4_dbg(DEBUG_EXTENT,
