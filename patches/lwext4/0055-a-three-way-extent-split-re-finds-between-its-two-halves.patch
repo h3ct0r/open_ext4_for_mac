@@ -1,0 +1,70 @@
+A three-way extent split re-finds between its two halves
+
+ext4_ext_convert_to_initialized splits an extent twice when the range
+being converted sits in the MIDDLE of it: once at the far edge, once at
+the near one. Between those two calls the tree can change -- the first
+split grows it when the leaf it lands in is already full -- and
+ext4_ext_split_extent_at reads (*ppath)[depth].extent directly, without
+looking it up. The path handed to the second call could therefore point
+into a leaf that no longer holds the block being split, and the second
+split then rewrote the wrong extent, leaving an index that disagrees with
+its leaves. e2fsck calls the result "invalid extent node".
+
+Nothing reached it until patch 0046. The other two branches split once, and
+the pre-existing caller converts from the start of an extent, which is the
+left-hand case. ext4_extent_mark_written converts the middle, because that
+is what a preallocated write does: macOS reserves the space, the data
+arrives a piece at a time, and each piece is marked written where it lands.
+
+Measured with Tests/run_mount_data_tests.sh, which writes a 64 MB file into
+preallocated space on a volume with a partial last group and reads it back
+cold. Before: 10 of 24 runs corrupted -- invalid extent node, EIO at 48 MB,
+and group descriptors claiming more free blocks than they hold. With the
+fast path compiled out (EXT4B_NO_UNWRITTEN_FASTPATH=1), 0 of 16, which is
+what identified this code as the site.
+
+Two things about measuring it. There is a clean window of roughly six runs
+after every extension restart, so a short batch scores zero on any build and
+an early attempt at this bisect returned 0/6 on BOTH arms and was worthless.
+And a competing explanation -- ext4b_mount tolerating EEXIST from
+ext4_device_register, which would bind a second volume to the first one's
+block device -- was instrumented rather than argued, and never fired once in
+fourteen runs.
+
+Linux performs the same re-find at the same point, and says why: "Update
+path is required because previous ext4_split_extent_at() may result in
+split of original leaf or extent zeroout."
+
+--- a/src/ext4_extent.c
++++ b/src/ext4_extent.c
+@@ -1981,6 +1981,30 @@
+ 		err = ext4_ext_split_extent_at(inode_ref, ppath, split + blocks,
+ 					       EXT4_EXT_MARK_UNWRIT1 |
+ 						   EXT4_EXT_MARK_UNWRIT2);
++		if (err == EOK) {
++			/*
++			 * Re-find before the second split. The first one can
++			 * grow the tree -- a leaf that is already full is split
++			 * to make room -- and ext4_ext_split_extent_at reads
++			 * (*ppath)[depth].extent directly, without looking it
++			 * up. So the path handed to it here may point into a
++			 * leaf that no longer holds `split`, and the second
++			 * split then rewrites the wrong extent, leaving a tree
++			 * whose index no longer agrees with its leaves.
++			 *
++			 * Only this three-way case is exposed, because only it
++			 * splits twice; and only a caller converting the MIDDLE
++			 * of an unwritten extent reaches it, which is what
++			 * ext4_extent_mark_written() (patch 0046) does for every
++			 * preallocated write. e2fsck calls the result "invalid
++			 * extent node", and a 64 MB file copied into
++			 * preallocated space then reads back EIO.
++			 *
++			 * Linux does the same re-find at the same point, for the
++			 * same stated reason.
++			 */
++			err = ext4_find_extent(inode_ref, split, ppath, 0);
++		}
+ 		if (err == EOK) {
+ 			err = ext4_ext_split_extent_at(inode_ref, ppath, split,
+ 						       EXT4_EXT_MARK_UNWRIT1);

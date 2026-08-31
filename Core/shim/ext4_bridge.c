@@ -990,6 +990,22 @@ int ext4b_mount(ext4b_device *dev, bool read_only)
         return EROFS;
 
     r = ext4_device_register(&dev->bdev, BRIDGE_DEV_NAME);
+    if (r == EEXIST) {
+        /*
+         * DIAGNOSTIC. The device name is a single global slot, and lwext4
+         * keeps the FIRST registrant: ext4_mount looks the device up by name
+         * and binds s_bdevices[i].bd. So a mount that lands here is about to
+         * be wired to a different volume's block device, while the
+         * unwritten-extent fast path writes through &dev->bdev -- this
+         * volume's own. Metadata to one medium, data to another.
+         *
+         * Whether that ever happens in the field is the open question this
+         * line exists to answer; it is not yet known to occur.
+         */
+        bridge_logf(3, "device slot %s was already registered: this mount "
+                       "binds another volume's block device [build %s]",
+                    BRIDGE_DEV_NAME, EXT4B_BUILD_ID);
+    }
     if (r != EOK && r != EEXIST)
         return r;
 
