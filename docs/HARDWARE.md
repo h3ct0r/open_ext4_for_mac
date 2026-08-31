@@ -187,10 +187,19 @@ record is wrong:
 - *"only the cached total is impossible"* -- the descriptors are fine, so
   allocation is healthy and the bad number is cosmetic until `e2fsck -fy`.
 - *"the descriptors themselves are impossible"* -- the allocator is working
-  from a broken map; expect short runs and poor throughput.
+  from a broken map; expect short runs and poor throughput. This fires when
+  the descriptors sum to more than the volume holds **or** when any single
+  group claims more free blocks than it holds; a follow-up line names how
+  many and the first offender.
 
 The distinction matters because the two have different causes and only the
 second explains slow copies.
+
+Do not read the second verdict as "the descriptors are fine". A group can be
+impossible on its own while the sum stays plausible -- the field stick had
+three such groups summing to less than the volume size -- so check the
+per-group breakdown before concluding the map is healthy. The audit tested
+only the sum until 2e77aa7 and called that volume "accounting agrees".
 
 That line names which record is wrong, not where. The breakdown behind it:
 
