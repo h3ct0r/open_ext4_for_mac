@@ -294,6 +294,54 @@ else
   bad "an impossible group sets the exit code" "rc=$rc"
 fi
 
+# --- pre-recovery totals are labelled as such -------------------------------
+echo
+echo "unreplayed journal in the audit"
+# A read-only mount does not replay, so the superblock it reads is whatever
+# the last crash left. The field stick reported 2,471,492 free of 1,920,357
+# that way; one read-write mount replayed the log and the same volume read
+# 1,750,596, agreeing with its descriptors. The audit reported the stale
+# number as corruption with nothing to say it was pre-recovery, and an
+# investigation went after a value that recovery was about to correct.
+IMG="$WORK/unreplayed.img"; new_vol "$IMG" 4 4096
+out=$("$DUMP" "$IMG" groups 2>&1)
+if grep -q "pre-recovery" <<<"$out"; then
+  bad "a clean volume is not labelled pre-recovery" "$(grep -i pre-recovery <<<"$out" | head -1)"
+else
+  ok "a clean volume is not labelled pre-recovery"
+fi
+python3 - "$IMG" <<'EOF'
+import sys, struct
+T = []
+for i in range(256):
+    c = i
+    for _ in range(8):
+        c = (c >> 1) ^ (0x82F63B78 if c & 1 else 0)
+    T.append(c)
+def crc32c(buf, crc=0xFFFFFFFF):
+    for b in buf:
+        crc = (crc >> 8) ^ T[(crc ^ b) & 0xFF]
+    return crc
+f = open(sys.argv[1], 'r+b')
+f.seek(1024); sb = bytearray(f.read(1024))
+# INCOMPAT_RECOVER: the volume says it has a journal still to replay.
+struct.pack_into('<I', sb, 96, struct.unpack_from('<I', sb, 96)[0] | 0x0004)
+struct.pack_into('<I', sb, 0x3FC, crc32c(bytes(sb[:0x3FC])))
+f.seek(1024); f.write(sb); f.close()
+EOF
+out=$("$DUMP" "$IMG" groups 2>&1)
+if grep -q "read-only mount of an unreplayed journal" <<<"$out"; then
+  ok "a read-only mount of a dirty volume says the contents predate the crash"
+else
+  bad "a read-only mount of a dirty volume says so" "$(head -2 <<<"$out")"
+fi
+if grep -q "pre-recovery" <<<"$out"; then
+  ok "the audit labels its totals pre-recovery when the journal is unreplayed"
+else
+  bad "the audit labels its totals pre-recovery" \
+      "$(grep -iE 'accounting|agrees' <<<"$out" | head -1)"
+fi
+
 # --- a damaged superblock is not reported as an unsupported one -------------
 echo
 echo "damaged superblock wording"

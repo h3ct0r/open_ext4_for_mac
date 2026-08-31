@@ -844,7 +844,7 @@ int ext4b_group_stats(ext4b_device *dev, uint32_t first,
  * not resolve: a bad cached sum is cosmetic until e2fsck, while bad descriptor
  * counts are what fragment allocation down to eight-block runs.
  */
-static void bridge_audit_free_accounting(ext4b_device *dev)
+static void bridge_audit_free_accounting(ext4b_device *dev, bool unreplayed)
 {
     struct ext4_fs *fs = dev->bdev.fs;
     if (!fs)
@@ -881,9 +881,10 @@ static void bridge_audit_free_accounting(ext4b_device *dev)
 
     if (sb_free == sum && sb_free <= total && !bad_groups) {
         bridge_logf(1, "free-space accounting agrees: %llu of %llu blocks "
-                       "free across %u group(s) [build %s]",
+                       "free across %u group(s)%s [build %s]",
                     (unsigned long long)sb_free,
-                    (unsigned long long)total, groups, EXT4B_BUILD_ID);
+                    (unsigned long long)total, groups,
+                    unreplayed ? " (pre-recovery)" : "", EXT4B_BUILD_ID);
         return;
     }
 
@@ -901,6 +902,28 @@ static void bridge_audit_free_accounting(ext4b_device *dev)
                        "starting at group %u -- allocation is working from a "
                        "broken map, so expect short runs [build %s]",
                     bad_groups, first_bad, EXT4B_BUILD_ID);
+
+    /*
+     * Whether these numbers are the volume's committed state at all.
+     *
+     * A read-only mount does not replay, so the superblock read here is the
+     * one the last crash left behind, and its cached total can be wildly
+     * wrong while the journal holds the correct value a few blocks away.
+     * A field volume reported 2,471,492 free of 1,920,357 this way; one
+     * read-write mount replayed the log and the same volume read 1,750,596,
+     * in agreement with its descriptors. Reporting that as corruption sent
+     * an investigation after a number that recovery was about to correct.
+     *
+     * Per-group impossibility is not in that category: on the same volume
+     * replay left all three bad descriptors exactly as they were. So the
+     * caveat goes on the totals, and the group line above still stands.
+     */
+    if (unreplayed)
+        bridge_logf(3, "  these are pre-recovery values: the journal is "
+                       "unreplayed, so the cached total may simply be stale. "
+                       "Mount read-write to replay, then re-read before "
+                       "concluding anything from the totals [build %s]",
+                    EXT4B_BUILD_ID);
     bridge_logf(3, "  (reported by build %s)", EXT4B_BUILD_ID);
 }
 
@@ -1033,7 +1056,7 @@ int ext4b_mount(ext4b_device *dev, bool read_only)
         }
     }
 
-    bridge_audit_free_accounting(dev);
+    bridge_audit_free_accounting(dev, dev->read_only && info.needs_recovery);
     return EOK;
 }
 

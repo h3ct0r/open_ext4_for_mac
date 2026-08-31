@@ -195,6 +195,20 @@ record is wrong:
 The distinction matters because the two have different causes and only the
 second explains slow copies.
 
+**Check whether the journal is unreplayed before believing any of it.** A
+read-only mount does not replay, so the superblock it reads is the one the
+last crash left behind, and its cached total can be wildly wrong while the
+journal holds the correct value. The field stick reported 2,471,492 free of
+1,920,357 blocks that way; one read-write mount replayed the log and the same
+volume read 1,750,596, in agreement with its descriptors. The audit now says
+`these are pre-recovery values` when that is the case, and `probe` shows
+`journal: yes (NEEDS RECOVERY)`. Replay first, then re-read.
+
+Replay corrects the totals. It does **not** correct a group whose descriptor
+claims more blocks than the group holds -- on that volume all three survived
+recovery unchanged. So the per-group line is the durable finding and the
+totals are the one to re-read.
+
 Do not read the second verdict as "the descriptors are fine". A group can be
 impossible on its own while the sum stays plausible -- the field stick had
 three such groups summing to less than the volume size -- so check the
