@@ -192,6 +192,31 @@ record is wrong:
 The distinction matters because the two have different causes and only the
 second explains slow copies.
 
+That line names which record is wrong, not where. The breakdown behind it:
+
+```bash
+build/bin/ext4dump corpse.img groups          # add `bad` for only the bad ones
+```
+
+It prints each group's free count with its `BLOCK_UNINIT` / `INODE_UNINIT`
+flags, sums the descriptors, and prints the superblock's counter beside that
+sum. Read-only, and it does not materialise a lazily-formatted group -- so it
+is safe to point at the evidence, and at an unmounted `sudo ext4dump
+/dev/rdiskNsM groups` if you have not imaged yet. Image first anyway: §3.
+
+Two things it is worth knowing it does:
+
+- It reports the superblock counter **as stored**, not as `df` reports it.
+  `df` clamps free to the volume size so the OS is never handed an impossible
+  number; that clamp hides the value you want here. On the field stick it is
+  the difference between reading a 60,207-block drift and the real 611,347.
+- It exits 1 when the two records disagree, so it can gate a script.
+
+If the damaged groups are the ones still flagged `BLOCK_UNINIT`, the fault is
+in the lazy-format series (patches 0051-0053) rather than in ordinary
+allocation. If they are initialised groups, it is the allocator. That is the
+fork, and this is the command that settles it.
+
 ## 4. When it wedges
 
 Known states, from mildest to worst (docs/STATUS.md has the histories):
