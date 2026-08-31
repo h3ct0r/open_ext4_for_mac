@@ -38,10 +38,14 @@ new_vol() {
 # --- the shape: allocated, unwritten, size untouched -------------------------
 new_vol
 "$DUMP" "$IMG" create /f.bin >/dev/null 2>&1
-out=$("$DUMP" "$IMG" prealloc /f.bin 0 1048576 2>&1)
-[ "$out" = "preallocated 1048576 bytes" ] \
+# stdout only. The tool's RESULT is on stdout and its log lines go to stderr,
+# so folding them together made this cell fail the moment mount grew an
+# accounting audit -- an exact-match assertion on 2>&1 breaks on any new log
+# line, however correct. Failures are still reported: rc is checked below.
+out=$("$DUMP" "$IMG" prealloc /f.bin 0 1048576 2>/dev/null); rc=$?
+[ "$rc" = 0 ] && [ "$out" = "preallocated 1048576 bytes" ] \
   && ok "a megabyte is preallocated in full" \
-  || bad "a megabyte is preallocated in full" "$out"
+  || bad "a megabyte is preallocated in full" "rc=$rc out=$out"
 
 ext=$("$DUMP" "$IMG" extents /f.bin 2>/dev/null)
 grep -q "size=0 alloc=1048576" <<<"$ext" \

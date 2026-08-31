@@ -303,6 +303,40 @@ else
         "$(grep -E 'i_file_acl|i_blocks|Block bitmap' <<<"$out" | head -2 | tr '\n' ' ')"
 fi
 
+# --- a preallocated write does not shred the extent tree --------------------
+# Each mark_written splits the extent it lands in, so a preallocated write used
+# to end with roughly one extent per write chunk: 3 MB in four extents where a
+# plain write of the same bytes is one, and 512 MB in 256 against ten. macOS
+# preallocates before every Finder copy, so that was every copied file --
+# e2fsck counts each as "non-contiguous" and suggests narrowing the tree, and
+# the extra depth is what made the three-way split reachable at all (0055).
+#
+# The bound is deliberately loose. What matters is that adjacent written runs
+# fold back together, not the exact count, which depends on where the
+# allocator happened to put things.
+echo ""
+echo "extent tree after a preallocated write"
+FRAGIMG="$WORK/frag.img"
+make_volume "$FRAGIMG" $((32 * 32768 + 5000))
+attach_and_mount "$FRAGIMG"
+"$DATA" write "$MNT/plain.bin"  3000001 61            >/dev/null 2>&1
+"$DATA" write "$MNT/pre.bin"    3000001 61 --prealloc >/dev/null 2>&1
+assert_mounted "after writing the extent-tree pair"
+detach_volume
+
+count_extents() {  # count_extents <image> <path>
+    "$DUMP" "$1" extents "$2" 2>/dev/null | head -1 |
+        sed -nE 's/.*, ([0-9]+) extent\(s\).*/\1/p'
+}
+pl=$(count_extents "$FRAGIMG" /plain.bin)
+pr=$(count_extents "$FRAGIMG" /pre.bin)
+if [ -n "$pr" ] && [ "$pr" -le 2 ]; then
+    ok "a preallocated 3 MB write lands in $pr extent(s), like a plain one ($pl)"
+else
+    bad "a preallocated write folds its converted runs together" \
+        "preallocated=${pr:-?} extents against plain=${pl:-?}; adjacent written runs are not merging"
+fi
+
 # --- surprise removal while data is in flight -------------------------------
 # The field event this driver exists to survive: the stick is pulled mid-write.
 # `hdiutil detach -force` on a mounted image is the unattended stand-in -- the
