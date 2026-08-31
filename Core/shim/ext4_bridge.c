@@ -855,14 +855,31 @@ static void bridge_audit_free_accounting(ext4b_device *dev)
     uint32_t groups  = ext4_block_group_cnt(&fs->sb);
     uint64_t sum     = 0;
 
+    /*
+     * Per group, not just in total. A descriptor claiming more free blocks
+     * than its group holds is impossible on its own, and the sum hides it:
+     * the field volume had three such groups while the descriptors still
+     * summed to less than the volume size, so a test on the sum alone
+     * reported the damage as confined to the cached total. That verdict says
+     * allocation is healthy, which was exactly wrong -- the allocator was
+     * scanning groups for free blocks that do not exist.
+     */
+    uint32_t bad_groups = 0;
+    uint32_t first_bad  = 0;
+
     for (uint32_t i = 0; i < groups; i++) {
         ext4b_group_info g;
         if (bridge_read_group_info(fs, i, &g) != EOK)
             return;              /* META_BG or a read error is its own report */
         sum += g.free_blocks;
+        if (g.free_blocks > g.blocks) {
+            if (!bad_groups)
+                first_bad = i;
+            bad_groups++;
+        }
     }
 
-    if (sb_free == sum && sb_free <= total) {
+    if (sb_free == sum && sb_free <= total && !bad_groups) {
         bridge_logf(1, "free-space accounting agrees: %llu of %llu blocks "
                        "free across %u group(s) [build %s]",
                     (unsigned long long)sb_free,
@@ -875,9 +892,15 @@ static void bridge_audit_free_accounting(ext4b_device *dev)
                    "holds %llu blocks%s -- e2fsck is the fix",
                 (unsigned long long)sb_free, groups,
                 (unsigned long long)sum, (unsigned long long)total,
-                sum > total ? "; the descriptors themselves are impossible"
-                            : (sb_free > total ? "; only the cached total is "
-                                                 "impossible" : ""));
+                (bad_groups || sum > total)
+                    ? "; the descriptors themselves are impossible"
+                    : (sb_free > total ? "; only the cached total is "
+                                         "impossible" : ""));
+    if (bad_groups)
+        bridge_logf(3, "  %u group(s) claim more free blocks than they hold, "
+                       "starting at group %u -- allocation is working from a "
+                       "broken map, so expect short runs [build %s]",
+                    bad_groups, first_bad, EXT4B_BUILD_ID);
     bridge_logf(3, "  (reported by build %s)", EXT4B_BUILD_ID);
 }
 

@@ -226,6 +226,74 @@ else
   bad "groups exits 1 when the two records disagree" "rc=$grc"
 fi
 
+# --- an impossible group hidden behind a plausible sum ----------------------
+echo
+echo "per-group impossibility"
+# The field stick had three groups claiming more free blocks than they hold
+# while the descriptors still summed to less than the volume size. The audit
+# tested the sum only, so it reported the damage as confined to the cached
+# total -- the verdict that means "allocation is healthy, this is cosmetic".
+# It was the opposite: the allocator was scanning groups for blocks that do
+# not exist. With the two records made to agree as well, the pre-fix audit
+# called the volume healthy at info level and exited 0.
+IMG="$WORK/hidden-group.img"
+rm -f "$IMG"; python3 -c "open('$IMG','wb').truncate(4*1024*1024*1024)"
+"$DUMP" "$IMG" format 4 >/dev/null 2>&1
+python3 - "$IMG" <<'EOF'
+import sys, struct
+T = []
+for i in range(256):
+    c = i
+    for _ in range(8):
+        c = (c >> 1) ^ (0x82F63B78 if c & 1 else 0)
+    T.append(c)
+def crc32c(buf, crc=0xFFFFFFFF):
+    for b in buf:
+        crc = (crc >> 8) ^ T[(crc ^ b) & 0xFF]
+    return crc
+f = open(sys.argv[1], 'r+b')
+f.seek(1024); sb = bytearray(f.read(1024))
+bs  = 1024 << struct.unpack_from('<I', sb, 24)[0]
+bpg = struct.unpack_from('<I', sb, 32)[0]
+fdb = struct.unpack_from('<I', sb, 20)[0]
+inc = struct.unpack_from('<I', sb, 96)[0]
+dsz = struct.unpack_from('<H', sb, 254)[0] if (inc & 0x80) else 32
+if dsz == 0: dsz = 32
+# Group 1 claims 20000 blocks more than the group physically holds...
+off = (fdb + 1) * bs + dsz + 12          # group 1, free_blocks_count_lo
+f.seek(off); cur = struct.unpack('<H', f.read(2))[0]
+delta = (bpg + 20000) - cur
+f.seek(off); f.write(struct.pack('<H', cur + delta))
+# ...and the cached total is credited to match, so the sum still adds up and
+# stays under the volume size. Only the per-group check can see this.
+struct.pack_into('<I', sb, 12, struct.unpack_from('<I', sb, 12)[0] + delta)
+struct.pack_into('<I', sb, 0x3FC, crc32c(bytes(sb[:0x3FC])))
+f.seek(1024); f.write(sb); f.close()
+EOF
+out=$("$DUMP" "$IMG" groups 2>&1); rc=$?
+if grep -q "the descriptors themselves are impossible" <<<"$out"; then
+  ok "an impossible group is named even when the sum is plausible"
+else
+  bad "an impossible group is named even when the sum is plausible" \
+      "$(grep -i accounting <<<"$out" | head -1)"
+fi
+if grep -q "free-space accounting agrees" <<<"$out"; then
+  bad "a volume with an impossible group is not called healthy" \
+      "the audit reported agreement"
+else
+  ok "a volume with an impossible group is not called healthy"
+fi
+if grep -qE "^1 group\(s\) claim more free blocks than they hold$" <<<"$out"; then
+  ok "the count of impossible groups is reported"
+else
+  bad "the count of impossible groups is reported" "$(tail -2 <<<"$out")"
+fi
+if [ "$rc" -eq 1 ]; then
+  ok "an impossible group sets the exit code (rc=1)"
+else
+  bad "an impossible group sets the exit code" "rc=$rc"
+fi
+
 # --- a damaged superblock is not reported as an unsupported one -------------
 echo
 echo "damaged superblock wording"
