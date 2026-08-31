@@ -236,6 +236,100 @@ run_geometry "even-groups"   $((32 * 32768))
 echo ""
 run_geometry "partial-group" $((32 * 32768 + 5000))
 
+# --- surprise removal while data is in flight -------------------------------
+# The field event this driver exists to survive: the stick is pulled mid-write.
+# `hdiutil detach -force` on a mounted image is the unattended stand-in -- the
+# device disappears under a live volume, exactly as a yank does.
+#
+# The bar is not that the in-flight file survives; it cannot, and pretending
+# otherwise would be the wrong test. It is that a file CLOSED AND FSYNCED
+# before the pull is still byte-exact afterwards, and that the volume comes
+# back. A filesystem that loses acknowledged data on removal is not usable on
+# removable media, and nothing here checked it before.
+echo ""
+echo "surprise removal"
+PULLIMG="$WORK/pull.img"
+make_volume "$PULLIMG" $((32 * 32768 + 5000))
+attach_and_mount "$PULLIMG"
+$DATA write "$MNT/before.bin" 8388608 4242 >/dev/null 2>&1
+assert_mounted "before the pull"
+
+# Big enough that it cannot finish inside the delay: at ~70 MB/s on an image,
+# 200 MB completed before the detach on the first attempt and the cell tested
+# nothing at all. The interruption is asserted below rather than assumed --
+# a pull that arrives after the write has finished proves nothing, and would
+# pass quietly forever.
+$DATA write "$MNT/during.bin" 1073741824 4243 >/dev/null 2>&1 &
+inflight=$!
+sleep 2
+hdiutil detach "$DEV" -force >/dev/null 2>&1
+wait "$inflight" 2>/dev/null; inflight_rc=$?
+umount "$MNT" 2>/dev/null
+DEV=""
+
+if [ "$inflight_rc" -ne 0 ]; then
+    ok "the write was actually in flight when the device went away (rc=$inflight_rc)"
+else
+    bad "the write was actually in flight when the device went away" \
+        "the writer finished before the detach, so this cell tested nothing"
+fi
+
+# Remount: the journal replays here, which is the recovery a pull depends on.
+if attach_and_mount "$PULLIMG" 2>/dev/null; then
+    ok "the volume mounts again after a surprise removal"
+    if out=$($DATA verify "$MNT/before.bin" 8388608 4242 2>&1); then
+        ok "a file closed before the pull is still byte-exact"
+    else
+        bad "a file closed before the pull is still byte-exact" "$out"
+    fi
+    detach_volume
+else
+    bad "the volume mounts again after a surprise removal" "mount failed"
+fi
+
+# Structure afterwards. e2fsck -fn, never -fy: a checker that repairs what it
+# finds always agrees with itself, and this project has already lost time to
+# using a repairing e2fsck as an oracle.
+if out=$(e2fsck -fn "$PULLIMG" 2>&1); then
+    ok "the volume is structurally sound after a surprise removal"
+else
+    bad "the volume is structurally sound after a surprise removal" \
+        "$(printf '%s' "$out" | head -4 | tr '\n' ' ')"
+fi
+
+# --- a pendrive's ordinary life: many mount cycles ---------------------------
+# Write, remount, append, remount, verify. Repeated mount/unmount is what a
+# removable volume actually does, and it is barely exercised anywhere: the
+# offline suites mount once per command and the mounted suites mount once per
+# run.
+echo ""
+echo "repeated mount cycles"
+CYCIMG="$WORK/cycles.img"
+make_volume "$CYCIMG" $((32 * 32768 + 5000))
+attach_and_mount "$CYCIMG"
+cyc_ok=1
+for round in 1 2 3 4 5; do
+    $DATA write "$MNT/c$round.bin" 4194304 $((5000 + round)) >/dev/null 2>&1 \
+        || cyc_ok=0
+    assert_mounted "in cycle $round"
+    remount "$CYCIMG"
+    # every file written in an earlier round must still be intact
+    for prev in $(seq 1 "$round"); do
+        $DATA verify "$MNT/c$prev.bin" 4194304 $((5000 + prev)) >/dev/null 2>&1 \
+            || { bad "cycle $round: c$prev.bin survived $((round - prev + 1)) remount(s)" \
+                     "contents changed"; cyc_ok=0; }
+    done
+done
+detach_volume
+[ "$cyc_ok" = 1 ] && ok "five write-and-remount cycles leave every file byte-exact"
+
+if out=$(e2fsck -fn "$CYCIMG" 2>&1); then
+    ok "e2fsck finds nothing to repair after five mount cycles"
+else
+    bad "e2fsck finds nothing to repair after five mount cycles" \
+        "$(printf '%s' "$out" | head -4 | tr '\n' ' ')"
+fi
+
 # --- the allocator's out-of-range guard must never fire on real work --------
 # Patch 0054 refuses a free whose range leaves the volume. That is a corrupt
 # range by definition, so an ordinary workload must never produce one; if this

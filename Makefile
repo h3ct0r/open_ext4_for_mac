@@ -373,12 +373,17 @@ preflight: tools
 # `tools` is not decoration: the suite formats its target with ext4dump, and
 # after `make clean` a hardware run would pass preflight, fail the format, and
 # report "could not prepare the volume" -- on the one day that costs the most.
-test-kill-recovery: preflight tools
+test-kill-recovery: preflight test-mount-data tools
 	@bash Tests/run_kill_recovery_tests.sh
 
+# Gated on test-mount-data, not just preflight. Preflight asks whether the
+# switches are on; it cannot tell you the build corrupts files. A hardware
+# session that starts against such a build spends an operator's evening
+# measuring damage the offline suite would have found in ninety seconds --
+# which is how the extent-split corruption reached a real stick.
 # The hands-on suite: the operator pulls the stick on cue. Erases the device
 # every round. See the header of the script for the safety notes.
-test-pull: preflight tools
+test-pull: preflight test-mount-data tools
 	@bash Tests/run_pull_tests.sh
 
 # Crash consistency against the mounted driver rather than the offline core.

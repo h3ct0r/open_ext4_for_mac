@@ -626,6 +626,32 @@ durability_case rmdir    'mkdir "$MNT/dur/emptydir"' \
   'rmdir "$MNT/dur/emptydir"'                        \
   '[ ! -e /mnt/t/dur/emptydir ]'
 
+# File CONTENTS, not just the metadata that names them. Every case above
+# asserts that a directory entry or an inode survived the cut; none of them
+# opens a file, so a driver that committed perfect metadata over wrong bytes
+# passed this stage. That is not hypothetical -- a three-way extent split
+# corrupted file data on preallocated writes (patch 0055) while e2fsck stayed
+# clean and every cell here stayed green.
+#
+# The hash is computed on this side and checked inside Linux, so the bytes are
+# read back by a driver that shares none of our code.
+dd if=/dev/urandom of="$WORK/dur-payload" bs=1m count=4 2>/dev/null
+DUR_SHA=$(shasum -a 256 "$WORK/dur-payload" | cut -d' ' -f1)
+durability_case filedata ""                          \
+  'cp "$WORK/dur-payload" "$MNT/dur/data.bin"'       \
+  "[ \"\$(sha256sum /mnt/t/dur/data.bin | cut -d' ' -f1)\" = \"$DUR_SHA\" ]"
+
+# The same bytes through the path that actually broke: preallocate first, as
+# macOS does before every large copy, then write into the unwritten extent.
+# datafile's contents are a pure function of (size, seed), so the same call
+# locally produces the identical bytes to hash against -- no copy to keep in
+# step, and the expected value is known before the volume is ever touched.
+"$ROOT/build/bin/datafile" write "$WORK/dur-prealloc-ref" 4194304 909 >/dev/null 2>&1
+DUR_PSHA=$(shasum -a 256 "$WORK/dur-prealloc-ref" | cut -d' ' -f1)
+durability_case filedata_prealloc ""                 \
+  '"$ROOT/build/bin/datafile" write "$MNT/dur/prealloc.bin" 4194304 909 --prealloc >/dev/null 2>&1' \
+  "[ \"\$(sha256sum /mnt/t/dur/prealloc.bin | cut -d' ' -f1)\" = \"$DUR_PSHA\" ]"
+
 note "  $(wc -l < "$WORK/dur-manifest.txt" | tr -d ' ') operations snapshotted after a sync"
 
 # --- stage 1b: an undrained batch is lost cleanly, not messily ---------------
