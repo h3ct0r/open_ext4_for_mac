@@ -38,6 +38,7 @@ bash "$ROOT/scripts/check_install_freshness.sh" || exit 1
 # gone, the format fails, and the message points at the *device* -- on real
 # media, during a hardware day. Refuse here, with the actual reason.
 [ -x "$ROOT/build/bin/ext4dump" ] || { echo "build first: make tools"; exit 1; }
+DATA="$ROOT/build/bin/datafile"
 WORK="$ROOT/build/kill-recovery"
 REPORT="$ROOT/build/kill-recovery-report.txt"
 MNT="$WORK/mnt"
@@ -332,6 +333,18 @@ for round in $(seq 1 $((ROUNDS + 1))); do
   # allocation, block allocation, link counts, and an xattr apiece. The
   # directory name carries the run's PID as well as the round, so damage
   # reported by e2fsck can never be confused with an earlier run's.
+  # A file whose contents are known, written and fsynced BEFORE the kill.
+  # Everything below this point tests metadata: directory entries, link counts,
+  # inode and block allocation. None of it would notice the journal replaying
+  # perfect metadata over wrong bytes, and that is not hypothetical -- a
+  # three-way extent split did exactly that (patch 0055) while e2fsck stayed
+  # clean. datafile fsyncs before it returns, so this is data the caller was
+  # told was durable, and a crash may not take it back.
+  KR_SEED=$((7000 + round))
+  "$DATA" write "$MOUNTED_AT/pre-kill.bin" 4194304 "$KR_SEED" >/dev/null 2>&1 \
+    || bad "$R_TAG: could not write the pre-kill file"
+  sync
+
   ROUND_DIR="k$$-r$round"
   ( for i in $(seq 1 "$R_DIRS"); do
       mkdir -p "$MOUNTED_AT/$ROUND_DIR/d$i/inner" 2>/dev/null
@@ -375,6 +388,17 @@ for round in $(seq 1 $((ROUNDS + 1))); do
         "$(diskutil mount "$DEVICE" 2>&1 | head -1)"
     release_device; detach_target; continue
   fi
+  # The durability claim, checked while the recovered volume is still mounted:
+  # bytes that were fsynced before the kill read back exactly. A file that came
+  # through as the right length and the wrong contents would satisfy every other
+  # assertion in this suite.
+  if "$DATA" verify "$MOUNTED_AT/pre-kill.bin" 4194304 "$KR_SEED" >/dev/null 2>&1; then
+    ok "$R_TAG: data fsynced before the kill survives the replay byte-exact"
+  else
+    bad "$R_TAG: data fsynced before the kill survives the replay byte-exact" \
+        "$("$DATA" verify "$MOUNTED_AT/pre-kill.bin" 4194304 "$KR_SEED" 2>&1 | head -2 | tr '\n' ' ')"
+  fi
+
   sleep 1
   # Unmount and detach without a gap. A released, attached, probeable
   # volume is exactly what auto-mount exists to grab, and force-detaching

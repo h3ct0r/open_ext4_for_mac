@@ -13,6 +13,7 @@ export PATH="/opt/homebrew/opt/e2fsprogs/sbin:/opt/homebrew/opt/e2fsprogs/bin:$P
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$ROOT/build/newfs"
+DATA="$ROOT/build/bin/datafile"
 IMG="$WORK/newfs.img"
 MNT="/tmp/ext4-newfs-test"
 DEV=""
@@ -88,7 +89,38 @@ if mount -F -t ext4 "${DEV#/dev/}" "$MNT" 2>/dev/null; then
   echo "newfs made me" > "$MNT/proof.txt" 2>/dev/null
   [ "$(cat "$MNT/proof.txt" 2>/dev/null)" = "newfs made me" ] \
     && ok "and takes a write" || bad "and takes a write"
+
+  # A real file, read back COLD. The line above is a warm read of fourteen
+  # bytes: the page cache answers it, so it cannot tell whether anything
+  # reached the medium, and fourteen bytes exercise none of the write path
+  # that matters. This writes a seeded megabyte with a partial trailing block
+  # -- the shape that hid a corruption bug for a day, because every other size
+  # in the suites was a multiple of 4096 -- and verifies it after a remount.
+  "$DATA" write "$MNT/cold.bin" 1052136 4242 >/dev/null 2>&1 \
+    && ok "a megabyte with a partial tail is written" \
+    || bad "a megabyte with a partial tail is written"
   umount "$MNT" && ok "and unmounts" || bad "and unmounts"
+
+  # Retried, for the reason the fsck_fskit block below already documents:
+  # unmounting prods DiskArbitration into re-examining the device, and a mount
+  # issued into that re-probe loses with a transient failure. Not a driver
+  # fault, and a single attempt makes this cell flaky rather than meaningful.
+  remounted=0
+  for attempt in 1 2 3 4 5; do
+    mount -F -t ext4 "${DEV#/dev/}" "$MNT" 2>/dev/null && { remounted=1; break; }
+    sleep 2
+  done
+  if [ "$remounted" = 1 ]; then
+    if "$DATA" verify "$MNT/cold.bin" 1052136 4242 >/dev/null 2>&1; then
+      ok "and it reads back byte-exact after a remount"
+    else
+      bad "and it reads back byte-exact after a remount" \
+          "$("$DATA" verify "$MNT/cold.bin" 1052136 4242 2>&1 | head -2 | tr '\n' ' ')"
+    fi
+    umount "$MNT" 2>/dev/null
+  else
+    bad "the volume mounts again for the cold read"
+  fi
   e2fsck -fn "$RDEV" >/dev/null 2>&1 \
     && ok "e2fsck clean after the mounted session" \
     || bad "e2fsck clean after the mounted session"
