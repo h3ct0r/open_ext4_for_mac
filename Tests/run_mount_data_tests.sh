@@ -237,6 +237,35 @@ run_geometry() {  # run_geometry <label> <blocks>
     done <<< "$CASES"
     [ "$ofail" = 0 ] && ok "$label: all $checked files read correctly offline through the core"
 
+    # --- every read-only verb still exits 0 --------------------------------
+    # The historical failure this guards: a change made the mount dirty, so
+    # every read-only command exited 1 while 114 cells that only inspected
+    # OUTPUT stayed green. run_bounds_tests.sh sweeps for it, but only on an
+    # image ext4dump wrote. This is the same sweep on a volume written through
+    # the MOUNT, which is where every bug found in this driver has been.
+    ro_failed=""
+    while read -r verb args; do
+        [ -z "$verb" ] && continue
+        "$DUMP" "$img" $verb $args >/dev/null 2>&1 || ro_failed="$ro_failed $verb"
+    done <<'ROVERBS'
+probe
+ls /
+stat /one-megabyte.bin
+cat /one-megabyte.bin
+extents /one-megabyte.bin
+xattr /one-megabyte.bin
+df
+groups
+orphans
+check
+ROVERBS
+    if [ -z "$ro_failed" ]; then
+        ok "$label: every read-only verb exits 0 after a mounted write"
+    else
+        bad "$label: every read-only verb exits 0 after a mounted write" \
+            "failed:$ro_failed"
+    fi
+
     # --- structure --------------------------------------------------------
     if out=$(e2fsck -fn "$img" 2>&1); then
         ok "$label: e2fsck finds nothing to repair"
