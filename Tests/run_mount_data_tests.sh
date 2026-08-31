@@ -337,6 +337,48 @@ else
         "preallocated=${pr:-?} extents against plain=${pl:-?}; adjacent written runs are not merging"
 fi
 
+# --- setAttributes actually sets attributes ---------------------------------
+# It did not. FSKit reports what the caller asked for through isValid(_:), and
+# uses consumedAttributes for the FILESYSTEM to report back what it applied.
+# Reading consumedAttributes as though it were the request meant it arrived
+# empty, every branch was skipped, and setAttributes did nothing at all while
+# returning success -- chmod, chown, utimes and truncate alike.
+#
+# Truncate is the one that costs data: a file kept its old length and its old
+# tail, so anything rewriting a file shorter left the difference behind. It is
+# checked cold, because the size that matters is the one on the medium.
+echo ""
+echo "setAttributes"
+SAIMG="$WORK/setattr.img"
+make_volume "$SAIMG" $((32 * 32768 + 5000))
+attach_and_mount "$SAIMG"
+"$DATA" write "$MNT/sa.bin" 8388608 71 >/dev/null 2>&1
+python3 -c "import os; os.truncate('$MNT/sa.bin', 1048576)" 2>/dev/null
+chmod 0641 "$MNT/sa.bin" 2>/dev/null
+python3 -c "import os; os.utime('$MNT/sa.bin', (1000000000, 1000000000))" 2>/dev/null
+assert_mounted "after setAttributes"
+remount "$SAIMG"
+
+sz=$(stat -f %z "$MNT/sa.bin" 2>/dev/null)
+md=$(stat -f %Lp "$MNT/sa.bin" 2>/dev/null)
+mt=$(stat -f %m "$MNT/sa.bin" 2>/dev/null)
+[ "$sz" = 1048576 ] \
+  && ok "truncate shrinks the file, and it stays shrunk across a remount" \
+  || bad "truncate shrinks the file" "size is $sz, expected 1048576"
+[ "$md" = 641 ] \
+  && ok "chmod survives a remount" || bad "chmod survives a remount" "mode is $md"
+[ "$mt" = 1000000000 ] \
+  && ok "utimes survives a remount" || bad "utimes survives a remount" "mtime is $mt"
+
+# The bytes past the new end must be gone, not merely hidden by i_size.
+if "$DATA" verify "$MNT/sa.bin" 1048576 71 >/dev/null 2>&1; then
+    ok "what remains after a truncate is the head of the original"
+else
+    bad "what remains after a truncate is the head of the original" \
+        "the first megabyte no longer matches"
+fi
+detach_volume
+
 # --- surprise removal while data is in flight -------------------------------
 # The field event this driver exists to survive: the stick is pulled mid-write.
 # `hdiutil detach -force` on a mounted image is the unattended stand-in -- the

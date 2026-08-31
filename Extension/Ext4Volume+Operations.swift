@@ -198,17 +198,40 @@ extension Ext4Volume: FSVolume.Operations {
 
         var mask: UInt32 = 0
         var attrs = ext4b_attrs()
-        let wanted = request.consumedAttributes
+        var consumed: FSItem.Attribute = []
 
-        if wanted.contains(.mode) { mask |= EXT4B_SET_MODE.rawValue;  attrs.mode = request.mode }
-        if wanted.contains(.uid)  { mask |= EXT4B_SET_UID.rawValue;   attrs.uid  = request.uid }
-        if wanted.contains(.gid)  { mask |= EXT4B_SET_GID.rawValue;   attrs.gid  = request.gid }
-        if wanted.contains(.size) { mask |= EXT4B_SET_SIZE.rawValue;  attrs.size = request.size }
-        if wanted.contains(.accessTime) {
-            mask |= EXT4B_SET_ATIME.rawValue; attrs.atime = Int64(request.accessTime.tv_sec)
+        // isValid(_:) asks what the caller set; consumedAttributes REPORTS what
+        // we applied. Reading consumedAttributes as the request was the whole
+        // bug: it arrives empty, so every branch below was skipped and
+        // setAttributes did nothing at all -- chmod, chown, utimes and
+        // truncate-down alike, each returning success. A shrink is the one
+        // that shows: the file keeps its old length and its old tail, so a
+        // program that rewrites a file shorter leaves the difference behind.
+        if request.isValid(.mode) {
+            mask |= EXT4B_SET_MODE.rawValue; attrs.mode = request.mode
+            consumed.insert(.mode)
         }
-        if wanted.contains(.modifyTime) {
-            mask |= EXT4B_SET_MTIME.rawValue; attrs.mtime = Int64(request.modifyTime.tv_sec)
+        if request.isValid(.uid) {
+            mask |= EXT4B_SET_UID.rawValue;  attrs.uid = request.uid
+            consumed.insert(.uid)
+        }
+        if request.isValid(.gid) {
+            mask |= EXT4B_SET_GID.rawValue;  attrs.gid = request.gid
+            consumed.insert(.gid)
+        }
+        if request.isValid(.size) {
+            mask |= EXT4B_SET_SIZE.rawValue; attrs.size = request.size
+            consumed.insert(.size)
+        }
+        if request.isValid(.accessTime) {
+            mask |= EXT4B_SET_ATIME.rawValue
+            attrs.atime = Int64(request.accessTime.tv_sec)
+            consumed.insert(.accessTime)
+        }
+        if request.isValid(.modifyTime) {
+            mask |= EXT4B_SET_MTIME.rawValue
+            attrs.mtime = Int64(request.modifyTime.tv_sec)
+            consumed.insert(.modifyTime)
         }
 
         // Flags can be read but not written. lwext4 offers no way to rewrite
@@ -218,11 +241,12 @@ extension Ext4Volume: FSVolume.Operations {
         // copying files. One that would really change something is refused,
         // because reporting a success that did not happen is how a user ends up
         // believing a file is unlocked when it is not.
-        if wanted.contains(.flags) {
+        if request.isValid(.flags) {
             let current = try await executor.run { [self] in
                 Ext4Volume.bsdFlags(from: try fetchAttributes(inode: ext4Item.inode))
             }
             guard request.flags == current else { throw Ext4Error.posix(EPERM) }
+            consumed.insert(.flags)
         }
 
         if mask != 0 {
@@ -243,8 +267,12 @@ extension Ext4Volume: FSVolume.Operations {
         // (see the note on Ext4Volume.attributes), and an empty
         // GetAttributesRequest asks populate() for nothing -- so the old code
         // returned a blank reply that the kernel could reject.
+        // Report what was applied. The kernel reads this to know the request
+        // was honoured, and the echo below is built from it.
+        request.consumedAttributes = consumed
+
         let echo = FSItem.GetAttributesRequest()
-        echo.wantedAttributes = request.consumedAttributes
+        echo.wantedAttributes = consumed
         return try await self.attributes(echo, of: item)
     }
 
