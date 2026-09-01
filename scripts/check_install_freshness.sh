@@ -6,6 +6,15 @@
 # than one that refuses to run. This compares code-signature CDHashes, which
 # identify the exact binaries: same CDHash, same code.
 #
+# Same code as WHAT, though. Comparing the install against build/ answers only
+# half the question, and the half that goes stale quietly: skip `make app` and
+# both sides are equally old, so the check goes green on an install that is
+# several commits behind. That is how this stood while the tree moved from
+# 469167f to d927d77 with preflight reporting the extension current. So the
+# tree's own revision is the second comparison, against the Ext4BuildID the
+# Makefile stamps into the bundle -- the same fact preflight already checks for
+# ext4dump, and for the same reason.
+#
 # Warns by default (a deliberate old-build red run is a legitimate step of
 # red-first testing); EXT4_REQUIRE_FRESH=1 turns the warning into a failure.
 set -uo pipefail
@@ -52,9 +61,35 @@ if [ -z "$built" ] || [ -z "$installed" ]; then
 fi
 
 if [ "$built" = "$installed" ]; then
-  echo "freshness: installed extension matches the built tree ($installed)"
-  echo "  build:     $(buildid "$INSTALLED" || echo unstamped)"
+  # The Makefile stamps the revision the same way for every artifact, `-dirty`
+  # included, so a dirty tree legitimately never matches an install: an edited
+  # tree is not what is running, and saying so is the point.
+  stamped=$(buildid "$INSTALLED" || echo unstamped)
+  head=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null)
+  [ -n "$head" ] && { git -C "$ROOT" diff --quiet 2>/dev/null || head="$head-dirty"; }
+
+  if [ -z "$head" ]; then
+    # No git to ask -- a tarball, or a detached checkout. The CDHash match is
+    # all there is, and it is worth having; say what was not checked.
+    echo "freshness: installed extension matches the built tree ($installed)"
+    echo "  build:     $stamped  (no git revision to compare against)"
+    running_note
+    exit 0
+  fi
+
+  if [ "$stamped" = "$head" ]; then
+    echo "freshness: installed extension matches this tree ($stamped)"
+    running_note
+    exit 0
+  fi
+
+  echo "freshness: THE BUILT TREE ITSELF IS STALE"
+  echo "  installed: $stamped  (and build/ agrees, which is why the"
+  echo "             CDHash comparison alone reports this as current)"
+  echo "  tree:      $head"
+  echo "  run 'make app && make install'"
   running_note
+  [ "${EXT4_REQUIRE_FRESH:-0}" = "1" ] && exit 1
   exit 0
 fi
 
