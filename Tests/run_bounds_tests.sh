@@ -342,6 +342,26 @@ else
       "$(grep -iE 'accounting|agrees' <<<"$out" | head -1)"
 fi
 
+# Reading an unrecovered volume must still work, and this is load-bearing.
+# Structures caught mid-update legitimately fail their checksums there -- that
+# is what the field log showed. The allocator refuses a write through a bitmap
+# whose checksum failed, and that is only safe because a write cannot reach a
+# volume in this state: WRITE_PROLOGUE returns EROFS on a read-only mount, and
+# a read-write mount replays before anything else. If reads ever start failing
+# here, every crash snapshot becomes unmountable and that refusal has to be
+# reconsidered.
+prerec_failed=""
+for verb in "ls /" probe df groups check orphans; do
+  if ! "$DUMP" "$IMG" $verb >/dev/null 2>&1; then
+    prerec_failed="$prerec_failed ${verb%% *}"
+  fi
+done
+if [ -z "${prerec_failed:-}" ]; then
+  ok "an unrecovered volume can still be read"
+else
+  bad "an unrecovered volume can still be read" "failed:$prerec_failed"
+fi
+
 # --- freeing a range that overhangs the volume ------------------------------
 echo
 echo "out-of-range free"
