@@ -17,6 +17,9 @@ DerivedData/
 *.provisionprofile
 signing.local.env
 
+# Soak logs. Deliberately outside build/, which every soak round deletes.
+.soak/
+
 # Test artifacts
 Tests/fixtures/*.img
 tools/difftest/out/

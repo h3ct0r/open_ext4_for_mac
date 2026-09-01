@@ -1568,7 +1568,7 @@ make soak
 runs `scripts/run_full_validation.sh` in a loop and stops dead at the first
 failure. Not a pass rate: for a filesystem the question is whether it ever
 loses data, and "usually not" is not an answer. `SOAK_ROUNDS=N` bounds it; a
-failing round's whole output stays in `build/soak/round-N.log` and passing
+failing round's whole output stays in `.soak/round-N.log` and passing
 rounds' logs are deleted, because the failing one is the only one anybody will
 read.
 

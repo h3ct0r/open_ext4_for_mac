@@ -20,15 +20,22 @@
 # red round gives you a pass rate, and a pass rate is the wrong shape of
 # answer for a filesystem: the question is whether it ever loses data, and
 # "usually not" is not an answer. The round's full output stays in
-# build/soak/round-N.log, and the tally is printed in the form that belongs
-# in docs/STATUS.md.
+# .soak/round-N.log, and the tally is printed in the form that belongs in
+# docs/STATUS.md.
+#
+# NOT under build/. A round begins with `make clean`, which removes build/
+# entirely -- so a log opened there is unlinked while it is still being
+# written to, and the round after it cannot create one at all. That is how
+# this script failed on its second round the first time it was run for
+# longer than one. run_full_validation.sh carries the same lesson in a
+# comment about its own log; reading it would have saved a round.
 #
 # Do not run this while your own media is mounted. Every round crash-tests
 # the shared extension process, and that means yours too.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="$ROOT/build/soak"
+OUT="$ROOT/.soak"
 mkdir -p "$OUT"
 
 ROUNDS="${SOAK_ROUNDS:-0}"        # 0 = keep going
@@ -62,6 +69,7 @@ while :; do
     [ "$ROUNDS" -gt 0 ] && [ "$round" -gt "$ROUNDS" ] && break
 
     log="$OUT/round-$round.log"
+    mkdir -p "$OUT"
     t0=$(date +%s)
     printf "round %d  %s  " "$round" "$(date '+%H:%M:%S')"
 
