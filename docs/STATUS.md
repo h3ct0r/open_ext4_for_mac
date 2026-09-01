@@ -1576,9 +1576,12 @@ The count belongs here, appended as it accumulates, because "no known bugs"
 and "none found in N runs" are different claims and only the second one means
 anything:
 
+A round costs about ten minutes, which is worth knowing before deciding how
+long to leave it running: soaking overnight is dozens of rounds, not two.
+
 | date | clean rounds | notes |
 |---|---|---|
-| — | — | first soak not yet run |
+| 2026-09-01 | 1 | 628 s, on the build that closed the fragmentation work |
 
 ## Not yet done
 - A notification when a locked volume appears and the agent is not running;
