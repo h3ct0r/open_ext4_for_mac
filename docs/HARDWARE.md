@@ -253,20 +253,47 @@ over the same corpus and volume, and it makes no difference either:
 | **Finder**, scripted, same corpus                  | **2.3%**       |
 | `cp` with a second writer hammering the volume     | 0.5%           |
 
-So five explanations have now been measured and refuted: preallocation, file
+So five explanations were measured and refuted: preallocation, file
 count, volume fullness, the copy engine, and concurrent background writes. None
 of them reproduces anything near 89% on a disk image.
 
-The one remaining difference is **the medium**: every reproduction above runs on
-an hdiutil image, where writes reach APFS through the page cache, and the field
-number comes from a physical USB stick. That is not obviously an allocation
-input -- allocation is a filesystem decision -- but it is the only variable
-left, and it is plausible if a slower device changes the size or ordering of
-the writes FSKit delivers, since the file is extended per delivery.
+The one remaining difference was **the medium**, and that is now a mechanism
+rather than a suspicion. It is **interleaving**, and it reproduces on an image
+in seconds with no stick, no threads and no timing at all.
 
-Testing it needs hardware: the same corpus onto the same-sized volume, once on
-the stick and once on an image, in one sitting. Until then the honest position
-is that this is unexplained, not attributed.
+Slowing the device down was the planned route in, and `EXT4DUMP_IO_LATENCY_US`
+already exists for it. It was not needed. Slowness is not the variable --
+ordering is, and ordering can be dialled directly.
+
+`ext4dump <img> interleave <n> <MiB-each> <chunk-KiB> [round|serial]` writes the
+same bytes to the same files inside one mount in two orders: `serial` finishes
+each file before starting the next, `round` walks them a chunk at a time.
+Everything else is identical.
+
+| eight 32 MiB files, 2 GB volume | extents in one file |
+|---|---|
+| `serial`, 64 KiB writes | **2** |
+| `round`, 64 KiB writes | **256** |
+| `round`, 1 MiB writes | **34** |
+
+The last row is the field's shape exactly: roughly one extent per megabyte, and
+1 MiB is the largest write macOS issues. The physical addresses say why. Each
+file's extents sit 128 blocks apart when eight files interleave at 16 blocks
+apiece -- the allocator honours the goal (the end of that inode's last extent),
+finds it taken by whichever file allocated next, and takes the first free block
+after it. Nothing is wrong with the allocator; the space it wanted is genuinely
+occupied.
+
+So the medium is the **condition**, not the cause. A fast image lets the copy
+engine finish one file before the next begins, so nothing interleaves; a slow
+stick keeps several in flight, and every write call becomes its own extent.
+
+Incremental preallocation does the same thing, and worse, because it happens
+before any data is written: preallocating eight files to 32 MiB in one call
+each gives 2 extents apiece, while preallocating them a megabyte at a time
+round-robin gives 34. Whole-file preallocation immunises a file completely --
+which is why `cp(1)`, which does not preallocate but does finish one file at a
+time, is also unaffected.
 
 **Beware measuring a Finder copy by file count.** Finder creates every
 destination file early, so a wait loop that counts names finishes long before

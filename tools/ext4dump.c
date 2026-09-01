@@ -872,7 +872,7 @@ static luks_device *open_luks(file_ctx *fc, const char *keyfile, bool writable,
 static bool is_write_cmd(const char *c)
 {
     static const char *w[] = { "prealloc", "trim",
-                               "mkdir", "create", "write", "append", "put", "rm",
+                               "mkdir", "create", "write", "append", "put", "interleave", "rm",
                                "mv", "ln", "symlink", "truncate", "chmod",
                                "chown", "setxattr", "rmxattr", "script",
                                "format", "label", "rm-open", "rm-cycle",
@@ -1054,6 +1054,102 @@ static int run_write_command(ext4b_device *dev, int argc, char **argv)
         }
         free(buf); fclose(in);
         if (rc == 0) printf("put %llu bytes\n", (unsigned long long)off);
+
+    } else if (strcmp(cmd, "interleave") == 0) {
+        /* Does interleaved allocation fragment files?
+         *
+         * A Finder copy onto a stick came back 89% non-contiguous while the
+         * same corpus onto an image was 2.4%. The mechanism proposed for that
+         * is locality: ext4_ext_find_goal returns the end of an inode's last
+         * extent, the append path asks for a run sized to the current write,
+         * and consecutive writes to one file stay contiguous only while
+         * nothing else allocates at that goal in between. Seven worker threads
+         * and a slow medium widening the gap between write calls is exactly
+         * the "in between" the hypothesis needs.
+         *
+         * This models it with no threads and no timing at all, which is the
+         * point. `round` walks the files a chunk at a time; `serial` finishes
+         * each file before starting the next; everything else -- byte count,
+         * chunk size, volume, single mount -- is identical. If the mechanism
+         * is real the two orders give different fragmentation, and the problem
+         * is reproducible on an image in seconds. If they give the same
+         * figure, interleaving is not what fragments and the hypothesis is
+         * wrong: say so rather than fitting a fix to it.
+         */
+        if (argc < 5) {
+            fprintf(stderr,
+                    "interleave needs <count> <MiB-each> [chunk-KiB] [round|serial]\n");
+            rc = 2; return rc;
+        }
+        long count = strtol(argv[3], NULL, 10);
+        long mib   = strtol(argv[4], NULL, 10);
+        size_t chunk = (argc >= 6) ? (size_t)strtoull(argv[5], NULL, 10) * 1024
+                                   : 64u * 1024;
+        bool serial = (argc >= 7 && strcmp(argv[6], "serial") == 0);
+        if (count < 1 || count > 512 || mib < 1 || chunk == 0) {
+            fprintf(stderr, "interleave: implausible arguments\n");
+            rc = 2; return rc;
+        }
+
+        uint64_t bytes_each = (uint64_t)mib << 20;
+        uint32_t *inos = calloc((size_t)count, sizeof *inos);
+        void *pattern = malloc(chunk);
+        if (!inos || !pattern) {
+            free(inos); free(pattern);
+            fprintf(stderr, "interleave: out of memory\n"); rc = 1; return rc;
+        }
+        /* Filled per file rather than once: one repeated byte, distinct per
+         * file, so a suite can read each one back and see that it is whole
+         * and entirely its own. Counting extents without checking the bytes
+         * would measure the wrong half of an allocator change. */
+
+        for (long i = 0; i < count && rc == 0; i++) {
+            char path[64];
+            snprintf(path, sizeof path, "/il-%03ld.bin", i);
+            uint32_t parent = resolve_parent(dev, path, &name, &name_len);
+            if (!parent) { rc = 1; break; }
+            r = ext4b_create(dev, parent, name, name_len, EXT4B_TYPE_FILE,
+                             0644, (uint32_t)getuid(), (uint32_t)getgid(),
+                             &inos[i]);
+            if (r != 0) {
+                fprintf(stderr, "interleave: %s\n", ext4b_strerror(r));
+                rc = 1;
+            }
+        }
+
+        /* One nest for both orders: serial runs `count` passes over one file
+         * each, round-robin runs a single pass over all of them. */
+        uint64_t total = 0;
+        for (long pass = 0; pass < (serial ? count : 1) && rc == 0; pass++) {
+            long first = serial ? pass : 0;
+            long last  = serial ? pass + 1 : count;
+            for (uint64_t off = 0; off < bytes_each && rc == 0; off += chunk) {
+                size_t n = (bytes_each - off < chunk)
+                         ? (size_t)(bytes_each - off) : chunk;
+                for (long i = first; i < last && rc == 0; i++) {
+                    size_t w = 0;
+                    memset(pattern, 'A' + (int)(i % 26), n);
+                    r = ext4b_write(dev, inos[i], off, pattern, n, &w);
+                    if (r != 0) {
+                        fprintf(stderr, "interleave: %s\n", ext4b_strerror(r));
+                        rc = 1; break;
+                    }
+                    if (w != n) {
+                        fprintf(stderr, "interleave: short write (%zu of %zu)\n",
+                                w, n);
+                        rc = 1; break;
+                    }
+                    total += w;
+                }
+            }
+        }
+        free(inos); free(pattern);
+        if (rc == 0)
+            printf("interleave %s: %ld file(s), %llu bytes each, "
+                   "%zu-byte writes, %llu bytes total\n",
+                   serial ? "serial" : "round", count,
+                   (unsigned long long)bytes_each, chunk,
+                   (unsigned long long)total);
 
     } else if (strcmp(cmd, "rm") == 0) {
         if (argc < 4) { fprintf(stderr, "rm needs a path\n"); rc = 2; return rc; }
@@ -1239,6 +1335,12 @@ int main(int argc, char **argv)
             "  write <path> <text>     write text at offset 0\n"
             "  put <path> <file> [n]   copy a host file in, n bytes per write\n"
             "  append <path> <text>    append text at end of file\n"
+            "  interleave <n> <MiB> [chunk-KiB] [round|serial]\n"
+            "                          write n files of MiB each, either a\n"
+            "                          chunk at a time round-robin or one\n"
+            "                          file after another -- the same bytes\n"
+            "                          in two allocation orders, to measure\n"
+            "                          what interleaving costs in extents\n"
             "  script <file>           run one command per line, all inside\n"
             "                          a single mount ('-' reads stdin)\n"
             "  rm <path>               remove a file or empty directory\n"
