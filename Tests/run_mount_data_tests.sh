@@ -102,11 +102,21 @@ remount() {  # remount <image>
 # that both an evenly-dividing volume and one with a short last group get
 # exercised: an overhanging free range is only mis-walked when the last group
 # is partial, which is how one bug stayed invisible until the fixture changed.
-make_volume() {  # make_volume <image> <blocks>
-    rm -f "$1"
-    python3 -c "open('$1','wb').truncate($2 * 4096)"
-    "$DUMP" "$1" format 4 4096 MOUNTDATA >/dev/null 2>&1
+make_volume() {  # make_volume <image> <blocks> [generation] [block size]
+    local img="$1" blocks="$2" gen="${3:-4}" bs="${4:-4096}"
+    rm -f "$img"
+    python3 -c "open('$img','wb').truncate($blocks * $bs)"
+    "$DUMP" "$img" format "$gen" "$bs" MOUNTDATA >/dev/null 2>&1
 }
+
+# Blocks per group is the number of bits in one bitmap block, so it follows the
+# block size: 32768 at 4 KiB, 8192 at 1 KiB. A "partial last group" fixture has
+# to be built from the right one -- get it wrong and the volume divides evenly,
+# which tests nothing and looks identical from the outside. That is exactly how
+# the out-of-range free bug stayed hidden until a fixture changed.
+blocks_per_group() { echo $(( $1 * 8 )); }
+even_groups()   { echo $(( 32 * $(blocks_per_group "$1") )); }
+partial_group() { echo $(( 32 * $(blocks_per_group "$1") + 5000 )); }
 
 # ------------------------------------------------------------------- cells --
 
@@ -118,6 +128,13 @@ make_volume() {  # make_volume <image> <blocks>
 # uses before every large copy, which takes a different branch again --
 # ext4_bridge.c writes into the still-unwritten extent and marks it written
 # afterwards, skipping the zeroing pass. That branch had no test at all.
+#
+# The two plain tail-* rows carry the same partial-tail shape WITHOUT
+# preallocation, which is the only way it reaches ext2 and ext3: every
+# prealloc row is skipped there, and without these the generations using
+# indirect mapping would have been tested on five block-aligned sizes and a
+# single sub-block file -- missing the exact shape that caused the worst bug
+# found this week, in the one path that has never been mounted.
 #
 # The prealloc-tail rows exist because every size above is either sub-block or
 # an exact multiple of 4096, and that omission hid a live data-corruption bug
@@ -136,6 +153,8 @@ eight-megabytes|8388608|
 preallocated-1m|1048576|--prealloc
 preallocated-8m|8388608|--prealloc
 preallocated-64m|67108864|--prealloc
+tail-131313|131313|
+tail-3000001|3000001|
 prealloc-tail-4097|4097|--prealloc
 prealloc-tail-5000|5000|--prealloc
 prealloc-tail-131313|131313|--prealloc
@@ -144,12 +163,20 @@ prealloc-tail-3000001|3000001|--prealloc
 EOF
 )
 
-run_geometry() {  # run_geometry <label> <blocks>
-    local label="$1" blocks="$2"
-    local img="$WORK/$label.img"
-    echo "$label volume ($blocks blocks)"
+# Preallocation needs extents, and ext2/ext3 do not have them -- their files use
+# indirect block mapping. So the --prealloc rows do not apply there; the
+# question "what does F_PREALLOCATE do on an indirect file" gets its own
+# assertion below rather than being smuggled in as a silent skip.
+case_applies() {  # case_applies <generation> <flags>
+    [ "$1" -ge 4 ] || [ -z "$2" ]
+}
 
-    make_volume "$img" "$blocks"
+run_geometry() {  # run_geometry <label> <blocks> [generation] [block size]
+    local label="$1" blocks="$2" gen="${3:-4}" bs="${4:-4096}"
+    local img="$WORK/$label.img"
+    echo "$label volume ($blocks blocks, ext$gen, ${bs}-byte blocks)"
+
+    make_volume "$img" "$blocks" "$gen" "$bs"
     attach_and_mount "$img"
 
     local seed=1000
@@ -157,6 +184,7 @@ run_geometry() {  # run_geometry <label> <blocks>
     while IFS='|' read -r name bytes flags; do
         [ -z "$name" ] && continue
         seed=$((seed + 1))
+        case_applies "$gen" "$flags" || continue
         if ! out=$($DATA write "$MNT/$name.bin" "$bytes" "$seed" $flags 2>&1); then
             bad "$label: writing $name" "$out"
             continue
@@ -171,6 +199,7 @@ run_geometry() {  # run_geometry <label> <blocks>
     while IFS='|' read -r name bytes flags; do
         [ -z "$name" ] && continue
         seed=$((seed + 1))
+        case_applies "$gen" "$flags" || continue
         if out=$($DATA verify "$MNT/$name.bin" "$bytes" "$seed" 2>&1); then
             :
         else
@@ -227,6 +256,7 @@ run_geometry() {  # run_geometry <label> <blocks>
     local ofail=0 checked=0
     while IFS='|' read -r name bytes flags; do
         [ -z "$name" ] && continue
+        if ! case_applies "$gen" "$flags"; then seed=$((seed + 1)); continue; fi
         "$DUMP" "$img" cat "/$name.bin" > "$WORK/offline.bin" 2>/dev/null
         if ! out=$($DATA verify "$WORK/offline.bin" "$bytes" "$seed" 2>&1); then
             bad "$label: $name reads correctly offline through the core" "$out"
@@ -252,7 +282,6 @@ probe
 ls /
 stat /one-megabyte.bin
 cat /one-megabyte.bin
-extents /one-megabyte.bin
 xattr /one-megabyte.bin
 df
 groups
@@ -266,6 +295,19 @@ ROVERBS
             "failed:$ro_failed"
     fi
 
+    # --- what preallocation does where there are no extents ----------------
+    if [ "$gen" -lt 4 ]; then
+        attach_and_mount "$img"
+        if "$DATA" write "$MNT/prealloc-probe.bin" 131313 4242 --prealloc \
+               >/dev/null 2>&1; then
+            bad "$label: F_PREALLOCATE is refused where extents do not exist" \
+                "it was accepted; an indirect file cannot carry an unwritten range"
+        else
+            ok "$label: F_PREALLOCATE is refused where extents do not exist"
+        fi
+        detach_volume
+    fi
+
     # --- structure --------------------------------------------------------
     if out=$(e2fsck -fn "$img" 2>&1); then
         ok "$label: e2fsck finds nothing to repair"
@@ -275,9 +317,97 @@ ROVERBS
 }
 
 # 32 groups exactly, and 33 groups with the last holding 5000 of 32768 blocks.
-run_geometry "even-groups"   $((32 * 32768))
+run_geometry "even-groups"   "$(even_groups 4096)"
 echo ""
-run_geometry "partial-group" $((32 * 32768 + 5000))
+run_geometry "partial-group" "$(partial_group 4096)"
+
+# Small blocks. Every mounted test in this driver's life has run at 4096, so
+# none of the arithmetic that scales with block size -- blocks per group, the
+# bits in a bitmap, the offset within a block a partial write lands at -- has
+# ever been exercised through a mount. 1024 is the smallest ext4 allows and the
+# one where those numbers differ most.
+echo ""
+run_geometry "even-1k"    "$(even_groups 1024)"   4 1024
+echo ""
+run_geometry "partial-1k" "$(partial_group 1024)" 4 1024
+
+# The generations without extents. EXT2_SUPPORTED_FINCOM and
+# EXT3_SUPPORTED_FINCOM do not include EXT4_FINCOM_EXTENTS, so files here use
+# indirect block mapping -- a separate implementation with its own branches in
+# the shim, and until now no mounted coverage at all. Every bug found in this
+# driver this week was in the extent path.
+echo ""
+run_geometry "ext3-4k" "$(partial_group 4096)" 3 4096
+echo ""
+run_geometry "ext2-1k" "$(partial_group 1024)" 2 1024
+
+# --- a directory big enough to need an htree --------------------------------
+# A directory outgrows a single block and ext4 builds a hash tree for it.
+# ext4_dir_idx.c owns seven of the twenty-two checksum sites in the tree, and
+# nothing mounted has ever built one: every directory in these suites holds a
+# handful of entries. The field corpus put 407 files in one directory and
+# worked, which is evidence but not a test.
+#
+# readdir and lookup are different paths -- listing walks the leaf blocks in
+# order, resolving a name descends the index -- so this checks both, and checks
+# them cold.
+echo ""
+echo "a directory with an htree"
+HTIMG="$WORK/htree.img"
+HTN=3000
+make_volume "$HTIMG" "$(partial_group 4096)"
+attach_and_mount "$HTIMG"
+mkdir -p "$MNT/many"
+i=0
+while [ "$i" -lt "$HTN" ]; do
+    i=$((i + 1))
+    printf 'x' > "$MNT/many/entry-$(printf '%05d' $i).txt"
+done
+assert_mounted "after filling the directory"
+remount "$HTIMG"
+
+listed=$(ls "$MNT/many" | wc -l | tr -d ' ')
+if [ "$listed" = "$HTN" ]; then
+    ok "a directory of $HTN entries lists them all after a remount"
+else
+    bad "a directory of $HTN entries lists them all after a remount" \
+        "listed $listed"
+fi
+
+# Every name resolved individually, which is the index rather than the listing.
+missing=0; i=0
+while [ "$i" -lt "$HTN" ]; do
+    i=$((i + 1))
+    [ -f "$MNT/many/entry-$(printf '%05d' $i).txt" ] || missing=$((missing + 1))
+done
+if [ "$missing" = 0 ]; then
+    ok "every one of the $HTN names resolves by lookup, not just by listing"
+else
+    bad "every one of the $HTN names resolves by lookup" "$missing did not"
+fi
+
+# Removing half exercises the index the other way.
+i=0
+while [ "$i" -lt "$HTN" ]; do
+    i=$((i + 2))
+    rm -f "$MNT/many/entry-$(printf '%05d' $i).txt"
+done
+assert_mounted "after removing half the entries"
+remount "$HTIMG"
+left=$(ls "$MNT/many" | wc -l | tr -d ' ')
+if [ "$left" = "$((HTN / 2))" ]; then
+    ok "removing half leaves exactly the other half"
+else
+    bad "removing half leaves exactly the other half" "found $left"
+fi
+detach_volume
+
+if out=$(e2fsck -fn "$HTIMG" 2>&1); then
+    ok "e2fsck finds nothing to repair in the hashed directory"
+else
+    bad "e2fsck finds nothing to repair in the hashed directory" \
+        "$(printf '%s' "$out" | head -4 | tr '\n' ' ')"
+fi
 
 # --- the real copy path, not a synthetic one --------------------------------
 # `cp` goes through copyfile(3), which is what Finder uses and what the field
