@@ -125,7 +125,11 @@ while :; do
         printf "FAIL  (%ds)\n" "$took"
         echo ""
         echo "the failing stages:"
-        grep -iE "^\s*(FAIL|✗)|FAILED" "$log" | head -20
+        # Deliberately not case-insensitive on the word alone: "failed: 0" is
+        # what a PASSING suite prints, and matching it buried the one line
+        # that mattered under twenty green ones the first time this fired.
+        grep -nE "(^|[[:space:]])FAIL([[:space:]]|$)|FAILURES PRESENT|failed: [1-9]|could not |RESULT: FAIL" \
+            "$log" | head -20
         failed_at=$round
         report
     fi

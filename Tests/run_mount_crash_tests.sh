@@ -491,10 +491,26 @@ set_flag() {  # set_flag <inode> <bit>
 set_flag "$FROZEN_INO" 0x10
 set_flag "$APPEND_INO" 0x20
 
-if ! mount -F -t ext4 "${DEV#/dev/}" "$MNT" 2>/dev/null; then
-  note "  could not remount after setting the flags"
-  note "  everything below would measure the boot disk, so stopping here"
-  exit 1
+# Say WHY if it will not come back. This used to swallow the error and print
+# "could not remount", which is how a soak round failed here with nothing in
+# any log to explain it -- the driver had not been reached at all, and the one
+# artifact that would have said so went to /dev/null. The suite that exists to
+# prove errors surface was discarding its own.
+#
+# The retry is for the shape this actually failed in: debugfs has just written
+# to the device through a second descriptor, and the remount can arrive while
+# that is still settling. One retry, announced -- a mount that needed a second
+# attempt is worth seeing, and a mount that needs a third is a real problem.
+REMOUNT_ERR=""
+if ! REMOUNT_ERR=$(mount -F -t ext4 "${DEV#/dev/}" "$MNT" 2>&1); then
+  sleep 2
+  if REMOUNT_ERR=$(mount -F -t ext4 "${DEV#/dev/}" "$MNT" 2>&1); then
+    note "  (the remount needed a second attempt; the first said: ${REMOUNT_ERR:-nothing})"
+  else
+    note "  could not remount after setting the flags: ${REMOUNT_ERR:-no error text}"
+    note "  everything below would measure the boot disk, so stopping here"
+    exit 1
+  fi
 fi
 assert_mounted "after setting the chattr flags"
 
