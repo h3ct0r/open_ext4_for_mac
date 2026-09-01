@@ -759,6 +759,7 @@ static void walk_dir(walk_ctx *w, uint32_t ino, const char *path)
 
 static int cmd_cat(ext4b_device *dev, const char *path);
 static int cmd_extents(ext4b_device *dev, const char *path);
+static int cmd_fragstat(ext4b_device *dev, const char *path);
 
 static uint32_t resolve(ext4b_device *dev, const char *path, ext4b_item_type *t)
 {
@@ -1332,6 +1333,9 @@ int main(int argc, char **argv)
             "  stat <path>        show inode attributes\n"
             "  cat <path>         write file contents to stdout\n"
             "  extents <path>     show the logical->physical extent map\n"
+        "  fragstat [path]    how fragmented everything under path is:\n"
+        "                     extents per file and bytes per extent, which\n"
+        "                     is what e2fsck's %% non-contiguous cannot say\n"
             "  xattr <path>       list extended attributes\n"
             "  df                 free/available space as the OS is told it\n"
             "  groups [bad]       per-group free counts the allocator uses\n"
@@ -1742,6 +1746,9 @@ int main(int argc, char **argv)
         if (argc < 4) { fprintf(stderr, "extents needs a path\n"); rc = 2; goto unmount; }
         rc = cmd_extents(dev, argv[3]);
 
+    } else if (strcmp(cmd, "fragstat") == 0) {
+        rc = cmd_fragstat(dev, argc >= 4 ? argv[3] : "/");
+
     } else if (strcmp(cmd, "xattr") == 0) {
         if (argc < 4) { fprintf(stderr, "xattr needs a path\n"); rc = 2; goto unmount; }
         uint32_t ino = resolve(dev, argv[3], NULL);
@@ -2000,6 +2007,156 @@ static int cmd_cat(ext4b_device *dev, const char *path)
         fwrite(buf, 1, got, stdout);
         off += got;
     }
+    return 0;
+}
+
+/* ------------------------------------------------- fragmentation survey -- */
+/*
+ * How fragmented is everything on this volume, really?
+ *
+ * e2fsck reports a "% non-contiguous", and that number is a file COUNT: any
+ * file with more than one extent is in it. A corpus where every file arrived
+ * as two clean halves reports 100%, and so does one where every file arrived
+ * as two hundred pieces. It cannot tell an allocator that has been fixed from
+ * one that has not -- which is exactly what it failed to do here: a field
+ * corpus read 89.2% before the allocator reserved space ahead of writes and
+ * 89.3% after, while the same workload offline went from 34 extents per file
+ * to 3.
+ *
+ * So measure the thing that moves. Average bytes per extent says how long a
+ * run the medium actually gets to read; the distribution says whether a few
+ * bad files or all of them; and the worst file is where to look next.
+ */
+typedef struct {
+    ext4b_device      *dev;
+    unsigned long      files;        /* regular files with at least one block */
+    unsigned long long bytes;
+    unsigned long long extents;
+    unsigned long      hist[5];      /* 1, 2-4, 5-16, 17-64, 65+ */
+    unsigned long      worst;
+    unsigned long long worst_bytes;
+    char               worst_path[512];
+    int                depth;
+} frag_ctx;
+
+/* Every mapped extent of one inode, holes excluded.
+ *
+ * Mapped in windows rather than one call: a badly fragmented file can have
+ * more extents than any fixed buffer, and silently counting the first 256 of
+ * them would understate precisely the files this exists to find. */
+static unsigned long count_extents(ext4b_device *dev, uint32_t ino,
+                                   uint64_t span)
+{
+    ext4b_extent ext[256];
+    unsigned long total = 0;
+    uint64_t at = 0;
+
+    while (at < span) {
+        size_t n = 0;
+        if (ext4b_map_extents(dev, ino, at, span - at, ext,
+                              sizeof ext / sizeof ext[0], &n) != 0 || n == 0)
+            break;
+        uint64_t end = at;
+        for (size_t i = 0; i < n; i++) {
+            if (!ext[i].is_hole)
+                total++;
+            uint64_t e = ext[i].logical_offset + ext[i].length;
+            if (e > end)
+                end = e;
+        }
+        if (end <= at)          /* no progress: stop rather than spin */
+            break;
+        at = end;
+    }
+    return total;
+}
+
+static void frag_walk(frag_ctx *f, uint32_t ino, const char *path);
+
+static bool on_frag_dirent(void *ctx, const char *name, size_t name_len,
+                           uint32_t ino, ext4b_item_type type,
+                           uint64_t next_cookie)
+{
+    (void)next_cookie;
+    frag_ctx *f = ctx;
+
+    if ((name_len == 1 && name[0] == '.') ||
+        (name_len == 2 && name[0] == '.' && name[1] == '.'))
+        return true;
+
+    char child[4096];
+    /* The parent path is not carried down: only the worst file's name is
+     * printed, and one name is worth the copy. */
+    snprintf(child, sizeof child, "%.*s", (int)name_len, name);
+
+    if (type == EXT4B_TYPE_DIR) {
+        if (f->depth < 64) {
+            f->depth++;
+            frag_walk(f, ino, child);
+            f->depth--;
+        }
+        return true;
+    }
+    if (type != EXT4B_TYPE_FILE)
+        return true;
+
+    ext4b_attrs a;
+    if (ext4b_getattr(f->dev, ino, &a) != 0)
+        return true;
+
+    uint64_t span = a.size > a.alloc_size ? a.size : a.alloc_size;
+    if (span == 0)
+        return true;
+
+    unsigned long n = count_extents(f->dev, ino, span);
+    if (n == 0)
+        return true;
+
+    f->files++;
+    f->bytes   += a.size;
+    f->extents += n;
+    f->hist[n == 1 ? 0 : n <= 4 ? 1 : n <= 16 ? 2 : n <= 64 ? 3 : 4]++;
+    if (n > f->worst) {
+        f->worst = n;
+        f->worst_bytes = a.size;
+        snprintf(f->worst_path, sizeof f->worst_path, "%s", child);
+    }
+    return true;
+}
+
+static void frag_walk(frag_ctx *f, uint32_t ino, const char *path)
+{
+    (void)path;
+    int r = ext4b_readdir(f->dev, ino, 0, on_frag_dirent, f);
+    if (r != 0 && r != ENOENT)
+        fprintf(stderr, "  !! readdir failed: %s\n", ext4b_strerror(r));
+}
+
+static int cmd_fragstat(ext4b_device *dev, const char *path)
+{
+    uint32_t ino = resolve(dev, path ? path : "/", NULL);
+    if (!ino) return 1;
+
+    frag_ctx f;
+    memset(&f, 0, sizeof f);
+    f.dev = dev;
+    frag_walk(&f, ino, path ? path : "/");
+
+    if (f.files == 0) {
+        printf("fragstat: no files with data under %s\n", path ? path : "/");
+        return 0;
+    }
+
+    printf("fragstat: %lu file(s), %.1f MB, %llu extent(s)\n",
+           f.files, (double)f.bytes / 1048576.0,
+           (unsigned long long)f.extents);
+    printf("  %.1f extent(s) per file, %.0f KB per extent\n",
+           (double)f.extents / (double)f.files,
+           (double)f.bytes / (double)f.extents / 1024.0);
+    printf("  1: %lu   2-4: %lu   5-16: %lu   17-64: %lu   65+: %lu\n",
+           f.hist[0], f.hist[1], f.hist[2], f.hist[3], f.hist[4]);
+    printf("  worst: %s, %lu extent(s) for %.1f MB\n",
+           f.worst_path, f.worst, (double)f.worst_bytes / 1048576.0);
     return 0;
 }
 

@@ -295,12 +295,42 @@ round-robin gives 34. Whole-file preallocation immunises a file completely --
 which is why `cp(1)`, which does not preallocate but does finish one file at a
 time, is also unaffected.
 
+Finder, for its part, does not preallocate at all here. That was worth
+checking rather than assuming, and the check is now permanent: the `io`
+category logs a `preallocate: N calls over M file(s)` line every 64 requests,
+and a scripted Finder copy of 120 files produced no line at all. Calls per
+file is the number to read -- one per file means the copier knows the size up
+front and the allocation is one run; many per file means it is asking
+incrementally, and with several files in flight every increment lands
+somewhere else.
+
+**Do not measure this with e2fsck's `% non-contiguous`.** That number is a
+file *count*: any file with more than one extent is in it. A corpus where
+every file arrived as two clean halves reports 100%, and so does one where
+every file arrived as two hundred pieces, so it cannot tell a fixed allocator
+from a broken one. It did not: the field corpus read 89.2% before writes
+reserved space ahead of themselves and 89.3% after, while the same workload
+measured properly went from 978 KB per extent to 7282 KB.
+
+`ext4dump <image|node> fragstat [path]` reports the number that moves --
+extents per file, KB per extent, the distribution, and the worst file.
+
 **The fix is to allocate ahead**, which is what whole-file preallocation was
 doing by accident. A bulk write that extends a file now takes an unwritten
 run beyond what it is about to write, and the driver remembers how far each
 inode's run reaches, so the next write to that file continues inside it
-whatever else allocated in between. Eight 16 MiB files interleaved at 1 MiB
-went from 18 extents each to 3; `make test-fragmentation` is the measurement.
+whatever else allocated in between. Eight 32 MiB files interleaved a megabyte
+at a time:
+
+| | extents per file | KB per extent |
+|---|---|---|
+| before | 33.5 | **978** |
+| after | 4.5 | **7282** |
+
+978 KB per extent is one extent per write call, which is exactly what the
+field corpus looked like. It works through a real mount too, which is not the
+same test: eight 100 MB files written concurrently by separate processes come
+out at 11 extents each. `make test-fragmentation` is the regression.
 
 Three things bound it, and they matter more than the extent count:
 

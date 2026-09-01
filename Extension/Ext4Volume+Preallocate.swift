@@ -5,6 +5,7 @@
 
 import Foundation
 import FSKit
+import os
 import Ext4Core
 
 /// `fcntl(F_PREALLOCATE)`, answered the way ext4 answers it: UNWRITTEN
@@ -20,6 +21,23 @@ extension Ext4Volume: FSVolume.PreallocateOperations {
         guard let ext4Item = item as? Ext4Item else { throw Ext4Error.invalid }
         try requireWritable()
         guard length > 0 else { return 0 }
+
+        // How macOS asks for space decides the layout, and until this meter
+        // existed nobody knew how it asks.
+        //
+        // The interesting number is calls-per-file. One call per file means
+        // the copier knows the size up front and the allocation is one run;
+        // many calls per file means it is asking incrementally, and with
+        // several files in flight every increment lands in a different place.
+        // Measured offline, both shapes on the same eight 32 MiB files: two
+        // extents each when preallocated whole, thirty-four when preallocated
+        // a megabyte at a time round-robin. That is the difference between a
+        // corpus at 2% non-contiguous and one at 89%, and the log had no way
+        // to say which was happening on real media.
+        Self.preallocRequests.record(inode: ext4Item.inode, length)
+        if let line = Self.preallocRequests.due() {
+            Ext4Log.io.info("\(line, privacy: .public)")
+        }
 
         // The SDK is explicit: FromEOF "is currently set for all
         // preallocateSpace calls", and with it the offset is to be ignored --
@@ -47,4 +65,52 @@ extension Ext4Volume: FSVolume.PreallocateOperations {
         ext4Item.invalidate()
         return allocated
     }
+}
+
+
+/// Shape of the preallocation requests arriving from the kernel.
+///
+/// Reports on a call count rather than a byte total, unlike the write meter:
+/// preallocations are few and what matters about them is how many there are
+/// per file, not how many megabytes they cover.
+private struct PreallocMeter {
+    private let lock = OSAllocatedUnfairLock(initialState: State())
+    private struct State {
+        var calls = 0
+        var reported = 0
+        var bytes = 0
+        var smallest = Int.max
+        var largest = 0
+        var inodes: Set<UInt32> = []
+    }
+
+    func record(inode: UInt32, _ n: Int) {
+        lock.withLock { s in
+            s.calls += 1
+            s.bytes += n
+            if n < s.smallest { s.smallest = n }
+            if n > s.largest { s.largest = n }
+            // Bounded: a copy of a few thousand files is a few thousand
+            // integers, and the set is what makes calls-per-file readable.
+            if s.inodes.count < 20_000 { s.inodes.insert(inode) }
+        }
+    }
+
+    func due() -> String? {
+        lock.withLock { s -> String? in
+            guard s.calls - s.reported >= 64 else { return nil }
+            s.reported = s.calls
+            let files = max(s.inodes.count, 1)
+            return String(format:
+                "preallocate: %d calls over %d file(s) (%.1f per file), "
+                + "%.0f MB, %d..%d KB",
+                s.calls, s.inodes.count, Double(s.calls) / Double(files),
+                Double(s.bytes) / 1_048_576.0,
+                s.smallest / 1024, s.largest / 1024)
+        }
+    }
+}
+
+extension Ext4Volume {
+    fileprivate static let preallocRequests = PreallocMeter()
 }
