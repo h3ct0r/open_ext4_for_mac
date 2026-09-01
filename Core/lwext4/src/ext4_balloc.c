@@ -300,15 +300,28 @@ int ext4_balloc_free_blocks(struct ext4_inode_ref *inode_ref,
 	/* Compute indexes */
 	uint32_t bg_last = ext4_balloc_get_bgid_of_block(sb, first + count - 1);
 
-	if (!ext4_sb_feature_incom(sb, EXT4_FINCOM_FLEX_BG)) {
-		/*It is not possible without flex_bg that blocks are continuous
-		 * and and last block belongs to other bg.*/
-		if (bg_last != bg_first) {
-			ext4_dbg(DEBUG_BALLOC, DBG_WARN "FLEX_BG: disabled & "
-				"bg_last: %"PRIu32" bg_first: %"PRIu32"\n",
-				bg_last, bg_first);
-		}
-	}
+	/*
+	 * A range that crosses a block group is normal here, and the warning
+	 * that used to stand in this spot was wrong.
+	 *
+	 * Its premise was that without flex_bg a group begins with its own
+	 * bitmaps and inode table, so no contiguous run of data blocks can
+	 * reach into the next group. That holds for mke2fs, which puts the
+	 * block bitmap at the first block of a group that carries no
+	 * superblock backup. It does not hold for the volumes this driver
+	 * formats: every group leaves three blocks free at its head, backup or
+	 * not, and the allocator hands them out like any others.
+	 *
+	 * Measured rather than assumed. On a 256 MB volume with 1 KiB blocks,
+	 * an extent runs from block 96318 for 1990 blocks, three blocks into
+	 * group 12 -- and those three hold file data, e2fsck reports no
+	 * errors, and the loop below already walks bg_first..bg_last freeing
+	 * each group's share. The only thing wrong was the diagnostic.
+	 *
+	 * It stayed invisible until writes began reserving space ahead of
+	 * themselves, because a run has to be long to reach a boundary at all.
+	 * Patch 0059 is what made it audible, which is the point of 0059.
+	 */
 
 	/* Load block group reference */
 	struct ext4_block_group_ref bg_ref;
