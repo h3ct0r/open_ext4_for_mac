@@ -21,6 +21,7 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$ROOT/Tests/lib.sh"
+. "$ROOT/Tests/mount_retry.sh"
 
 export PATH="/opt/homebrew/opt/e2fsprogs/sbin:/opt/homebrew/opt/e2fsprogs/bin:$PATH"
 
@@ -53,7 +54,9 @@ attach_and_mount() {  # attach_and_mount <image>
           | head -1 | awk '{print $1}')
     [ -n "$DEV" ] || { note "could not attach $1"; exit 1; }
     local out
-    if ! out=$(mount -F -t ext4 "${DEV#/dev/}" "$MNT" 2>&1); then
+    # remount() below unmounts and re-attaches before calling this, which is
+    # exactly the shape DiskArbitration's re-probe can lose.
+    if ! out=$(mount_ext4_retry "${DEV#/dev/}" "$MNT" 2>/dev/null); then
         if printf '%s' "$out" | grep -q "is disabled"; then
             note "the extension is installed but not enabled."
             note "System Settings > General > Login Items & Extensions"

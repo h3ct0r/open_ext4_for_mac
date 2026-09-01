@@ -57,6 +57,8 @@ ok()   { PASS=$((PASS+1)); note "  ok    $1"; }
 bad()  { FAIL=$((FAIL+1)); note "  FAIL  $1"; [ $# -gt 1 ] && note "        $2"; return 0; }
 DEV=""
 
+. "$(dirname "$0")/mount_retry.sh"
+
 # --------------------------------------------------------------- teardown --
 # The driver must never be left frozen: a stopped extension wedges the mount
 # and every process that touches it, including this script's own cleanup.
@@ -76,10 +78,12 @@ cleanup() {
 force_recover() {
   note "  recovering: killing the extension to release the stuck volume"
   pkill -9 -f "$EXT_PATTERN" 2>/dev/null
-  local deadline=$(( SECONDS + 30 ))
-  while [ "$SECONDS" -lt "$deadline" ]; do
+  # Ticks, not wall-clock, for the reason stage 0 documents below.
+  local waited=0
+  while [ "$waited" -lt 30 ]; do
     mount | grep -q "$(basename "$MNT") " || break
     sleep 1
+    waited=$(( waited + 1 ))
   done
   umount "$MNT" 2>/dev/null
   [ -n "$DEV" ] && hdiutil detach "$DEV" -force >/dev/null 2>&1
@@ -142,7 +146,7 @@ mount_volume() {
   [ -n "$DEV" ] || { note "could not attach the image"; exit 1; }
   mkdir -p "$MNT"
   local out
-  if ! out=$(mount -F -t ext4 "${DEV#/dev/}" "$MNT" 2>&1); then
+  if ! out=$(mount_ext4_retry "${DEV#/dev/}" "$MNT" 2>/dev/null); then
     # Installing the app does not enable the extension: macOS requires the user
     # to approve it, and reinstalling or changing Info.plist revokes that
     # approval. The module is registered but inert until they do.
@@ -230,10 +234,19 @@ done
   done ) &
 
 # A wedged volume never returns, so the pass condition is that it finishes.
-CONC_DEADLINE=$(( SECONDS + 120 ))
+#
+# Counted in sleeps rather than in $SECONDS, and the difference is not
+# academic: a wall-clock budget expires the instant a laptop wakes, and the
+# queued readers then all resume at once at high CPU, which is indistinguishable
+# from the wedge this cell exists to catch. It cost a soak round exactly that
+# way. Counting ticks makes a system sleep cost one tick. Same 120 s on a
+# machine that is awake, and the same shape run_full_validation.sh and
+# with_deadline() in the kill-recovery suite already use.
+CONC_WAITED=0
 while jobs -r | grep -q .; do
-  if [ "$SECONDS" -gt "$CONC_DEADLINE" ]; then break; fi
+  [ "$CONC_WAITED" -ge 120 ] && break
   sleep 1
+  CONC_WAITED=$(( CONC_WAITED + 1 ))
 done
 
 WEDGED=0
@@ -497,20 +510,17 @@ set_flag "$APPEND_INO" 0x20
 # artifact that would have said so went to /dev/null. The suite that exists to
 # prove errors surface was discarding its own.
 #
-# The retry is for the shape this actually failed in: debugfs has just written
-# to the device through a second descriptor, and the remount can arrive while
-# that is still settling. One retry, announced -- a mount that needed a second
-# attempt is worth seeing, and a mount that needs a third is a real problem.
-REMOUNT_ERR=""
-if ! REMOUNT_ERR=$(mount -F -t ext4 "${DEV#/dev/}" "$MNT" 2>&1); then
-  sleep 2
-  if REMOUNT_ERR=$(mount -F -t ext4 "${DEV#/dev/}" "$MNT" 2>&1); then
-    note "  (the remount needed a second attempt; the first said: ${REMOUNT_ERR:-nothing})"
-  else
-    note "  could not remount after setting the flags: ${REMOUNT_ERR:-no error text}"
-    note "  everything below would measure the boot disk, so stopping here"
-    exit 1
-  fi
+# The retry lives in Tests/mount_retry.sh, and the transient it covers was
+# already documented in run_newfs_tests.sh: unmounting prods DiskArbitration
+# into re-examining the device, and a mount issued into that re-probe loses.
+# This suite simply never learned it.
+if REMOUNT_ERR=$(mount_ext4_retry "${DEV#/dev/}" "$MNT" 2>/dev/null); then
+  [ "${MOUNT_RETRY_ATTEMPTS:-1}" -gt 1 ] \
+    && note "  (the remount after setting the flags needed ${MOUNT_RETRY_ATTEMPTS} attempts)"
+else
+  note "  could not remount after setting the flags: ${REMOUNT_ERR:-no error text}"
+  note "  everything below would measure the boot disk, so stopping here"
+  exit 1
 fi
 assert_mounted "after setting the chattr flags"
 
@@ -564,8 +574,11 @@ set_flag "$FROZEN_INO" 0
 set_flag "$APPEND_INO" 0
 debugfs -w -R "sif <$FROZEN_INO> flags 0x80000" "$DEV" >/dev/null 2>&1
 debugfs -w -R "sif <$APPEND_INO> flags 0x80000" "$DEV" >/dev/null 2>&1
-if ! mount -F -t ext4 "${DEV#/dev/}" "$MNT" 2>/dev/null; then
-  note "  could not remount after clearing the flags"
+if REMOUNT_ERR=$(mount_ext4_retry "${DEV#/dev/}" "$MNT" 2>/dev/null); then
+  [ "${MOUNT_RETRY_ATTEMPTS:-1}" -gt 1 ] \
+    && note "  (the remount after clearing the flags needed ${MOUNT_RETRY_ATTEMPTS} attempts)"
+else
+  note "  could not remount after clearing the flags: ${REMOUNT_ERR:-no error text}"
   exit 1
 fi
 assert_mounted "after clearing the chattr flags"

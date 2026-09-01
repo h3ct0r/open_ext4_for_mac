@@ -42,6 +42,7 @@ MNT="/tmp/ext4-mount-luks"
 # Seeded contents rather than checksums, so a difference reports its first
 # wrong byte and alignment instead of "the hash differs".
 DATA="$ROOT/build/bin/datafile"
+. "$ROOT/Tests/mount_retry.sh"
 DOCKER_IMAGE="ext4luks:cryptsetup-attr"
 
 BUNDLE_ID="dev.h3ct0r.ext4mac.Ext4FS"
@@ -326,7 +327,8 @@ round_trip() {  # round_trip <name> <uuid> <label>
   # that cannot fail. This is the one read in this suite that consults the
   # medium through the whole stack: unlock, decrypt, map, read.
   place_key "$uuid"
-  if attach "$WORK/$name.img" && mount -F -t ext4 "${DEV#/dev/}" "$MNT" 2>/dev/null; then
+  if attach "$WORK/$name.img" \
+     && mount_ext4_retry "${DEV#/dev/}" "$MNT" >/dev/null 2>&1; then
     local cold=""
     "$DATA" verify "$MNT/from-macos/tail.bin" 3000001 5551 >/dev/null 2>&1 \
       || cold="$cold tail.bin"

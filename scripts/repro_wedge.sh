@@ -18,6 +18,7 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="/opt/homebrew/opt/e2fsprogs/sbin:/opt/homebrew/opt/e2fsprogs/bin:$PATH"
+. "$ROOT/Tests/mount_retry.sh"
 
 ROUNDS="${1:-20}"
 WORK="$ROOT/build/wedge"
@@ -47,7 +48,13 @@ mount_fresh() {
     DEV=$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount \
           "$WORK/base.img" | head -1 | awk '{print $1}')
     [ -n "$DEV" ] || return 1
-    mount -F -t ext4 "${DEV#/dev/}" "$MNT" 2>/dev/null
+    local out
+    if ! out=$(mount_ext4_retry "${DEV#/dev/}" "$MNT" 2>/dev/null); then
+        # Say what went wrong. This script exists because the suite's
+        # recovery destroys evidence; discarding its own would be absurd.
+        echo "mount failed: ${out:-no error text}" >&2
+        return 1
+    fi
 }
 
 for round in $(seq 1 "$ROUNDS"); do
