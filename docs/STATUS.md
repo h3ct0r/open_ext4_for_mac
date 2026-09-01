@@ -1582,6 +1582,32 @@ long to leave it running: soaking overnight is dozens of rounds, not two.
 | date | clean rounds | notes |
 |---|---|---|
 | 2026-09-01 | 1 | 628 s, on the build that closed the fragmentation work |
+| 2026-09-01 | 7 | then **round 8 wedged** — see below |
+
+### What the first long soak found
+
+Seven rounds at ~630 s each, then round 8 stopped answering in stage 0 of
+`run_mount_crash_tests.sh`: concurrent readers and writers still running after
+120 s, and the extension still at 67% CPU three seconds after the load ended.
+The suite recovered by killing the extension, which is what it is built to do,
+and reported `stopped after stage 0`.
+
+That stage is the regression test for a specific wedge: FSKit issues volume
+operations concurrently, lwext4 has no internal locking, and when one entry
+escaped the serial executor -- `getAttributes` resolving `parentID` -- two
+kernel threads raced in the block cache, corrupted its LRU list and spun in
+`ext4_bcache_free` at 200% CPU with `umount` in uninterruptible wait.
+
+**Not yet attributed, and specifically not yet attributed to the allocator
+work of the same week.** Stage 0 writes only `echo`-sized files, far below the
+256 KiB threshold at which a write reserves space ahead of itself, so the
+reservation never fires there. 67% is also one spinning thread rather than
+two. What it is instead needs a `sample` of the stuck process, which is how
+the original was identified, and that needs a reproduction.
+
+The value of the number is not that it is 7. It is that seven clean rounds of
+everything did not find this and the eighth did, which is the entire argument
+for measuring elapsed time rather than assertion counts.
 
 ## Not yet done
 - A notification when a locked volume appears and the agent is not running;
