@@ -216,6 +216,9 @@ stage "5b. errors surface, not vanish" bash Tests/run_eio_tests.sh
 # A bitmap that fails its checksum: refused, and not rewritten over.
 stage "5c. checksums that act" bash Tests/run_csum_tests.sh
 
+# What interleaved allocation costs, and that the reservation gives it back.
+stage "5d. fragmentation" bash Tests/run_fragmentation_tests.sh
+
 if docker info >/dev/null 2>&1; then
   stage "6. LUKS containers" bash Tests/run_luks_tests.sh
   stage "7. crash consistency" bash Tests/run_crash_tests.sh

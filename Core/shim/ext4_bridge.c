@@ -55,6 +55,41 @@
  * a desktop volume needs far more to avoid thrashing metadata reads. */
 #define BRIDGE_BCACHE_BLOCKS 1024
 
+/*
+ * Allocating ahead.
+ *
+ * A bulk write asks the extent layer for exactly the blocks it is about to
+ * write, and macOS never hands us more than a megabyte at a time. When one
+ * file is being written that is fine -- the next request continues where the
+ * last one ended. When several are in flight, which is what a slow medium
+ * produces, each file's next request finds its goal taken by whichever file
+ * allocated in between, and every write call becomes its own extent. Measured
+ * with `ext4dump interleave`: eight 32 MiB files written a megabyte at a time
+ * are 2 extents each in sequence and 34 each interleaved.
+ *
+ * So ask for more than the write needs and leave the rest mapped past
+ * end-of-file, where the next write to that inode will find it already
+ * mapped. This is, in miniature, what ext4's mballoc inode preallocation
+ * does, and it comes with mballoc's obligation: the surplus has to go back.
+ *
+ * Three things bound it, because an allocator that reserves and forgets is a
+ * worse bug than the fragmentation it cures:
+ *
+ *   - only bulk writes reserve (EXT4B_RESERVE_TRIGGER), so a volume full of
+ *     small files never sees it at all;
+ *   - at most EXT4B_RESERVE_SLOTS inodes hold a reservation at once, and
+ *     taking the ninth slot returns the oldest -- so the space in flight is
+ *     capped at slots x ahead, not at the number of files being copied;
+ *   - unmount returns whatever is left.
+ *
+ * The ceiling is deliberately modest for the same reason: a reservation that
+ * is too large turns fragmentation of files into fragmentation of free space,
+ * which is worse on a volume that fills up.
+ */
+#define EXT4B_RESERVE_SLOTS    8       /* inodes that may hold one at once */
+#define EXT4B_RESERVE_TRIGGER  64      /* blocks in one write before reserving */
+#define EXT4B_RESERVE_AHEAD    2048    /* blocks to take beyond the write */
+
 /* How many mutations may share one journal transaction. See txn_finish.
  *
  * Sixteen, and the history matters, because this was sixteen once before and
@@ -173,6 +208,17 @@ void ext4b_trip_assert(void)
  * both sit above it. */
 static int txn_drain(ext4b_device *dev);
 
+/* Return every block held past end-of-file by the allocate-ahead table.
+ * Declared here for the same reason: unmount sits above the write path that
+ * defines it, and unmount is where the last reservations have to go back. */
+static int resv_drain(ext4b_device *dev, struct ext4_fs *fs);
+
+/* Drop an inode from that table without returning anything, for the paths
+ * that have already settled its blocks -- a truncate, a delete, an explicit
+ * preallocation. Declared here because several of them also sit above the
+ * write path. */
+static void resv_forget(ext4b_device *dev, uint32_t inode);
+
 /* =============================================== concurrent core entry == */
 /*
  * lwext4 has no internal locking. Its mount-point table, block cache and
@@ -286,6 +332,16 @@ struct ext4b_device {
     uint32_t txn_batch;
     bool     bcache_ready;
     bool     skip_orphan_cleanup;   /* tests only; see ext4b_set_orphan_cleanup */
+
+    /* Inodes currently holding blocks allocated ahead of what they have
+     * written, and the logical block each reservation reaches. See
+     * "Allocating ahead" above. An inode of 0 means the slot is free; the
+     * table is walked linearly because it is eight entries long. */
+    struct {
+        uint32_t inode;
+        uint32_t end_lblk;      /* first logical block NOT reserved */
+    } resv[EXT4B_RESERVE_SLOTS];
+    uint32_t resv_next;             /* round-robin eviction cursor */
 };
 
 /*
@@ -1148,11 +1204,26 @@ int ext4b_unmount(ext4b_device *dev)
      * reported. Four layers each dropped their own error here, and a stick
      * that failed its final write-back ejected "clean". */
     int r = EOK;
+    int step;
+
+    /* Before the transaction drain, so the trims it issues go into the same
+     * journal as everything else. Blocks allocated ahead of a write are an
+     * optimisation between one write and the next; nothing may outlive the
+     * mount that took them, or the volume ejects holding space no file uses
+     * and only e2fsck can explain it. */
+    if (!dev->read_only) {
+        struct ext4_fs *fs = bridge_fs(dev);
+        if (fs) {
+            step = resv_drain(dev, fs);
+            if (r == EOK)
+                r = step;
+        }
+    }
 
     /* Before the journal stops. A transaction still open here is a set of
      * mutations the caller was told had succeeded, and stopping the journal
      * underneath it discards them. */
-    int step = txn_drain(dev);
+    step = txn_drain(dev);
     if (r == EOK)
         r = step;
 
@@ -3055,6 +3126,12 @@ int ext4b_release_inode(ext4b_device *dev, uint32_t inode)
     if (inode < EXT4B_ROOT_INO)
         return EINVAL;
 
+    /* This inode is about to stop existing. A later eviction that tried to
+     * return its reservation would be reading a freed inode -- and if the
+     * number had been handed out again by then, trimming somebody else's
+     * file. */
+    resv_forget(dev, inode);
+
     /* One file deleted while open is the overwhelmingly common case, and it is
      * the head of the list. Only a middle entry has to come off before it is
      * freed -- see the ordering note above. */
@@ -3193,6 +3270,8 @@ int ext4b_unlink_ex(ext4b_device *dev,
             if (out_unreferenced)
                 *out_unreferenced = true;
         } else {
+            /* Gone for good: nothing may try to return blocks to it later. */
+            resv_forget(dev, child.index);
             ext4_inode_set_del_time(child.inode, now_seconds());
             r = ext4_fs_truncate_inode(&child, 0);
             if (r == EOK)
@@ -3347,6 +3426,8 @@ int ext4b_rename(ext4b_device *dev,
 
             r = unlink_child(fs, &dp, &victim, dst_name, (uint32_t)dst_len);
             if (r == EOK && ext4_inode_get_links_cnt(victim.inode) == 0) {
+                /* Renamed over: same rule as an unlink that frees. */
+                resv_forget(dev, victim.index);
                 ext4_inode_set_del_time(victim.inode, now_seconds());
                 r = ext4_fs_truncate_inode(&victim, 0);
                 if (r == EOK)
@@ -3449,6 +3530,130 @@ static int bridge_flush_run(struct ext4_blockdev *bdev, uint32_t bsize,
     return r;
 }
 
+/*
+ * Give back whatever an inode holds past end-of-file.
+ *
+ * No transaction of its own: every caller already has one open, and the
+ * trim has to land or not land with the operation that prompted it. Not an
+ * error on an indirect-mapped inode -- ext2 and ext3 never reserve, because
+ * the append path there hands back one block at a time whatever it is asked
+ * for, so there is nothing to return.
+ */
+static int trim_alloc_to_size(struct ext4_fs *fs, uint32_t inode)
+{
+    struct ext4_inode_ref ref;
+    int r = ext4_fs_get_inode_ref(fs, inode, &ref);
+    if (r != EOK)
+        return r;
+
+    if (!ext4_inode_has_flag(ref.inode, EXT4_INODE_FLAG_EXTENTS)) {
+        ext4_fs_put_inode_ref(&ref);
+        return EOK;
+    }
+
+    /* Never touch an inode that has been freed. The table is cleared at every
+     * path that deletes one, so this should be unreachable -- and it is the
+     * guard that matters most, because removing space from a freed inode
+     * would hand its blocks back a second time. Belt as well as braces. */
+    if (ext4_inode_get_links_cnt(ref.inode) == 0 &&
+        ext4_inode_get_del_time(ref.inode) != 0) {
+        ext4_fs_put_inode_ref(&ref);
+        return EOK;
+    }
+
+    uint32_t bsize = ext4_sb_get_block_size(&fs->sb);
+    uint64_t fsize = ext4_inode_get_size(&fs->sb, ref.inode);
+    uint32_t keep  = (uint32_t)((fsize + bsize - 1) / bsize);
+
+    r = ext4_extent_remove_space(&ref, keep, EXT_MAX_BLOCKS);
+    if (r == EOK)
+        ref.dirty = true;
+
+    ext4_fs_put_inode_ref(&ref);
+    return r;
+}
+
+/* Drop an inode from the table without returning anything, for callers that
+ * are about to make the question moot: a truncate or an unlink has already
+ * dealt with the blocks, and a preallocation means the space past EOF is now
+ * the caller's on purpose and must not be taken away. */
+static void resv_forget(ext4b_device *dev, uint32_t inode)
+{
+    for (unsigned i = 0; i < EXT4B_RESERVE_SLOTS; i++)
+        if (dev->resv[i].inode == inode)
+            dev->resv[i].inode = 0;
+}
+
+/* How far this inode's reservation reaches, or 0 if it holds none. Answering
+ * from the table rather than from the extent tree is the point: walking the
+ * tree to find the end of the allocation would cost a lookup per block on
+ * every write, which is the cost this whole thing exists to avoid. */
+static uint32_t resv_end(const ext4b_device *dev, uint32_t inode)
+{
+    for (unsigned i = 0; i < EXT4B_RESERVE_SLOTS; i++)
+        if (dev->resv[i].inode == inode)
+            return dev->resv[i].end_lblk;
+    return 0;
+}
+
+/* Record how far this inode is now reserved, evicting the oldest entry if the
+ * table is full. The eviction is what bounds the space in flight, so its
+ * failure is reported rather than swallowed: a trim that silently did not
+ * happen is a leak, and leaks are the failure mode this arrangement risks. */
+static int resv_set(ext4b_device *dev, struct ext4_fs *fs,
+                    uint32_t inode, uint32_t end_lblk)
+{
+    for (unsigned i = 0; i < EXT4B_RESERVE_SLOTS; i++) {
+        if (dev->resv[i].inode == inode) {
+            dev->resv[i].end_lblk = end_lblk;
+            return EOK;
+        }
+    }
+    for (unsigned i = 0; i < EXT4B_RESERVE_SLOTS; i++) {
+        if (dev->resv[i].inode == 0) {
+            dev->resv[i].inode = inode;
+            dev->resv[i].end_lblk = end_lblk;
+            return EOK;
+        }
+    }
+
+    unsigned slot = dev->resv_next % EXT4B_RESERVE_SLOTS;
+    dev->resv_next = slot + 1;
+    uint32_t victim = dev->resv[slot].inode;
+    dev->resv[slot].inode = inode;
+    dev->resv[slot].end_lblk = end_lblk;
+    return trim_alloc_to_size(fs, victim);
+}
+
+/* Everything still held, returned. Called where a volume stops accepting
+ * writes: the reservations are an optimisation between one write and the
+ * next, and nothing may outlive the mount that made them.
+ *
+ * Owns its transaction, unlike the trims above, because its one caller --
+ * unmount -- sits above the transaction helpers and may have nothing open.
+ * txn_begin joins an open batch rather than nesting, so this is correct
+ * either way. Every slot is attempted even after one fails, and the first
+ * error is the one reported: a volume half-drained is worse than a volume
+ * that reports the problem. */
+static int resv_drain(ext4b_device *dev, struct ext4_fs *fs)
+{
+    int r = txn_begin(fs);
+    if (r != EOK)
+        return r;
+
+    int first_err = EOK;
+    for (unsigned i = 0; i < EXT4B_RESERVE_SLOTS; i++) {
+        uint32_t inode = dev->resv[i].inode;
+        dev->resv[i].inode = 0;
+        if (inode == 0)
+            continue;
+        int tr = trim_alloc_to_size(fs, inode);
+        if (tr != EOK && first_err == EOK)
+            first_err = tr;
+    }
+    return txn_finish(dev, fs, first_err);
+}
+
 int ext4b_write(ext4b_device *dev,
                 uint32_t inode,
                 uint64_t offset,
@@ -3521,6 +3726,83 @@ int ext4b_write(ext4b_device *dev,
 
     /* Blocks the file already has backing for. */
     uint32_t have_blocks = (uint32_t)((fsize + bsize - 1) / bsize);
+
+    /*
+     * Allocate ahead of this write, so the next one continues in the same
+     * run rather than restarting after whichever file allocated in between.
+     * See "Allocating ahead" at the top of this file for why that is the
+     * thing worth fixing and what bounds it.
+     *
+     * The blocks are taken as unwritten, which is what preallocation means
+     * everywhere else here: they read as zeros, so nothing is exposed if the
+     * file is later grown over them, and the write path already has a tested
+     * route through them -- it is the same one a Finder copy takes.
+     *
+     * Reservations are only extended, never re-walked. The table remembers
+     * where each one reaches, so a write that lands inside it does no
+     * allocation work at all; without that, every call would walk the
+     * already-backed blocks one at a time looking for the end, which is the
+     * cost this exists to avoid.
+     */
+    if (count >= (uint64_t)EXT4B_RESERVE_TRIGGER * bsize &&
+        offset <= fsize && offset + count > fsize &&
+        ext4_inode_has_flag(ref.inode, EXT4_INODE_FLAG_EXTENTS)) {
+        /* `offset <= fsize` is not decoration. Without it, a sparse write at
+         * a huge offset would ask for every block from end-of-file to there,
+         * which is a terabyte of allocation for a one-megabyte write. This is
+         * an append optimisation, and an append is what it applies to. */
+        uint32_t reach = resv_end(dev, inode);
+        if (reach == 0) {
+            /*
+             * Nothing of ours past this file's end -- so before taking any,
+             * check that nothing of anyone else's is there either. Space
+             * already allocated past end-of-file belongs to an explicit
+             * preallocation, and extending it here would put it in the table
+             * and trim it away later, undoing an fcntl the application was
+             * told had succeeded. A Finder copy preallocates every file, so
+             * this is the common case, not a corner.
+             */
+            ext4_fsblk_t at = 0;
+            uint32_t run = 0;
+            bool unwr = false;
+            if (ext4_extent_map_range(&ref, have_blocks, 1, &at, &run,
+                                      &unwr) == EOK && at != 0)
+                goto no_reservation;
+            reach = have_blocks;
+        } else if (reach < have_blocks) {
+            reach = have_blocks;
+        }
+
+        uint32_t through = (uint32_t)((offset + count + bsize - 1) / bsize);
+        if (through > reach) {
+            /* Not on a volume that is filling up: turning fragmented files
+             * into fragmented free space is the worse trade, and a nearly
+             * full volume is exactly where that bites. */
+            uint64_t spare = ext4_sb_get_free_blocks_cnt(&fs->sb);
+            if (spare > (uint64_t)EXT4B_RESERVE_AHEAD * EXT4B_RESERVE_SLOTS * 4) {
+                uint32_t ask = (through - reach) + EXT4B_RESERVE_AHEAD;
+                uint32_t alloc = 0;
+
+                /* Best effort. A reservation that could not be taken -- no
+                 * room, a partial run -- is not a failed write; the append
+                 * path below allocates what it needs as it always did. But
+                 * whatever WAS taken has to be recorded, or it is a leak. */
+                (void)ext4_extent_preallocate(&ref, reach, ask, &alloc);
+                if (alloc > 0) {
+                    ref.dirty = true;
+                    int sr = resv_set(dev, fs, inode, reach + alloc);
+                    if (sr != EOK) {
+                        /* An eviction that failed to give its blocks back.
+                         * That is the one failure here worth stopping for. */
+                        ext4_fs_put_inode_ref(&ref);
+                        return txn_finish(dev, fs, sr);
+                    }
+                }
+            }
+        }
+    }
+no_reservation:
+    ;
 
     const uint8_t *src = buf;
     size_t remaining = count;
@@ -3897,6 +4179,11 @@ int ext4b_truncate(ext4b_device *dev, uint32_t inode, uint64_t new_size)
 {
     WRITE_PROLOGUE(dev, fs);
 
+    /* A truncate settles this inode's blocks itself, and a shrink frees the
+     * very ones a reservation was pointing at. Anything the table still
+     * believes about it is stale from here. */
+    resv_forget(dev, inode);
+
     int r = txn_begin(fs);
     if (r != EOK)
         return r;
@@ -3949,6 +4236,12 @@ int ext4b_preallocate(ext4b_device *dev,
         *out_allocated = 0;
     if (length == 0)
         return EOK;
+
+    /* From here the space past EOF is the caller's on purpose, and an
+     * eviction that trimmed it would silently undo an fcntl the application
+     * was told had succeeded. The write path's own reservation, if any, is
+     * subsumed by what is about to be allocated. */
+    resv_forget(dev, inode);
 
     int r = txn_begin(fs);
     if (r != EOK)
@@ -4012,25 +4305,13 @@ int ext4b_trim_preallocation(ext4b_device *dev, uint32_t inode)
     if (r != EOK)
         return r;
 
-    struct ext4_inode_ref ref;
-    r = ext4_fs_get_inode_ref(fs, inode, &ref);
-    if (r != EOK)
-        return txn_finish(dev, fs, r);
+    /* Whatever the write path was holding for this inode is going back in the
+     * same call, so the table must not keep pointing at it -- a later
+     * eviction would then trim an inode that had legitimately been given
+     * space past EOF since. */
+    resv_forget(dev, inode);
 
-    if (!ext4_inode_has_flag(ref.inode, EXT4_INODE_FLAG_EXTENTS)) {
-        ext4_fs_put_inode_ref(&ref);
-        return txn_finish(dev, fs, EOK);   /* nothing to trim, not an error */
-    }
-
-    uint32_t bsize = ext4_sb_get_block_size(&fs->sb);
-    uint64_t fsize = ext4_inode_get_size(&fs->sb, ref.inode);
-    uint32_t keep = (uint32_t)((fsize + bsize - 1) / bsize);
-    r = ext4_extent_remove_space(&ref, keep, EXT_MAX_BLOCKS);
-    if (r == EOK)
-        ref.dirty = true;
-
-    ext4_fs_put_inode_ref(&ref);
-    return txn_finish(dev, fs, r);
+    return txn_finish(dev, fs, trim_alloc_to_size(fs, inode));
 }
 
 int ext4b_setattr(ext4b_device *dev,

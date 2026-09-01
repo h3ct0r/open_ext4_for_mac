@@ -295,6 +295,30 @@ round-robin gives 34. Whole-file preallocation immunises a file completely --
 which is why `cp(1)`, which does not preallocate but does finish one file at a
 time, is also unaffected.
 
+**The fix is to allocate ahead**, which is what whole-file preallocation was
+doing by accident. A bulk write that extends a file now takes an unwritten
+run beyond what it is about to write, and the driver remembers how far each
+inode's run reaches, so the next write to that file continues inside it
+whatever else allocated in between. Eight 16 MiB files interleaved at 1 MiB
+went from 18 extents each to 3; `make test-fragmentation` is the measurement.
+
+Three things bound it, and they matter more than the extent count:
+
+- only writes of 256 KiB or more take a reservation, so a volume full of
+  small files never sees one;
+- at most eight inodes hold one at a time, and taking a ninth returns the
+  oldest -- so the space in flight is capped by the table, not by how many
+  files are being copied;
+- unmount returns whatever is left, and a volume with less than 256 MiB free
+  stops reserving entirely: fragmented files are a better problem than
+  fragmented free space on a volume that is filling up.
+
+An inode that already has space past end-of-file never gets a reservation.
+That space belongs to an explicit `F_PREALLOCATE`, and trimming it later
+would undo an `fcntl` the application was told had succeeded -- which, since
+Finder preallocates every file it copies, is the common case rather than a
+corner.
+
 **Beware measuring a Finder copy by file count.** Finder creates every
 destination file early, so a wait loop that counts names finishes long before
 the data lands; unmounting there truncates the copy and measures nothing. The
