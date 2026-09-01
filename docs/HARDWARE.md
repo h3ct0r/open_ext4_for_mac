@@ -236,6 +236,14 @@ preallocated file goes from four extents to one.
 **It does not explain a corpus that reports 89% non-contiguous, and neither
 does anything else measured so far.** That number was blamed on this
 fragmentation and it survived the fix unchanged (89.1% before, 89.2% after).
+
+*Read the rest of this section knowing how it ends: the percentage itself was
+part of the problem, and every row below is a comparison of file counts that
+could not have distinguished a two-piece file from a two-hundred-piece one.
+The layout question is settled and the answer is in "The fix is to allocate
+ahead" further down; what follows is the investigation that got there, kept
+because the refuted explanations are worth not re-testing.*
+
 Two further guesses were tested and are also wrong:
 
 | shape                                   | non-contiguous |
@@ -331,6 +339,34 @@ at a time:
 field corpus looked like. It works through a real mount too, which is not the
 same test: eight 100 MB files written concurrently by separate processes come
 out at 11 extents each. `make test-fragmentation` is the regression.
+
+**On the stick, measured** -- the same 1.2 GB corpus that produced the 89%,
+copied in Finder onto a freshly formatted 7.3 GB volume and surveyed cold:
+
+```
+fragstat: 408 file(s), 1267.0 MB, 880 extent(s)
+  2.2 extent(s) per file, 1474 KB per extent
+  1: 35   2-4: 368   5-16: 5   17-64: 0   65+: 0
+  worst: <a 498 MB screen recording>, 7 extent(s)
+```
+
+The 65+ bucket is empty and the largest file on the volume is seven extents,
+which is 71 MB apiece. The same volume's log says macOS handed the driver
+1 MiB per write call; one extent per call would have put that file near five
+hundred. e2fsck read 89.3% non-contiguous over exactly this layout, which is
+the whole reason that number is not used here any more.
+
+This is not a before/after on the same corpus -- the earlier run recorded only
+the percentage, so there is no extent count to compare against. What there is
+instead is three independent measurements agreeing: offline before/after,
+concurrent writers through a mount, and this.
+
+One side effect worth recognising rather than investigating twice. `e2fsck`
+reports `extent tree could be shorter` on 144 inodes here where the earlier
+run said 16. A file gets a depth-1 tree once it passes four extents and keeps
+that depth after 0057 merges the runs back together, so 144 is the count of
+files that grew past four extents and were folded back to four or fewer. It
+measures the merging working, not damage.
 
 Three things bound it, and they matter more than the extent count:
 
