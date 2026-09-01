@@ -232,7 +232,12 @@ make validate-asan      # the same under AddressSanitizer + UBSan
 make test-format        # stage 3 on its own
 make test-orphan        # stage 4 on its own
 make test-mount-crash   # stage 7 on its own
+make test-scale         # volumes and files past 4 GiB (writes ~4.5 GiB)
 ```
+
+`test-scale` is not in `validate`: it writes 4.5 GiB through a real mount and
+takes a minute of pure I/O, and a suite that costs a minute stops being run.
+It is behind `SLOW=1`, which that target sets.
 
 | Stage | What it proves |
 |---|---|
@@ -242,6 +247,8 @@ make test-mount-crash   # stage 7 on its own
 | 3 — format | a size/block-size/generation sweep must be `e2fsck`-clean and round-trip through the Linux kernel; big formats and lazy-init mounts are bounded in device *commands* |
 | 4 / 4b / 4c — orphans, prealloc, revoke | every cut point of a deferred delete recovers by *mounting*; unwritten-extent lifecycle; every revoke entry names a real block |
 | 5 / 5b — crypto, error injection | AES-XTS known answers; a medium that answers EIO must surface every failure (exit codes, kept journals, e2fsck-clean end states) |
+| 5c — checksums that act | a bitmap corrupted from outside the driver must make the write fail **and** leave the checksum untouched; healthy and checksum-less volumes unaffected |
+| 5d — fragmentation | the same bytes to the same files in two allocation orders: interleaving must not cost more extents than a reservation can absorb, the reservation must come back, and the volume must still fill to the last block |
 | 6 — LUKS | fixtures made by real cryptsetup, read back by the Linux kernel |
 | 7 / 7b — crash, reordered writes | the write stream severed at every cut point, replayed by the **real Linux kernel**; then the same on a medium that also **reorders** what was in flight |
 | 8 / 8b — differential, replay speed | round-trips between our driver and Linux ext4 with a silent kernel log; a deep dirty journal must mount inside DiskArbitration's ~20 s budget on a modelled USB stick |
