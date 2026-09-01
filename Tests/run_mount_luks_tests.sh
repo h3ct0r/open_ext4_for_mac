@@ -39,6 +39,9 @@ bash "$ROOT/scripts/check_install_freshness.sh" || exit 1
 WORK="$ROOT/build/mount-luks"
 REPORT="$ROOT/build/mount-luks-report.txt"
 MNT="/tmp/ext4-mount-luks"
+# Seeded contents rather than checksums, so a difference reports its first
+# wrong byte and alignment instead of "the hash differs".
+DATA="$ROOT/build/bin/datafile"
 DOCKER_IMAGE="ext4luks:cryptsetup-attr"
 
 BUNDLE_ID="dev.h3ct0r.ext4mac.Ext4FS"
@@ -299,8 +302,48 @@ round_trip() {  # round_trip <name> <uuid> <label>
   dd if=/dev/urandom of="$MNT/from-macos/blob.bin" bs=1k count=700 status=none 2>/dev/null
   want=$(shasum -a 256 "$MNT/from-macos/blob.bin" | cut -d' ' -f1)
 
+  # A size whose last block is partial, written twice: plainly, and the way
+  # macOS writes a file it has preallocated. That shape hid a corruption bug
+  # for a day on the plain path -- the final partial block landed in the wrong
+  # place -- and nothing encrypted has ever written it. XTS tweaks are per
+  # sector, so a partial tail is exactly where a wrong sector number would
+  # show and a whole-block workload would not.
+  "$DATA" write "$MNT/from-macos/tail.bin" 3000001 5551 >/dev/null 2>&1 \
+    || bad "$name could not write a partial-tail file"
+  "$DATA" write "$MNT/from-macos/tail-pre.bin" 3000001 5552 --prealloc >/dev/null 2>&1 \
+    || bad "$name could not write a preallocated partial-tail file"
+
   umount "$MNT" 2>/dev/null || bad "$name did not unmount cleanly"
   hdiutil detach "$DEV" -force >/dev/null 2>&1; DEV=""
+
+  # Read back cold, through our own driver, before Linux gets a turn.
+  #
+  # Linux is the stronger oracle and it runs below, but it only reads what it
+  # can reach through cryptsetup -- so a decryption bug we share with our own
+  # writer would be caught there and a *read* bug of ours would not be caught
+  # at all. And the checks above this point all read bytes that were in the
+  # page cache moments earlier, which is the easiest way to write a data test
+  # that cannot fail. This is the one read in this suite that consults the
+  # medium through the whole stack: unlock, decrypt, map, read.
+  place_key "$uuid"
+  if attach "$WORK/$name.img" && mount -F -t ext4 "${DEV#/dev/}" "$MNT" 2>/dev/null; then
+    local cold=""
+    "$DATA" verify "$MNT/from-macos/tail.bin" 3000001 5551 >/dev/null 2>&1 \
+      || cold="$cold tail.bin"
+    "$DATA" verify "$MNT/from-macos/tail-pre.bin" 3000001 5552 >/dev/null 2>&1 \
+      || cold="$cold tail-pre.bin"
+    [ "$(shasum -a 256 "$MNT/from-macos/blob.bin" 2>/dev/null | cut -d' ' -f1)" = "$want" ] \
+      || cold="$cold blob.bin"
+    [ -z "$cold" ] \
+      && ok "read cold after a remount, every file macOS wrote is byte-exact" \
+      || bad "read cold after a remount, every file macOS wrote is byte-exact" \
+             "differed:$cold"
+    umount "$MNT" 2>/dev/null
+    hdiutil detach "$DEV" -force >/dev/null 2>&1; DEV=""
+  else
+    bad "$name could not be remounted for a cold read"
+    [ -n "$DEV" ] && { hdiutil detach "$DEV" -force >/dev/null 2>&1; DEV=""; }
+  fi
 
   # The oracle: real cryptsetup and the real kernel.
   local out
@@ -313,6 +356,7 @@ round_trip() {  # round_trip <name> <uuid> <label>
     echo \"LINK=\$(readlink /mnt/v/from-macos/link)\"
     echo \"XATTR=\$(getfattr -n user.macos --only-values /mnt/v/from-macos/nested/mac.txt 2>/dev/null)\"
     echo \"SHA=\$(sha256sum /mnt/v/from-macos/blob.bin | cut -d' ' -f1)\"
+    echo \"TAILSZ=\$(stat -c %s /mnt/v/from-macos/tail.bin)/\$(stat -c %s /mnt/v/from-macos/tail-pre.bin)\"
     umount /mnt/v; cryptsetup luksClose v
     echo \"DMESG=\$(dmesg 2>/dev/null | grep -icE 'EXT4-fs (error|warning)|I/O error')\"
   " 2>/dev/null)
@@ -326,6 +370,10 @@ round_trip() {  # round_trip <name> <uuid> <label>
   grep -q "SHA=$want" <<<"$out" \
     && ok "700 KB written by macOS is byte-identical on Linux" \
     || bad "700 KB payload differs on Linux" "want $want"
+  grep -q "TAILSZ=3000001/3000001" <<<"$out" \
+    && ok "Linux agrees both partial-tail files are their full length" \
+    || bad "Linux agrees both partial-tail files are their full length" \
+           "$(grep -o 'TAILSZ=[^ ]*' <<<"$out")"
   grep -q "DMESG=0" <<<"$out" && ok "the kernel logged no complaints" \
                               || bad "the kernel complained about the volume"
 }

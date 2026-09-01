@@ -66,7 +66,12 @@ static int usage(void)
         "  datafile verify <path> <bytes> <seed>\n"
         "                  compare against the same stream and report the first\n"
         "                  differing byte, the length of the damage, and what\n"
-        "                  the wrong bytes look like\n");
+        "                  the wrong bytes look like\n"
+        "  datafile verify-range <path> <bytes> <seed> <offset> <length>\n"
+        "                  the same comparison over one window. <bytes> is\n"
+        "                  still the whole file's size and is still checked,\n"
+        "                  because a file that came back the wrong length is\n"
+        "                  broken however well a sampled window reads\n");
     return 2;
 }
 
@@ -138,7 +143,22 @@ static const char *shape(const uint8_t *got, size_t n)
                     : "non-zero (stale contents, or the wrong blocks)";
 }
 
-static int do_verify(const char *path, uint64_t bytes, uint64_t seed)
+/* Compare the file against the stream over [from, from+len).
+ *
+ * A whole-file check is just the window [0, bytes), so there is one
+ * implementation rather than two that can drift apart. The window exists for
+ * files too large to read in full inside a suite that has to stay runnable: a
+ * 5 GiB file is where i_size_high, the large_file feature and every remaining
+ * 32-bit block index live, and reading all of it back to learn that costs
+ * minutes. Because the stream is a pure function of (seed, offset), a sampled
+ * window is generated exactly as it would be in a full pass -- the head, the
+ * tail and the 4 GiB boundary can be checked for what they cost.
+ *
+ * <bytes> is still the whole file's size and is still checked. A file that
+ * came back the wrong length is broken however well a sampled window reads,
+ * and that is the failure a partial verify would otherwise be blind to. */
+static int do_verify(const char *path, uint64_t bytes, uint64_t seed,
+                     uint64_t from, uint64_t len)
 {
     int fd = open(path, O_RDONLY);
     if (fd < 0) { perror("open"); return 1; }
@@ -152,6 +172,14 @@ static int do_verify(const char *path, uint64_t bytes, uint64_t seed)
         return 1;
     }
 
+    if (from > bytes || len > bytes - from) {
+        printf("WINDOW OUT OF RANGE: %llu+%llu in a %llu-byte file\n",
+               (unsigned long long)from, (unsigned long long)len,
+               (unsigned long long)bytes);
+        close(fd);
+        return 1;
+    }
+
     uint8_t *want = malloc(CHUNK), *got = malloc(CHUNK);
     if (!want || !got) {
         fprintf(stderr, "out of memory\n");
@@ -160,10 +188,11 @@ static int do_verify(const char *path, uint64_t bytes, uint64_t seed)
 
     uint64_t bad_first = 0, bad_bytes = 0;
     int found = 0;
+    const uint64_t end = from + len;
 
-    for (uint64_t off = 0; off < bytes; ) {
-        size_t n = (size_t)((bytes - off < CHUNK) ? (bytes - off) : CHUNK);
-        ssize_t r = read(fd, got, n);
+    for (uint64_t off = from; off < end; ) {
+        size_t n = (size_t)((end - off < CHUNK) ? (end - off) : CHUNK);
+        ssize_t r = pread(fd, got, n, (off_t)off);
         if (r < 0 || (size_t)r != n) {
             printf("READ FAILED at %llu: %s\n", (unsigned long long)off,
                    r < 0 ? strerror(errno) : "short read");
@@ -182,7 +211,12 @@ static int do_verify(const char *path, uint64_t bytes, uint64_t seed)
     }
 
     if (!found) {
-        printf("OK %llu bytes match\n", (unsigned long long)bytes);
+        if (from == 0 && len == bytes)
+            printf("OK %llu bytes match\n", (unsigned long long)bytes);
+        else
+            printf("OK %llu bytes match at %llu (of %llu)\n",
+                   (unsigned long long)len, (unsigned long long)from,
+                   (unsigned long long)bytes);
         free(want); free(got); close(fd);
         return 0;
     }
@@ -198,7 +232,7 @@ static int do_verify(const char *path, uint64_t bytes, uint64_t seed)
                (unsigned long long)(bad_first / 4096),
                (bad_first % 4096) == 0 ? "4096-aligned" : "not block-aligned");
         printf("  %llu of %llu bytes differ\n",
-               (unsigned long long)bad_bytes, (unsigned long long)bytes);
+               (unsigned long long)bad_bytes, (unsigned long long)len);
         printf("  the wrong bytes look like: %s\n", shape(got, win));
     }
     free(want); free(got); close(fd);
@@ -215,7 +249,14 @@ int main(int argc, char **argv)
     uint64_t seed    = strtoull(argv[4], NULL, 10);
 
     if (strcmp(cmd, "verify") == 0)
-        return do_verify(path, bytes, seed);
+        return do_verify(path, bytes, seed, 0, bytes);
+
+    if (strcmp(cmd, "verify-range") == 0) {
+        if (argc < 7) return usage();
+        uint64_t from = strtoull(argv[5], NULL, 10);
+        uint64_t len  = strtoull(argv[6], NULL, 10);
+        return do_verify(path, bytes, seed, from, len);
+    }
 
     if (strcmp(cmd, "write") == 0) {
         int prealloc = 0;
