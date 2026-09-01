@@ -104,7 +104,7 @@ ARGON2_CFLAGS := $(CFLAGS) -Wno-everything -I$(ARGON2_DIR)
 CORE_LIB      := $(BUILD)/lib/$(CONFIG)/libext4core.a
 CORE_TEST_LIB := $(BUILD)/lib/$(CONFIG)/libext4core-test.a
 
-.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-reorder test-crypto test-orphan test-luks test-eio test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple
+.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-reorder test-crypto test-orphan test-luks test-eio test-csum test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple
 
 all: app
 
@@ -361,6 +361,13 @@ test-replay-speed: tools
 # it. Every cell asserts the fault fired AND the failure surfaced.
 test-eio: tools
 	@bash Tests/run_eio_tests.sh
+
+# A bitmap whose checksum does not verify. Corrupts one byte from outside the
+# driver, then asks both halves: was the write refused, and did the checksum
+# survive untouched. The second is the one that matters -- the old behaviour
+# passed the first while rewriting the checksum over the corruption.
+test-csum: tools
+	@bash Tests/run_csum_tests.sh
 
 # What a killed driver leaves behind, and whether the journal recovers it.
 # Passes on a disk image; EXT4_KILL_DEVICE=diskN points it at real media,

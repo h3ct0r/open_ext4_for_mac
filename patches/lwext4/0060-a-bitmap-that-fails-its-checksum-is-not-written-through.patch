@@ -1,0 +1,176 @@
+A bitmap that fails its checksum is not written through
+
+Patch 0059 made the twenty-two "checksum failed" warnings audible. This
+one makes seven of them act.
+
+The seven are the bitmap sites in ext4_balloc.c and ext4_ialloc.c, and
+they were not merely quiet. On a failed verify each one carried on:
+modify the bitmap, recompute the checksum over the modified bytes, write
+that back. A corrupt bitmap was laundered into one that verifies, and
+the evidence was destroyed in the same breath -- so the next reader,
+including e2fsck, found a volume that looked fine. A checksum whose
+failure is invisible and whose evidence is overwritten is worse than no
+checksum at all, because it is trusted.
+
+The policy is refuse writes, allow reads, and it needs no new state
+threaded through lwext4. These seven sites are reached only from
+allocate and free, which are writes; the other fifteen verify structures
+being read and still only report. So "refuse the write paths" is exactly
+"refuse in balloc and ialloc", and a volume whose bitmaps do not verify
+is still fully readable -- which is the point, because that volume may
+be the only copy of something.
+
+Refusing a free leaks: the blocks or the inode stay marked in use with
+nothing pointing at them until e2fsck reclaims them. That is the
+intended trade and it is not close. A leak is recoverable by a tool that
+exists for it; handing the same blocks to a second file because the map
+said they were free is not.
+
+Nothing here can fire before the journal has replayed, which is where
+checksum failures are expected and normal. WRITE_PROLOGUE returns EROFS
+on a read-only mount and ext4b_mount recovers before anything else, so
+allocate and free are unreachable until the volume is consistent.
+Tests/run_bounds_tests.sh asserts that an unrecovered volume still reads.
+
+Order mattered. Enforcement went in only after 0059 had removed the last
+false positive and every suite had run silent -- turning this on over a
+warning that cried wolf would have made every extent-mapped volume
+read-only.
+
+Tests/run_csum_tests.sh corrupts one byte inside the region each
+checksum covers, from outside the driver, and asks both halves of the
+question: was the operation refused, and did the checksum survive
+untouched. Against this patch reverted, ten of its eighteen cells
+fail: the write succeeds, the create succeeds, e2fsck no longer sees
+anything wrong, and the checksum has been rewritten over the corruption.
+
+--- a/src/ext4_balloc.c
++++ b/src/ext4_balloc.c
+@@ -181,6 +181,28 @@
+ 			DBG_WARN "Bitmap checksum failed."
+ 			"Group: %" PRIu32"\n",
+ 			bg_ref.index);
++		/*
++		 * Refuse rather than write through a bitmap that does not verify.
++		 *
++		 * This used to warn and carry on: modify the bitmap, then recompute the
++		 * checksum over it and write that back -- turning a corrupt bitmap into
++		 * one that verifies and destroying the only evidence in the same breath.
++		 * A checksum whose failure is overwritten is worse than none, because it
++		 * is trusted.
++		 *
++		 * Refusing a free leaks the blocks: they stay allocated with nothing
++		 * pointing at them until e2fsck reclaims them. That is the intended
++		 * trade. A leak is recoverable; handing the same blocks to a second file
++		 * because the map said they were free is not.
++		 *
++		 * Only reachable on a read-write mount, which cannot happen before the
++		 * journal has replayed -- WRITE_PROLOGUE returns EROFS on a read-only
++		 * mount, and ext4b_mount recovers before anything else. Checksums that
++		 * fail on an unrecovered volume are expected and must not land here.
++		 */
++		ext4_block_set(fs->bdev, &bitmap_block);
++		ext4_fs_put_block_group_ref(&bg_ref);
++		return EIO;
+ 	}
+ 
+ 	/* Modify bitmap */
+@@ -316,6 +338,12 @@
+ 				DBG_WARN "Bitmap checksum failed."
+ 				"Group: %" PRIu32"\n",
+ 				bg_ref.index);
++			/* Refuse rather than write through a bitmap that does not verify;
++			 * see ext4_balloc_free_block above for why, and for what refusing
++			 * costs. */
++			ext4_block_set(fs->bdev, &blk);
++			ext4_fs_put_block_group_ref(&bg_ref);
++			return EIO;
+ 		}
+ 		uint32_t free_cnt;
+ 		free_cnt = ext4_sb_get_block_size(sb) * 8 - idx_in_bg_first;
+@@ -442,6 +470,12 @@
+ 			DBG_WARN "Bitmap checksum failed."
+ 			"Group: %" PRIu32"\n",
+ 			bg_ref.index);
++		/* Refuse rather than write through a bitmap that does not verify;
++		 * see ext4_balloc_free_block above for why, and for what refusing
++		 * costs. */
++		ext4_block_set(inode_ref->fs->bdev, &b);
++		ext4_fs_put_block_group_ref(&bg_ref);
++		return EIO;
+ 	}
+ 
+ 	/* Check if goal is free */
+@@ -544,6 +578,12 @@
+ 				DBG_WARN "Bitmap checksum failed."
+ 				"Group: %" PRIu32"\n",
+ 				bg_ref.index);
++			/* Refuse rather than write through a bitmap that does not verify;
++			 * see ext4_balloc_free_block above for why, and for what refusing
++			 * costs. */
++			ext4_block_set(inode_ref->fs->bdev, &b);
++			ext4_fs_put_block_group_ref(&bg_ref);
++			return EIO;
+ 		}
+ 
+ 		/* Compute indexes */
+@@ -654,6 +694,12 @@
+ 			DBG_WARN "Bitmap checksum failed."
+ 			"Group: %" PRIu32"\n",
+ 			bg_ref.index);
++		/* Refuse rather than write through a bitmap that does not verify;
++		 * see ext4_balloc_free_block above for why, and for what refusing
++		 * costs. */
++		ext4_block_set(fs->bdev, &b);
++		ext4_fs_put_block_group_ref(&bg_ref);
++		return EIO;
+ 	}
+ 
+ 	/* Check if block is free */
+--- a/src/ext4_ialloc.c
++++ b/src/ext4_ialloc.c
+@@ -183,6 +183,29 @@
+ 			DBG_WARN "Bitmap checksum failed."
+ 			"Group: %" PRIu32"\n",
+ 			bg_ref.index);
++		/*
++		 * Refuse rather than write through a bitmap that does not verify.
++		 *
++		 * This used to warn and carry on: clear the bit, then recompute the
++		 * checksum over the modified bitmap and write that back -- turning a
++		 * corrupt inode bitmap into one that verifies, and destroying the only
++		 * evidence in the same breath. A checksum whose failure is overwritten
++		 * is worse than none, because it is trusted.
++		 *
++		 * Refusing the free leaks the inode: it stays marked in use with no
++		 * directory entry pointing at it until e2fsck reclaims it. That is the
++		 * intended trade, and it is the same one ext4_balloc_free_block makes
++		 * for blocks. A leak is recoverable; handing the same inode number to a
++		 * second file because the map said it was free is not.
++		 *
++		 * Only reachable on a read-write mount, which cannot happen before the
++		 * journal has replayed -- WRITE_PROLOGUE returns EROFS on a read-only
++		 * mount, and ext4b_mount recovers before anything else. Checksums that
++		 * fail on an unrecovered volume are expected and must not land here.
++		 */
++		ext4_block_set(fs->bdev, &b);
++		ext4_fs_put_block_group_ref(&bg_ref);
++		return EIO;
+ 	}
+ 
+ 	/* Free i-node in the bitmap */
+@@ -276,6 +299,14 @@
+ 					DBG_WARN "Bitmap checksum failed."
+ 					"Group: %" PRIu32"\n",
+ 					bg_ref.index);
++				/* Refuse rather than write through a bitmap that does
++				 * not verify; see ext4_ialloc_free_inode above for why,
++				 * and for what refusing costs. Skipping the group and
++				 * trying the next one would be worse than refusing: it
++				 * hides the corruption behind a successful create. */
++				ext4_block_set(fs->bdev, &b);
++				ext4_fs_put_block_group_ref(&bg_ref);
++				return EIO;
+ 			}
+ 
+ 			/* Try to allocate i-node in the bitmap */

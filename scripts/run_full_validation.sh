@@ -213,6 +213,9 @@ stage "5. crypto primitives" "$ROOT/build/bin/cryptotest"
 # A device that answers EIO, aimed at paths that historically swallowed it.
 stage "5b. errors surface, not vanish" bash Tests/run_eio_tests.sh
 
+# A bitmap that fails its checksum: refused, and not rewritten over.
+stage "5c. checksums that act" bash Tests/run_csum_tests.sh
+
 if docker info >/dev/null 2>&1; then
   stage "6. LUKS containers" bash Tests/run_luks_tests.sh
   stage "7. crash consistency" bash Tests/run_crash_tests.sh
