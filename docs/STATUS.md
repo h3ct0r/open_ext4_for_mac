@@ -1598,16 +1598,25 @@ escaped the serial executor -- `getAttributes` resolving `parentID` -- two
 kernel threads raced in the block cache, corrupted its LRU list and spun in
 `ext4_bcache_free` at 200% CPU with `umount` in uninterruptible wait.
 
-**Not yet attributed, and specifically not yet attributed to the allocator
-work of the same week.** Stage 0 writes only `echo`-sized files, far below the
-256 KiB threshold at which a write reserves space ahead of itself, so the
-reservation never fires there. 67% is also one spinning thread rather than
-two. What it is instead needs a `sample` of the stuck process, which is how
-the original was identified, and that needs a reproduction.
+**It was the laptop sleeping.** The round took 2293 s where every other took
+about 630, and the machine had been closed and carried somewhere in the
+middle. A deadline measured in wall-clock expires the moment the machine
+wakes, and the six queued readers all resume at once, which is the 67% too.
 
-The value of the number is not that it is 7. It is that seven clean rounds of
-everything did not find this and the eighth did, which is the entire argument
-for measuring elapsed time rather than assertion counts.
+That is not a satisfying answer to leave as a judgement call, so the soak
+detects it now: `kern.waketime` is read either side of every round, and a
+round that spanned a sleep is reported as inconclusive and not counted, pass
+or fail. Rounds also run under `caffeinate -i`, which keeps idle sleep away
+but cannot stop a closed lid -- hence the detection as well.
+
+Worth keeping the shape of the near-miss. Stage 0 is the regression test for a
+real wedge, this looked exactly like one, and the first instinct was to
+suspect the allocator work of the same week. It could not have been: stage 0
+writes only `echo`-sized files, far below the 256 KiB threshold at which a
+write reserves space ahead of itself. `scripts/repro_wedge.sh` exists from
+that hour -- it runs the same workload in a loop and takes a `sample` of the
+stuck process before recovering, because a spin is identified by where it is
+spinning and the suite's own recovery destroys that evidence.
 
 ## Not yet done
 - A notification when a locked volume appears and the agent is not running;
