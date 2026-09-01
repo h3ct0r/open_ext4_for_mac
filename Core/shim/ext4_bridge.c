@@ -3635,12 +3635,8 @@ static int resv_set(ext4b_device *dev, struct ext4_fs *fs,
  * either way. Every slot is attempted even after one fails, and the first
  * error is the one reported: a volume half-drained is worse than a volume
  * that reports the problem. */
-static int resv_drain(ext4b_device *dev, struct ext4_fs *fs)
+static int resv_release_all(ext4b_device *dev, struct ext4_fs *fs)
 {
-    int r = txn_begin(fs);
-    if (r != EOK)
-        return r;
-
     int first_err = EOK;
     for (unsigned i = 0; i < EXT4B_RESERVE_SLOTS; i++) {
         uint32_t inode = dev->resv[i].inode;
@@ -3651,7 +3647,15 @@ static int resv_drain(ext4b_device *dev, struct ext4_fs *fs)
         if (tr != EOK && first_err == EOK)
             first_err = tr;
     }
-    return txn_finish(dev, fs, first_err);
+    return first_err;
+}
+
+static int resv_drain(ext4b_device *dev, struct ext4_fs *fs)
+{
+    int r = txn_begin(fs);
+    if (r != EOK)
+        return r;
+    return txn_finish(dev, fs, resv_release_all(dev, fs));
 }
 
 int ext4b_write(ext4b_device *dev,
@@ -3774,29 +3778,44 @@ int ext4b_write(ext4b_device *dev,
         }
 
         uint32_t through = (uint32_t)((offset + count + bsize - 1) / bsize);
-        if (through > reach) {
-            /* Not on a volume that is filling up: turning fragmented files
-             * into fragmented free space is the worse trade, and a nearly
-             * full volume is exactly where that bites. */
-            uint64_t spare = ext4_sb_get_free_blocks_cnt(&fs->sb);
-            if (spare > (uint64_t)EXT4B_RESERVE_AHEAD * EXT4B_RESERVE_SLOTS * 4) {
-                uint32_t ask = (through - reach) + EXT4B_RESERVE_AHEAD;
-                uint32_t alloc = 0;
 
-                /* Best effort. A reservation that could not be taken -- no
-                 * room, a partial run -- is not a failed write; the append
-                 * path below allocates what it needs as it always did. But
-                 * whatever WAS taken has to be recorded, or it is a leak. */
-                (void)ext4_extent_preallocate(&ref, reach, ask, &alloc);
-                if (alloc > 0) {
-                    ref.dirty = true;
-                    int sr = resv_set(dev, fs, inode, reach + alloc);
-                    if (sr != EOK) {
-                        /* An eviction that failed to give its blocks back.
-                         * That is the one failure here worth stopping for. */
-                        ext4_fs_put_inode_ref(&ref);
-                        return txn_finish(dev, fs, sr);
-                    }
+        /* Not on a volume that is filling up: turning fragmented files into
+         * fragmented free space is the worse trade, and a nearly full volume
+         * is exactly where that bites. */
+        uint64_t spare = ext4_sb_get_free_blocks_cnt(&fs->sb);
+        if (spare <= (uint64_t)EXT4B_RESERVE_AHEAD * EXT4B_RESERVE_SLOTS * 4) {
+            /*
+             * Below the threshold, hold nothing. Stopping at "take no more"
+             * is not enough: whatever is already held is blocks no file is
+             * using, and the volume can then report itself full with them
+             * still out. Measured on a 512 MB volume filled to ENOSPC one
+             * file at a time -- 8 MiB less data fitted than on the same
+             * volume without reservations, which is exactly one reservation
+             * left holding when the threshold stopped the evictions that
+             * would have returned it.
+             */
+            int dr = resv_release_all(dev, fs);
+            if (dr != EOK) {
+                ext4_fs_put_inode_ref(&ref);
+                return txn_finish(dev, fs, dr);
+            }
+        } else if (through > reach) {
+            uint32_t ask = (through - reach) + EXT4B_RESERVE_AHEAD;
+            uint32_t alloc = 0;
+
+            /* Best effort. A reservation that could not be taken -- no room,
+             * a partial run -- is not a failed write; the append path below
+             * allocates what it needs as it always did. But whatever WAS
+             * taken has to be recorded, or it is a leak. */
+            (void)ext4_extent_preallocate(&ref, reach, ask, &alloc);
+            if (alloc > 0) {
+                ref.dirty = true;
+                int sr = resv_set(dev, fs, inode, reach + alloc);
+                if (sr != EOK) {
+                    /* An eviction that failed to give its blocks back. That
+                     * is the one failure here worth stopping for. */
+                    ext4_fs_put_inode_ref(&ref);
+                    return txn_finish(dev, fs, sr);
                 }
             }
         }

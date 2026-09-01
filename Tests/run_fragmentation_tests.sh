@@ -151,4 +151,39 @@ fsck.ext4 -fn "$SERIAL" >/dev/null 2>&1 \
   && ok "nor with the serial one" \
   || bad "nor with the serial one" "$(fsck.ext4 -fn "$SERIAL" 2>&1 | tail -6)"
 
+echo ""
+echo "a volume still fills all the way up"
+echo ""
+
+# The failure mode a reservation invites: the volume reports itself full while
+# the allocator is sitting on blocks no file is using. It cannot be seen from
+# outside -- unmounting returns them, so a free count read afterwards shows a
+# volume that filled perfectly -- so `interleave` reports the count from inside
+# the mount when it stops.
+#
+# The number is a measurement, not a guess. A 512 MB volume written to ENOSPC
+# one file at a time took 519,045,120 bytes before any of this existed. With
+# reservations that stopped being taken below the low-space threshold but were
+# never given back, it took 510,656,512 -- exactly one 8 MiB reservation less,
+# left holding when the threshold also stopped the evictions that would have
+# returned it. Releasing what is held, rather than merely taking no more,
+# restores the original figure exactly.
+FULL="$WORK/full.img"
+python3 -c "open('$FULL','wb').truncate(512*1024*1024)"
+"$DUMP" "$FULL" format 4 4096 FRAG >/dev/null 2>&1
+fill=$("$DUMP" "$FULL" interleave 80 8 1024 serial 2>&1 \
+       | sed -nE 's/interleave stopped after ([0-9]+) bytes.*/\1/p')
+if [ -n "$fill" ] && [ "$fill" -ge 518000000 ]; then
+  ok "filled to ENOSPC with $fill bytes, nothing held back"
+else
+  bad "filled to ENOSPC with everything the volume has" \
+      "got ${fill:-no ENOSPC at all}, expected at least 518000000"
+fi
+
+free_left=$("$DUMP" "$FULL" interleave 1 1 1024 serial 2>&1 \
+            | sed -nE 's/.*with ([0-9]+) of [0-9]+ block\(s\) free/\1/p')
+[ "${free_left:-x}" = "0" ] \
+  && ok "and the volume genuinely has nothing left" \
+  || bad "and the volume genuinely has nothing left" "free blocks: ${free_left:-unknown}"
+
 finish

@@ -1144,12 +1144,26 @@ static int run_write_command(ext4b_device *dev, int argc, char **argv)
             }
         }
         free(inos); free(pattern);
-        if (rc == 0)
+        if (rc == 0) {
             printf("interleave %s: %ld file(s), %llu bytes each, "
                    "%zu-byte writes, %llu bytes total\n",
                    serial ? "serial" : "round", count,
                    (unsigned long long)bytes_each, chunk,
                    (unsigned long long)total);
+        } else {
+            /* What the volume still thinks it has, reported from INSIDE the
+             * mount. A driver that reserves space ahead of a write is holding
+             * blocks no file is using; unmounting returns them, so a free
+             * count read afterwards cannot see the stranding and would report
+             * a volume that filled up perfectly. This is the only place the
+             * question can be asked. */
+            uint64_t fb = 0, tb = 0;
+            if (ext4b_free_blocks_raw(dev, &fb, &tb) == 0)
+                printf("interleave stopped after %llu bytes with %llu of %llu "
+                       "block(s) free\n",
+                       (unsigned long long)total,
+                       (unsigned long long)fb, (unsigned long long)tb);
+        }
 
     } else if (strcmp(cmd, "rm") == 0) {
         if (argc < 4) { fprintf(stderr, "rm needs a path\n"); rc = 2; return rc; }

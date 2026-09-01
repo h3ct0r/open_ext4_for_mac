@@ -104,7 +104,7 @@ ARGON2_CFLAGS := $(CFLAGS) -Wno-everything -I$(ARGON2_DIR)
 CORE_LIB      := $(BUILD)/lib/$(CONFIG)/libext4core.a
 CORE_TEST_LIB := $(BUILD)/lib/$(CONFIG)/libext4core-test.a
 
-.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-reorder test-crypto test-orphan test-luks test-eio test-csum test-fragmentation test-scale test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple
+.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-reorder test-crypto test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple
 
 all: app
 
@@ -381,6 +381,12 @@ test-fragmentation: tools
 # sets SLOW=1 for you.
 test-scale: tools
 	@SLOW=1 bash Tests/run_scale_tests.sh
+
+# The full set, over and over, stopping dead at the first failure. Not a
+# pass rate: the question is whether this ever loses data, and "usually not"
+# is not an answer. SOAK_ROUNDS=N to bound it.
+soak:
+	@bash scripts/soak.sh
 
 # What a killed driver leaves behind, and whether the journal recovers it.
 # Passes on a disk image; EXT4_KILL_DEVICE=diskN points it at real media,

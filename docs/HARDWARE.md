@@ -309,9 +309,12 @@ Three things bound it, and they matter more than the extent count:
 - at most eight inodes hold one at a time, and taking a ninth returns the
   oldest -- so the space in flight is capped by the table, not by how many
   files are being copied;
-- unmount returns whatever is left, and a volume with less than 256 MiB free
-  stops reserving entirely: fragmented files are a better problem than
-  fragmented free space on a volume that is filling up.
+- below 256 MiB free the driver not only stops reserving, it gives back what
+  it is holding. Stopping at "take no more" is not enough: a 512 MB volume
+  filled to ENOSPC one file at a time took 8 MiB less data than the same
+  volume without reservations -- one reservation left holding, because the
+  threshold that stopped new ones also stopped the evictions that would have
+  returned it. Releasing restores the figure exactly.
 
 An inode that already has space past end-of-file never gets a reservation.
 That space belongs to an explicit `F_PREALLOCATE`, and trimming it later
