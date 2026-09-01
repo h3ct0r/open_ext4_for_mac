@@ -183,6 +183,29 @@ int ext4_ialloc_free_inode(struct ext4_fs *fs, uint32_t index, bool is_dir)
 			DBG_WARN "Bitmap checksum failed."
 			"Group: %" PRIu32"\n",
 			bg_ref.index);
+		/*
+		 * Refuse rather than write through a bitmap that does not verify.
+		 *
+		 * This used to warn and carry on: clear the bit, then recompute the
+		 * checksum over the modified bitmap and write that back -- turning a
+		 * corrupt inode bitmap into one that verifies, and destroying the only
+		 * evidence in the same breath. A checksum whose failure is overwritten
+		 * is worse than none, because it is trusted.
+		 *
+		 * Refusing the free leaks the inode: it stays marked in use with no
+		 * directory entry pointing at it until e2fsck reclaims it. That is the
+		 * intended trade, and it is the same one ext4_balloc_free_block makes
+		 * for blocks. A leak is recoverable; handing the same inode number to a
+		 * second file because the map said it was free is not.
+		 *
+		 * Only reachable on a read-write mount, which cannot happen before the
+		 * journal has replayed -- WRITE_PROLOGUE returns EROFS on a read-only
+		 * mount, and ext4b_mount recovers before anything else. Checksums that
+		 * fail on an unrecovered volume are expected and must not land here.
+		 */
+		ext4_block_set(fs->bdev, &b);
+		ext4_fs_put_block_group_ref(&bg_ref);
+		return EIO;
 	}
 
 	/* Free i-node in the bitmap */
@@ -276,6 +299,14 @@ int ext4_ialloc_alloc_inode(struct ext4_fs *fs, uint32_t *idx, bool is_dir)
 					DBG_WARN "Bitmap checksum failed."
 					"Group: %" PRIu32"\n",
 					bg_ref.index);
+				/* Refuse rather than write through a bitmap that does
+				 * not verify; see ext4_ialloc_free_inode above for why,
+				 * and for what refusing costs. Skipping the group and
+				 * trying the next one would be worse than refusing: it
+				 * hides the corruption behind a successful create. */
+				ext4_block_set(fs->bdev, &b);
+				ext4_fs_put_block_group_ref(&bg_ref);
+				return EIO;
 			}
 
 			/* Try to allocate i-node in the bitmap */

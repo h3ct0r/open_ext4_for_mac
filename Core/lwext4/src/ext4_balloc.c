@@ -181,6 +181,28 @@ int ext4_balloc_free_block(struct ext4_inode_ref *inode_ref, ext4_fsblk_t baddr)
 			DBG_WARN "Bitmap checksum failed."
 			"Group: %" PRIu32"\n",
 			bg_ref.index);
+		/*
+		 * Refuse rather than write through a bitmap that does not verify.
+		 *
+		 * This used to warn and carry on: modify the bitmap, then recompute the
+		 * checksum over it and write that back -- turning a corrupt bitmap into
+		 * one that verifies and destroying the only evidence in the same breath.
+		 * A checksum whose failure is overwritten is worse than none, because it
+		 * is trusted.
+		 *
+		 * Refusing a free leaks the blocks: they stay allocated with nothing
+		 * pointing at them until e2fsck reclaims them. That is the intended
+		 * trade. A leak is recoverable; handing the same blocks to a second file
+		 * because the map said they were free is not.
+		 *
+		 * Only reachable on a read-write mount, which cannot happen before the
+		 * journal has replayed -- WRITE_PROLOGUE returns EROFS on a read-only
+		 * mount, and ext4b_mount recovers before anything else. Checksums that
+		 * fail on an unrecovered volume are expected and must not land here.
+		 */
+		ext4_block_set(fs->bdev, &bitmap_block);
+		ext4_fs_put_block_group_ref(&bg_ref);
+		return EIO;
 	}
 
 	/* Modify bitmap */
@@ -316,6 +338,12 @@ int ext4_balloc_free_blocks(struct ext4_inode_ref *inode_ref,
 				DBG_WARN "Bitmap checksum failed."
 				"Group: %" PRIu32"\n",
 				bg_ref.index);
+			/* Refuse rather than write through a bitmap that does not verify;
+			 * see ext4_balloc_free_block above for why, and for what refusing
+			 * costs. */
+			ext4_block_set(fs->bdev, &blk);
+			ext4_fs_put_block_group_ref(&bg_ref);
+			return EIO;
 		}
 		uint32_t free_cnt;
 		free_cnt = ext4_sb_get_block_size(sb) * 8 - idx_in_bg_first;
@@ -442,6 +470,12 @@ int ext4_balloc_alloc_block(struct ext4_inode_ref *inode_ref,
 			DBG_WARN "Bitmap checksum failed."
 			"Group: %" PRIu32"\n",
 			bg_ref.index);
+		/* Refuse rather than write through a bitmap that does not verify;
+		 * see ext4_balloc_free_block above for why, and for what refusing
+		 * costs. */
+		ext4_block_set(inode_ref->fs->bdev, &b);
+		ext4_fs_put_block_group_ref(&bg_ref);
+		return EIO;
 	}
 
 	/* Check if goal is free */
@@ -544,6 +578,12 @@ goal_failed:
 				DBG_WARN "Bitmap checksum failed."
 				"Group: %" PRIu32"\n",
 				bg_ref.index);
+			/* Refuse rather than write through a bitmap that does not verify;
+			 * see ext4_balloc_free_block above for why, and for what refusing
+			 * costs. */
+			ext4_block_set(inode_ref->fs->bdev, &b);
+			ext4_fs_put_block_group_ref(&bg_ref);
+			return EIO;
 		}
 
 		/* Compute indexes */
@@ -654,6 +694,12 @@ int ext4_balloc_try_alloc_block(struct ext4_inode_ref *inode_ref,
 			DBG_WARN "Bitmap checksum failed."
 			"Group: %" PRIu32"\n",
 			bg_ref.index);
+		/* Refuse rather than write through a bitmap that does not verify;
+		 * see ext4_balloc_free_block above for why, and for what refusing
+		 * costs. */
+		ext4_block_set(fs->bdev, &b);
+		ext4_fs_put_block_group_ref(&bg_ref);
+		return EIO;
 	}
 
 	/* Check if block is free */
