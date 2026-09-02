@@ -52,9 +52,44 @@ OUT="$ROOT/.soak"
 mkdir -p "$OUT"
 
 ROUNDS="${SOAK_ROUNDS:-0}"        # 0 = keep going
+
+# A round that skipped half its stages is not a round.
+#
+# run_full_validation.sh treats a missing prerequisite as SKIP rather than
+# failure, which is right for someone running it on a laptop without Docker.
+# It is wrong for a soak: the whole product here is "nothing found in N runs",
+# and an N built out of rounds that did not run the crash sweep, the Linux
+# differential or the mounted driver is worse than no N at all -- it is a
+# number that invites trust it has not earned.
+#
+# This has already happened once. Docker did not come back after a reboot,
+# twenty rounds passed in 215 s each instead of 630, and seven stages -- every
+# one that needs the Linux oracle, including both mounted stages, which are
+# nested inside the Docker branch -- silently did not run.
+require_prereqs() {
+    local missing=""
+    docker info >/dev/null 2>&1 || missing="$missing
+  - Docker is not running. Stages 6, 7, 7b, 8, 8b SKIP without it, and so do
+    9 and 10, which are nested inside that branch -- so the mounted driver is
+    not exercised at all. Start Docker Desktop and wait for it to settle."
+    bash "$ROOT/scripts/check_extension.sh" >/dev/null 2>&1 || missing="$missing
+  - The FSKit extension is not enabled and answering. Stages 9 to 12 need it.
+    System Settings > General > Login Items & Extensions > File System
+    Extensions."
+    [ -z "$missing" ] && return 0
+    echo "soak: refusing to start, because the rounds would not measure much:"
+    echo "$missing"
+    echo ""
+    echo "  (SOAK_ALLOW_SKIPS=1 overrides, if a partial soak is what you want.)"
+    return 1
+}
+if [ "${SOAK_ALLOW_SKIPS:-0}" != "1" ]; then
+    require_prereqs || exit 2
+fi
 started=$(date "+%Y-%m-%d %H:%M")
 passed=0
 slept_rounds=0
+partial_rounds=0
 failed_at=""
 
 # Seconds of the kernel's last wake. Changes across a round exactly when the
@@ -73,6 +108,9 @@ report() {
     echo "soak: $passed round(s) passed, started $started"
     if [ "$slept_rounds" -gt 0 ]; then
         echo "      $slept_rounds round(s) spanned a sleep and were not counted"
+    fi
+    if [ "$partial_rounds" -gt 0 ]; then
+        echo "      $partial_rounds round(s) skipped stages and were not counted"
     fi
     if [ -n "$failed_at" ]; then
         echo "      round $failed_at FAILED -- $OUT/round-$failed_at.log"
@@ -112,6 +150,20 @@ while :; do
         printf "SLEPT (%ds, rc=%d)  -- not counted\n" "$took" "$rc"
         [ "$rc" -eq 0 ] && rm -f "$log" \
             || mv "$log" "$OUT/slept-round-$round.log"
+        continue
+    fi
+
+    # Checked per round as well as up front: Docker can stop, and a soak that
+    # kept counting after it did would quietly change what it was measuring
+    # halfway through.
+    skipped=$(grep -cE '^[0-9]+[a-z]*\..* SKIP ' "$log" 2>/dev/null || echo 0)
+    if [ "$rc" -eq 0 ] && [ "${skipped:-0}" -gt 0 ] \
+       && [ "${SOAK_ALLOW_SKIPS:-0}" != "1" ]; then
+        printf "PARTIAL (%ds, %s stage(s) skipped) -- not counted\n" \
+               "$took" "$skipped"
+        grep -E '^[0-9]+[a-z]*\..* SKIP ' "$log" | head -8
+        mv "$log" "$OUT/partial-round-$round.log"
+        partial_rounds=$((partial_rounds + 1))
         continue
     fi
 

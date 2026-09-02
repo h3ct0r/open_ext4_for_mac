@@ -1579,9 +1579,19 @@ anything:
 A round costs about ten minutes, which is worth knowing before deciding how
 long to leave it running: soaking overnight is dozens of rounds, not two.
 
+A round of the full set takes about ten minutes. **If one takes three, count
+the stages before believing it** -- `run_full_validation.sh` records a missing
+prerequisite as SKIP rather than failure, which is right for a laptop without
+Docker and wrong for a soak. Twenty rounds once passed in 215 s each because
+Docker had not come back after a reboot, and seven stages did not run: every
+one that needs the Linux oracle, plus both mounted stages, which are nested
+inside that branch. `scripts/soak.sh` refuses to start in that state now, and
+does not count a round that skipped anything.
+
 | date | clean rounds | notes |
 |---|---|---|
 | 2026-09-01 | 1 | 628 s, on the build that closed the fragmentation work |
+| 2026-09-01 | 7 + 7 | two runs, each stopped in round 8 by the harness rather than the driver: a laptop sleeping through a wall-clock deadline, then a remount losing a DiskArbitration re-probe. Both fixed. |
 | 2026-09-01 | 7 | then **round 8 wedged** — see below |
 
 ### What the first long soak found
