@@ -64,7 +64,13 @@ STARTED=$(date +%s)
 PASS=0; FAIL=0; CUTS=0
 note() { echo "$*" | tee -a "$REPORT"; }
 ok()   { PASS=$((PASS+1)); }
-bad()  { FAIL=$((FAIL+1)); note "  FAIL  $*"; }
+  # Must not return nonzero. `cmd && bad "x" || ok "x"` otherwise runs
+  # BOTH arms when cmd succeeds, because the trailing test in bad is
+  # false with no detail argument -- one assertion counted as a pass
+  # and a failure at once. Seen for real: "FAIL ext2 has no journal"
+  # immediately followed by "ok ext2 has no journal". lib.sh has
+  # returned 0 for this reason since it was written.
+bad()  { FAIL=$((FAIL+1)); note "  FAIL  $*"; return 0; }
 
 [ -x "$DUMP" ] || { echo "build first: make tools"; exit 1; }
 [ -f "$FIX/ext4_4k.img" ] && [ -f "$FIX/ext4_64m.img" ] || bash "$ROOT/Tests/make_fixtures.sh"

@@ -156,7 +156,13 @@ while :; do
     # Checked per round as well as up front: Docker can stop, and a soak that
     # kept counting after it did would quietly change what it was measuring
     # halfway through.
-    skipped=$(grep -cE '^[0-9]+[a-z]*\..* SKIP ' "$log" 2>/dev/null || echo 0)
+    # No `|| echo 0`: grep -c already prints 0, and exits 1 when it does, so
+    # the fallback appended a second line and every comparison below became
+    # "[: 0\n0: integer expected". The test then errored rather than being
+    # false, so a partial round would have been counted as a pass -- the
+    # check silently not working is worse than not having it.
+    skipped=$(grep -cE '^[0-9]+[a-z]*\..* SKIP ' "$log" 2>/dev/null)
+    skipped=${skipped:-0}
     if [ "$rc" -eq 0 ] && [ "${skipped:-0}" -gt 0 ] \
        && [ "${SOAK_ALLOW_SKIPS:-0}" != "1" ]; then
         printf "PARTIAL (%ds, %s stage(s) skipped) -- not counted\n" \

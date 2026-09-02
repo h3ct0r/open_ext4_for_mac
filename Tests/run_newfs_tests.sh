@@ -12,6 +12,7 @@ set -uo pipefail
 export PATH="/opt/homebrew/opt/e2fsprogs/sbin:/opt/homebrew/opt/e2fsprogs/bin:$PATH"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$ROOT/Tests/mount_retry.sh"
 WORK="$ROOT/build/newfs"
 DATA="$ROOT/build/bin/datafile"
 IMG="$WORK/newfs.img"
@@ -20,7 +21,13 @@ DEV=""
 
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); echo "  ok    $*"; }
-bad() { FAIL=$((FAIL+1)); echo "  FAIL  $*"; shift; [ $# -gt 0 ] && echo "        $*"; }
+  # Must not return nonzero. `cmd && bad "x" || ok "x"` otherwise runs
+  # BOTH arms when cmd succeeds, because the trailing test in bad is
+  # false with no detail argument -- one assertion counted as a pass
+  # and a failure at once. Seen for real: "FAIL ext2 has no journal"
+  # immediately followed by "ok ext2 has no journal". lib.sh has
+  # returned 0 for this reason since it was written.
+bad() { FAIL=$((FAIL+1)); echo "  FAIL  $*"; shift; [ $# -gt 0 ] && echo "        $*"; return 0; }
 
 cleanup() {
   umount "$MNT" 2>/dev/null
@@ -117,15 +124,44 @@ if mount -F -t ext4 "${DEV#/dev/}" "$MNT" 2>/dev/null; then
       bad "and it reads back byte-exact after a remount" \
           "$("$DATA" verify "$MNT/cold.bin" 1052136 4242 2>&1 | head -2 | tr '\n' ' ')"
     fi
-    umount "$MNT" 2>/dev/null
+    # Checked, and retried, because everything below reads the raw device.
+    # Discarding this cost a soak round: the unmount lost a transient race,
+    # the volume stayed mounted, and then e2fsck read a live filesystem and
+    # the three FSKit tools returned EBUSY -- seven red cells, none of which
+    # named the unmount. Report it here, where it happened.
+    if ! uerr=$(umount_ext4_retry "$MNT"); then
+      bad "the volume unmounts after the cold read" "$uerr"
+      note "  everything below reads the raw device and would only report"
+      note "  that it is busy, so it is skipped rather than run"
+      SKIP_RAW=1
+    else
+      ok "the volume unmounts after the cold read"
+    fi
   else
     bad "the volume mounts again for the cold read"
   fi
+  if [ "${SKIP_RAW:-0}" = 1 ]; then
+    note "  (skipping the raw-device checks: the volume is still mounted)"
+  else
   e2fsck -fn "$RDEV" >/dev/null 2>&1 \
     && ok "e2fsck clean after the mounted session" \
     || bad "e2fsck clean after the mounted session"
+  fi
 else
   bad "the freshly formatted volume mounts"
+fi
+
+# Everything from here reads or reformats the raw device. If the volume is
+# still mounted, every one of them returns EBUSY -- which is how one lost
+# unmount became seven red cells that named neither the unmount nor each
+# other. One honest failure beats six confusing ones.
+if [ "${SKIP_RAW:-0}" = 1 ]; then
+  echo ""
+  echo "  the volume is still mounted, so the raw-device checks below would"
+  echo "  only report that it is busy. Skipping them."
+  echo ""
+  echo "passed: $PASS failed: $FAIL"
+  exit 1
 fi
 
 # --- fsck_fskit ------------------------------------------------------------
@@ -154,8 +190,11 @@ feats=$(dumpe2fs -h "$RDEV" 2>/dev/null)
 grep -q "volume name:   NEWFS2" <<<"$feats" && grep -q "Block size:               1024" <<<"$feats" \
   && ok "the last format's label and block size are on disk" \
   || bad "the last format's label and block size are on disk"
-grep -q "has_journal" <<<"$feats" \
-  && bad "ext2 has no journal" || ok "ext2 has no journal"
+if grep -q "has_journal" <<<"$feats"; then
+  bad "ext2 has no journal"
+else
+  ok "ext2 has no journal"
+fi
 e2fsck -fn "$RDEV" >/dev/null 2>&1 \
   && ok "e2fsck accepts the ext2 volume" || bad "e2fsck accepts the ext2 volume"
 

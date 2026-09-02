@@ -28,7 +28,13 @@ WORK="$ROOT/build/revoke"
 
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); echo "  ok    $*"; }
-bad() { FAIL=$((FAIL+1)); echo "  FAIL  $*"; }
+  # Must not return nonzero. `cmd && bad "x" || ok "x"` otherwise runs
+  # BOTH arms when cmd succeeds, because the trailing test in bad is
+  # false with no detail argument -- one assertion counted as a pass
+  # and a failure at once. Seen for real: "FAIL ext2 has no journal"
+  # immediately followed by "ok ext2 has no journal". lib.sh has
+  # returned 0 for this reason since it was written.
+bad() { FAIL=$((FAIL+1)); echo "  FAIL  $*"; return 0; }
 
 [ -x "$DUMP" ] || { echo "build first: make tools"; exit 1; }
 rm -rf "$WORK"; mkdir -p "$WORK"

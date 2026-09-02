@@ -468,7 +468,15 @@ else
     got=$(shasum -a 256 "$MNT/wide.bin" 2>/dev/null | cut -d' ' -f1)
     [ "$got" = "$want" ] && ok "contents are correct through the stored key" \
                          || bad "contents differ through the stored key"
-    umount "$MNT" 2>/dev/null
+    # Checked, because the DiskArbitration cell below mounts the SAME device
+    # and cannot if this one is still mounted. Discarding it produced two
+    # failures -- "DiskArbitration would not mount it" and "the volume still
+    # mounted after forget" -- that named neither the unmount nor each other,
+    # and only when this suite ran straight after run_mount_crash_tests.sh,
+    # whose sweep leaves DiskArbitration busy enough to lose the race.
+    if ! uerr=$(umount_ext4_retry "$MNT"); then
+      bad "the volume unmounts before the DiskArbitration path is tried" "$uerr"
+    fi
   else
     bad "could not mount with the key the app stored"
   fi
