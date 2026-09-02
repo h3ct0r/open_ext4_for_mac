@@ -1574,7 +1574,11 @@ read.
 
 The count belongs here, appended as it accumulates, because "no known bugs"
 and "none found in N runs" are different claims and only the second one means
-anything:
+anything. What the first few days taught: every stop so far was the harness,
+not the driver -- a sleep, a DiskArbitration transient, a wedged app
+container, an unchecked unmount -- and a soak is only as good as the scripts
+around it. Four of those were found and fixed before the count below became
+a number worth quoting:
 
 A round costs about ten minutes, which is worth knowing before deciding how
 long to leave it running: soaking overnight is dozens of rounds, not two.
@@ -1592,6 +1596,8 @@ does not count a round that skipped anything.
 |---|---|---|
 | 2026-09-01 | 1 | 628 s, on the build that closed the fragmentation work |
 | 2026-09-01 | 7 + 7 | two runs, each stopped in round 8 by the harness rather than the driver: a laptop sleeping through a wall-clock deadline, then a remount losing a DiskArbitration re-probe. Both fixed. |
+| 2026-09-02 | 6 | stopped in round 7 by an unchecked unmount in the newfs suite (`66fabc1`); the fourth harness fault, and the last one found |
+| 2026-09-02 | **17** | 20 rounds requested, none failed. Three spanned a lid-close and were excluded by the sleep detection although each also passed. Every counted round 631–647 s: the full set, every time. First run with all four harness faults fixed. |
 | 2026-09-01 | 7 | then **round 8 wedged** — see below |
 
 ### What the first long soak found
