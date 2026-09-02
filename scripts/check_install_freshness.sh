@@ -47,6 +47,18 @@ if [ ! -d "$BUILT" ]; then
   # failed check, not a pass: "could not verify" and "verified" must not
   # be the same green.
   echo "freshness: no built appex in build/ to compare against"
+  # Naming the likely cause, because the caller's remedy line says "run make
+  # install" and that is the wrong move for the common one. A validation run
+  # -- and therefore every soak round -- begins with `make clean`, so asking
+  # this question while one is in flight always lands here. Reinstalling then
+  # rebuilds and reinstalls underneath the run.
+  if pgrep -f "run_full_validation.sh" >/dev/null 2>&1; then
+    echo "  a validation run is in flight and has just cleaned build/."
+    echo "  Nothing is wrong with the install; wait for it rather than"
+    echo "  rebuilding underneath it."
+  else
+    echo "  (usual cause: make clean. 'make app' rebuilds it.)"
+  fi
   [ "${EXT4_REQUIRE_FRESH:-0}" = "1" ] && exit 1
   exit 0
 fi

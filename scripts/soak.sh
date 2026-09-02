@@ -124,12 +124,27 @@ while :; do
     else
         printf "FAIL  (%ds)\n" "$took"
         echo ""
-        echo "the failing stages:"
-        # Deliberately not case-insensitive on the word alone: "failed: 0" is
-        # what a PASSING suite prints, and matching it buried the one line
-        # that mattered under twenty green ones the first time this fired.
-        grep -nE "(^|[[:space:]])FAIL([[:space:]]|$)|FAILURES PRESENT|failed: [1-9]|could not |RESULT: FAIL" \
-            "$log" | head -20
+        # The validation driver ends with a stage table -- "9. mounted driver
+        # PASS 24s" -- and everything in it that is not PASS is the answer.
+        #
+        # Two grep-for-the-word-FAIL attempts came before this and both
+        # printed noise: "failed: 0" is what a PASSING suite prints, and
+        # "PASS 15 FAIL 0" contains the word with spaces either side. The
+        # second version reported a 900-second timeout as the two lines
+        # "PASS 15 FAIL 0" and "FAILURES PRESENT", naming neither the stage
+        # nor the cause. Match the table instead of the vocabulary.
+        echo "the stages that did not pass:"
+        grep -E '^[0-9]+[a-z]*\. ' "$log" | grep -vE ' PASS +[0-9]+s$' | head -10
+
+        # And whatever the run said in prose. A stage that times out, or a
+        # host that has wedged, explains itself a line or two above the
+        # table, and that explanation is usually the whole diagnosis --
+        # "writing into the extension container HANGS ... a reboot clears
+        # it" was sitting in the log the whole time.
+        echo ""
+        echo "what the run said:"
+        grep -nE "produced no result|HANGS|wedged|^  FAIL |SKIPPED" "$log" \
+            | tail -8
         failed_at=$round
         report
     fi
