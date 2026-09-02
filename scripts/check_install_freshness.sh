@@ -40,6 +40,46 @@ running_note() {
 
 [ -d "$INSTALLED" ] || { echo "freshness: nothing installed at $INSTALLED"; exit 1; }
 
+# The question is "is the installed extension the code in this tree?", and
+# neither of the two comparisons below asks it directly. The CDHash match asks
+# whether make install ran after make app; the stamp asks whether it ran at
+# HEAD. Both are proxies, and both need build/, which every validation run
+# deletes -- so after any soak the gate could only say "cannot be checked".
+#
+# What goes into the appex is a fixed set of paths. If none of them changed
+# between the stamped commit and HEAD, and none is edited uncommitted, the
+# installed binary IS this code and only its label is older. That is asked
+# first, from git alone. It matters because the alternative -- reinstall to
+# fix the label -- registers a new bundle, which can drop the extension's
+# user approval, and did, three times in one day, for a byte-identical
+# binary each time.
+#
+# Conservative on purpose: a dirty stamp was built from edits that no commit
+# records and cannot be compared to anything, so it falls through.
+APPEX_SOURCES="Extension Core Shared App patches Makefile scripts/sign.sh"
+stamped=$(buildid "$INSTALLED" || echo unstamped)
+head=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null)
+if [ -n "$head" ] && [ "$stamped" != "unstamped" ]; then
+  case "$stamped" in
+    *-dirty) ;;
+    *)
+      if git -C "$ROOT" rev-parse --verify -q "$stamped^{commit}" >/dev/null 2>&1 \
+         && git -C "$ROOT" diff --quiet "$stamped" HEAD -- $APPEX_SOURCES \
+         && git -C "$ROOT" diff --quiet HEAD -- $APPEX_SOURCES; then
+        if [ "$stamped" = "$head" ]; then
+          echo "freshness: installed extension is this tree ($stamped)"
+        else
+          echo "freshness: installed extension is this code (stamped $stamped, tree $head;"
+          echo "           nothing that goes into the appex changed between them)"
+          echo "  note: log lines will carry [build $stamped]. Reinstall only if that"
+          echo "        matters for a hardware session's evidence."
+        fi
+        running_note
+        exit 0
+      fi ;;
+  esac
+fi
+
 if [ ! -d "$BUILT" ]; then
   # Nothing local to compare against -- common right after `make clean`.
   # Say so rather than pretending to have checked anything. Under
@@ -99,6 +139,8 @@ if [ "$built" = "$installed" ]; then
   echo "  installed: $stamped  (and build/ agrees, which is why the"
   echo "             CDHash comparison alone reports this as current)"
   echo "  tree:      $head"
+  echo "  something that goes into the appex changed between them:"
+  git -C "$ROOT" diff --name-only "${stamped%-dirty}" HEAD -- $APPEX_SOURCES 2>/dev/null | sed 's/^/    /' | head -8
   echo "  run 'make app && make install'"
   running_note
   [ "${EXT4_REQUIRE_FRESH:-0}" = "1" ] && exit 1
