@@ -32,8 +32,25 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 # The commit the superproject pins, not whatever HEAD happens to be: a clone
 # gets the pinned one, and that is the tree we are asking about.
-pinned="$(git -C "$ROOT" ls-tree HEAD Core/lwext4 | awk '{print $3}')"
-[ -n "$pinned" ] || pinned="$(git -C "$LWEXT4" rev-parse HEAD)"
+# git 2.35+ refuses a working tree whose owner differs from the caller with
+# "detected dubious ownership" and exit 128 -- a CI runner trips this. Name the
+# command that failed rather than letting a bare 128 stand, and suggest the
+# fix, so a runner problem does not read as a patch problem.
+pinned="$(git -C "$ROOT" ls-tree HEAD Core/lwext4 2>/tmp/giterr | awk '{print $3}')"
+if [ -z "$pinned" ]; then
+    pinned="$(git -C "$LWEXT4" rev-parse HEAD 2>>/tmp/giterr)"
+fi
+if [ -z "$pinned" ]; then
+    echo "check-patches: could not read the pinned lwext4 commit." >&2
+    sed 's/^/  git: /' /tmp/giterr >&2 2>/dev/null || true
+    if grep -q "dubious ownership" /tmp/giterr 2>/dev/null; then
+        echo "  this is git refusing a checkout it does not own, not a patch problem." >&2
+        echo "  fix: git config --global --add safe.directory '*'" >&2
+    fi
+    rm -f /tmp/giterr
+    exit 1
+fi
+rm -f /tmp/giterr
 
 # Extract rather than clone, so no .git comes along -- a copied submodule
 # gitlink points back into the superproject and every git command in the copy

@@ -41,6 +41,16 @@ jobs:
         with:
           submodules: recursive
 
+      # git 2.35+ refuses to operate on a working tree whose owner does not
+      # match the user running git ("detected dubious ownership", exit 128),
+      # and a GitHub runner's checkout trips exactly that in check_patches'
+      # `git ls-tree`/`git archive`. Mark the workspace and its submodule
+      # trusted. Harmless locally; the developer owns their own checkout.
+      - name: trust the checkout
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "*"
+
       # The suites patch the pinned lwext4 commit; a shallow submodule with no
       # history still has the pinned tree, which is all check_patches.sh reads.
       - name: toolchain
@@ -51,6 +61,9 @@ jobs:
           cc --version | head -1
 
       - name: install e2fsprogs
+        env:
+          HOMEBREW_NO_REQUIRE_TAP_TRUST: 1
+          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
         run: |
           brew install e2fsprogs
           echo "/opt/homebrew/opt/e2fsprogs/sbin" >> "$GITHUB_PATH"
@@ -94,7 +107,20 @@ jobs:
         with:
           submodules: recursive
 
+      # git 2.35+ refuses to operate on a working tree whose owner does not
+      # match the user running git ("detected dubious ownership", exit 128),
+      # and a GitHub runner's checkout trips exactly that in check_patches'
+      # `git ls-tree`/`git archive`. Mark the workspace and its submodule
+      # trusted. Harmless locally; the developer owns their own checkout.
+      - name: trust the checkout
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "*"
+
       - name: install e2fsprogs
+        env:
+          HOMEBREW_NO_REQUIRE_TAP_TRUST: 1
+          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
         run: |
           brew install e2fsprogs
           echo "/opt/homebrew/opt/e2fsprogs/sbin" >> "$GITHUB_PATH"
@@ -139,6 +165,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      # git 2.35+ refuses to operate on a working tree whose owner does not
+      # match the user running git ("detected dubious ownership", exit 128),
+      # and a GitHub runner's checkout trips exactly that in check_patches'
+      # `git ls-tree`/`git archive`. Mark the workspace and its submodule
+      # trusted. Harmless locally; the developer owns their own checkout.
+      - name: trust the checkout
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "*"
 
       # cryptsetup for the LUKS fixtures, attr for the xattr and chattr checks
       # in the differential suite, libssl-dev because Core/crypto reaches
@@ -209,7 +245,20 @@ jobs:
         with:
           submodules: recursive
 
+      # git 2.35+ refuses to operate on a working tree whose owner does not
+      # match the user running git ("detected dubious ownership", exit 128),
+      # and a GitHub runner's checkout trips exactly that in check_patches'
+      # `git ls-tree`/`git archive`. Mark the workspace and its submodule
+      # trusted. Harmless locally; the developer owns their own checkout.
+      - name: trust the checkout
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "*"
+
       - name: install e2fsprogs
+        env:
+          HOMEBREW_NO_REQUIRE_TAP_TRUST: 1
+          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
         run: |
           brew install e2fsprogs
           echo "/opt/homebrew/opt/e2fsprogs/sbin" >> "$GITHUB_PATH"
@@ -231,7 +280,7 @@ jobs:
             fi
           done
           echo "no compiler here ships a libFuzzer runtime; installing llvm"
-          brew install llvm
+          HOMEBREW_NO_REQUIRE_TAP_TRUST=1 brew install llvm
           echo "fuzz_cc=/opt/homebrew/opt/llvm/bin/clang" >> "$GITHUB_OUTPUT"
 
       # The corpus is the point of running this repeatedly. Keyed on the
