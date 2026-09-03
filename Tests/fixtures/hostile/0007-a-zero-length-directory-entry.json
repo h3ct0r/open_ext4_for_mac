@@ -1,0 +1,11 @@
+{
+  "id": "0007",
+  "slug": "a-zero-length-directory-entry",
+  "found_by": "the in-process fuzzer, read-write mode, the same two-minute soak interlude that produced 0006",
+  "base": "a mutant of Tests/fuzz/make_seeds.sh seed s06",
+  "symptom": "libFuzzer reported it as a TIMEOUT rather than a crash: ext4_dir_try_insert_entry advances by each entry's rec_len, and a rec_len of zero makes the walk stand still. The driver holds the mount while it spins, which is the failure patch 0007 exists because of -- and 0007's abort does not catch it, because nothing asserts.",
+  "measurement": "still running after 60 seconds against a build without 0067; under one second with it.",
+  "note": "Same root cause and same patch as 0006, kept separately because libFuzzer classified them differently and a regression suite that only holds the crash would not notice the spin coming back.",
+  "fixed_by": "patches/lwext4/0067-a-directory-entry-length-off-the-medium-is-bounded-before-it-is-used.patch",
+  "reproduce": "build/bin/ext4dump <img> script -   with a mkdir and a create"
+}

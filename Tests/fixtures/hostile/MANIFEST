@@ -30,3 +30,4 @@
 0004-inode-table-moved-under-an-xattr-walk.img.gz  ro    probe,ls+/,check,xattrwalk+/  0065  one byte in a group descriptor moves the inode table into the metadata region; the xattr walk then read past the inode buffer
 0005-a-journal-that-replays-the-superblock.img.gz  rw    probe,ls+/,check  0066  a committed transaction staging arbitrary bytes for block 1, which is the superblock on a 1 KiB volume
 0006-a-directory-entry-longer-than-its-block.img.gz  rw    probe,ls+/,check  0067  a directory entry whose rec_len runs past its block; the insert path asserted on it, and a rec_len of zero would have spun
+0007-a-zero-length-directory-entry.img.gz  rw    probe,ls+/,check  0067  an entry whose rec_len is zero: the insert walk advanced by it and spun, holding the mount
