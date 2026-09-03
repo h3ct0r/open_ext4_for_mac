@@ -387,20 +387,39 @@ static int ext4_fs_init_block_bitmap(struct ext4_block_group_ref *bg_ref)
 		group_blocks = ext4_get32(sb, blocks_per_group);
 	}
 
+	/*
+	 * The three writes below index the same block-sized bitmap by a block
+	 * address taken straight from the group descriptor -- bmp_blk,
+	 * bmp_inode and every block of the inode table -- minus first_bg. None
+	 * had been bounded. When flex_bg is off the in_bg test is bypassed
+	 * entirely, so a descriptor whose bitmap or inode-table block sits
+	 * below first_bg makes the subtraction wrap to about four billion and
+	 * the bit set land gigabytes past the buffer, and one above the group's
+	 * span indexes past 8 x block size. This runs at mount, initialising a
+	 * BLOCK_UNINIT group, reached from ext4_fs_get_block_group_ref during
+	 * an ordinary lookup -- the same shape as the bit_max clamp above, and
+	 * clamped the same way: mark it only if it falls inside this group's
+	 * bitmap, and leave a descriptor that disagrees for e2fsck.
+	 */
+	uint32_t bitmap_bits = block_size * 8;
+
 	bool in_bg;
 	in_bg = ext4_block_in_group(sb, bmp_blk, bg_ref->index);
-	if (!flex_bg || in_bg)
+	if ((!flex_bg || in_bg) && bmp_blk >= first_bg &&
+	    (bmp_blk - first_bg) < bitmap_bits)
 		ext4_bmap_bit_set(block_bitmap.data,
 				  (uint32_t)(bmp_blk - first_bg));
 
 	in_bg = ext4_block_in_group(sb, bmp_inode, bg_ref->index);
-	if (!flex_bg || in_bg)
+	if ((!flex_bg || in_bg) && bmp_inode >= first_bg &&
+	    (bmp_inode - first_bg) < bitmap_bits)
 		ext4_bmap_bit_set(block_bitmap.data,
 				  (uint32_t)(bmp_inode - first_bg));
 
         for (i = inode_table; i < inode_table + inode_table_bcnt; i++) {
 		in_bg = ext4_block_in_group(sb, i, bg_ref->index);
-		if (!flex_bg || in_bg)
+		if ((!flex_bg || in_bg) && i >= first_bg &&
+		    (i - first_bg) < bitmap_bits)
 			ext4_bmap_bit_set(block_bitmap.data,
 					  (uint32_t)(i - first_bg));
 	}
