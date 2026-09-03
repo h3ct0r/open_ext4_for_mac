@@ -875,6 +875,48 @@ EOF
     echo "  note  the read-write UB cell needs 'make test-asan' to mean anything"
     echo "        (this build has no UBSan; the mkdir itself returned rc=$rwrc)"
   fi
+
+  # --- a feature this driver reads wrongly must be refused, not mounted ----
+  # meta_bg scatters the group descriptors through the volume instead of
+  # putting them after the superblock, and lwext4's placement arithmetic does
+  # not agree with e2fsprogs about where they land past the first meta block
+  # group. It was on the supported list until it was measured: on a volume
+  # e2fsck calls clean the driver failed a descriptor checksum, could not read
+  # an inode debugfs reads fine, and reported 137 GB of data from 5 MiB.
+  # Writing was worse -- 150 creates left 59 inodes in groups still flagged
+  # INODE_UNINIT.
+  #
+  # This cell is the whole claim: refused at the probe, and the volume
+  # untouched by an attempted write. It needs no sanitizer to mean something.
+  MBIMG="$WORK/meta_bg.img"
+  rm -f "$MBIMG"; dd if=/dev/zero of="$MBIMG" bs=1m count=5 2>/dev/null
+  if mke2fs -q -F -t ext4 -b 1024 -g 1024 -N 512 -I 256 \
+       -O metadata_csum,64bit,extent,dir_index,meta_bg,^resize_inode \
+       -J size=1 "$MBIMG" 2>/dev/null; then
+    mb_verdict=$("$DUMP" "$MBIMG" probe 2>/dev/null | awk '/^verdict:/{print $2}')
+    if [ "$mb_verdict" = "UNSUPPORTED" ]; then
+      ok "a meta_bg volume is refused, not mounted"
+    else
+      bad "a meta_bg volume is refused, not mounted" \
+          "verdict $mb_verdict: this driver reads meta_bg descriptors incorrectly"
+    fi
+
+    mb_before=$(md5 -q "$MBIMG" 2>/dev/null || md5sum "$MBIMG" | cut -d' ' -f1)
+    {
+      echo "mkdir /d"
+      mb_i=1
+      while [ $mb_i -le 150 ]; do echo "create /d/n$mb_i"; mb_i=$((mb_i+1)); done
+    } | run_deadline 40 "$DUMP" "$MBIMG" script - >/dev/null 2>&1
+    mb_after=$(md5 -q "$MBIMG" 2>/dev/null || md5sum "$MBIMG" | cut -d' ' -f1)
+    if [ "$mb_before" = "$mb_after" ] && e2fsck -fn "$MBIMG" >/dev/null 2>&1; then
+      ok "and a write to one leaves it untouched and e2fsck-clean"
+    else
+      bad "a write to a meta_bg volume leaves it untouched" \
+          "$(e2fsck -fn "$MBIMG" 2>&1 | grep -m1 INODE_UNINIT || echo "the image changed")"
+    fi
+  else
+    echo "  (this mke2fs cannot create meta_bg; skipping the refusal cell)"
+  fi
 fi
 
 finish

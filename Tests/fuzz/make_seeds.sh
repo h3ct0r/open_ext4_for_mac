@@ -446,17 +446,23 @@ if want s09; then
   if mke2fs -q -t ext4 -b 1024 -g 1024 -N 512 -I 256 -L s09 \
        -O metadata_csum,64bit,extent,dir_index,meta_bg,^resize_inode \
        -J size=1 "$img" 2>/dev/null; then
-    # "linear": /many goes in through debugfs here, not through our own tool.
+    # "linear": /many goes in through debugfs, not through our own tool,
+    # because our own tool cannot write to this volume any more -- and should
+    # not have been able to before.
     #
-    # Not a preference. Creating files on a meta_bg volume WITH THIS DRIVER
-    # produces a filesystem e2fsck rejects: 150 creates give 59 complaints of
-    # the form "references inode N in group 1 where _INODE_UNINIT is set".
-    # The identical volume without meta_bg is clean, so it is the feature and
-    # not the tool. ext4b_probe lists META_BG in INCOMPAT_SUPPORTED and
-    # returns USABLE, so the driver will mount such a volume read-write and
-    # damage it -- an open finding for A8, with the corrupted image kept at
-    # .fuzz/min/hostile-meta-bg-uninit.img. Until that is fixed, this seed is
-    # about descriptor placement, which is what it was always for.
+    # meta_bg is now REFUSED by ext4b_probe. Creating 150 files on such a
+    # volume produced 59 e2fsck complaints of the form "references inode N in
+    # group 1 where _INODE_UNINIT is set", and reading one was no better: on
+    # an image e2fsck calls clean, the driver failed a group descriptor
+    # checksum, could not read an inode debugfs reads fine, and reported 137
+    # GB of file data from a 5 MiB volume. The identical volume without
+    # meta_bg is clean both ways.
+    #
+    # So s09 is a refused-feature seed now, like the s08 family: it keeps the
+    # named-refusal path in the corpus, which is the only thing this driver
+    # should be doing with a meta_bg volume until the descriptor placement is
+    # right. The corrupted image is kept at
+    # .fuzz/min/hostile-meta-bg-uninit.img.
     populate "$img" 300 linear
     check_content s09 "$img" docs empty many fastlink slowlink hardlink chardev || FAILED=1
   check_xattrs s09 "$img" || FAILED=1

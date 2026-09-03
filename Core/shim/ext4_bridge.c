@@ -539,7 +539,6 @@ void ext4b_set_txn_batch(ext4b_device *dev, uint32_t batch)
  */
 #define INCOMPAT_SUPPORTED  (0x0002 /* FILETYPE  */ | \
                              0x0004 /* RECOVER   */ | \
-                             0x0010 /* META_BG   */ | \
                              0x0040 /* EXTENTS   */ | \
                              0x0080 /* 64BIT     */ | \
                              0x0100 /* MMP       */ | \
@@ -767,6 +766,36 @@ int ext4b_probe(ext4b_device *dev, ext4b_probe_info *out)
         else if (bad_incompat & 0x4000) why = "filesystem uses large directories";
         else if (bad_incompat & 0x0001) why = "filesystem uses compression";
         else if (bad_incompat & 0x0008) why = "this is an external journal device";
+        /*
+         * META_BG was on the supported list until it was measured.
+         *
+         * On a meta_bg volume e2fsck calls clean -- 320 files, no errors --
+         * this driver fails the group descriptor checksum for group 2, cannot
+         * read inode 209 at all, and reports 137 GB of file data from an `ls`
+         * of a 5 MiB volume. Writing to one is worse: 150 files created leave
+         * 59 inodes in groups still flagged INODE_UNINIT, which e2fsck reports
+         * as damage. The identical volume without meta_bg is clean both ways,
+         * so it is the feature and not the allocator.
+         *
+         * Under meta_bg the group descriptors are scattered through the volume
+         * instead of following the superblock, and lwext4's placement
+         * arithmetic does not agree with e2fsprogs about where they are past
+         * the first meta block group. Both shim helpers that read descriptors
+         * directly already returned ENOTSUP on such a volume, which was the
+         * standing hint that nobody had checked the rest of it.
+         *
+         * Refused rather than downgraded to read-only, deliberately: a driver
+         * that returns the wrong bytes is worse than one that declines. The
+         * first version of this fix WAS a read-only downgrade, until `check`
+         * on the seed reported an inode it could not read and the reads turned
+         * out to be wrong as well.
+         *
+         * Found while building the fuzzing seed corpus, on a volume nothing
+         * had mutated. The fuzzing only got as far as making us write to one.
+         */
+        else if (bad_incompat & 0x0010)
+            why = "filesystem uses meta_bg descriptor placement, which this "
+                  "driver reads incorrectly";
         snprintf(out->unsupported, sizeof(out->unsupported),
                  "%s (incompat 0x%08x)", why, bad_incompat);
         return EOK;
