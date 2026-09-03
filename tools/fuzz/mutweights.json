@@ -1,0 +1,28 @@
+{
+  "_comment": [
+    "Relative weights for the structure-aware mutation strategies. Shared by",
+    "the in-process C mutator (tools/fuzz/ext4_mutator.c) and the Python",
+    "campaign that runs in validation (Tests/fuzz/mutate_image.py), so that",
+    "the two instruments aim at the same places and a finding from one is",
+    "reproducible by the other.",
+    "",
+    "Weights are relative, not percentages; they are summed and sampled.",
+    "raw is deliberately the largest single share: a structure-aware mutator",
+    "that never makes an unstructured edit stops finding the bugs that live",
+    "between structures."
+  ],
+  "weights": {
+    "raw": 20,
+    "superblock": 12,
+    "group_desc": 10,
+    "inode": 12,
+    "extent": 10,
+    "indirect": 5,
+    "dirent": 10,
+    "htree": 10,
+    "xattr": 8,
+    "jbd2": 8,
+    "block": 5
+  },
+  "restamp_skip_percent": 5
+}

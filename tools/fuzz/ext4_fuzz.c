@@ -38,6 +38,10 @@
 #include <sys/stat.h>
 
 #include "ext4_bridge.h"
+#include "ext4_mutator.h"
+
+/* libFuzzer's built-in mutator, used as the fallback. */
+size_t LLVMFuzzerMutate(uint8_t *Data, size_t Size, size_t MaxSize);
 
 /* ------------------------------------------------------------- the device -- */
 
@@ -126,12 +130,15 @@ static uint32_t  g_bsize     = 512;
  * input get past the probe at all, or was the whole run rejected at byte 56? */
 static uint64_t g_inputs, g_probed, g_mounted;
 
+static bool g_custom_mutator = true;
+
 static void fuzz_stats(void)
 {
     fprintf(stderr, "ext4_fuzz: inputs=%llu probed-ext=%llu mounted=%llu\n",
             (unsigned long long)g_inputs,
             (unsigned long long)g_probed,
             (unsigned long long)g_mounted);
+    if (g_custom_mutator) ext4_mutator_dump_counts();
 }
 
 /* --------------------------------------------------------------- one pass -- */
@@ -662,12 +669,49 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
     }
 
     g_verbose = getenv("EXT4_FUZZ_VERBOSE") != NULL;
+    /* The A/B switch. A campaign with the structure-aware mutator off is the
+     * control that says whether it is earning its place. */
+    g_custom_mutator = getenv("EXT4_FUZZ_NO_CUSTOM_MUTATOR") == NULL;
+    if (g_custom_mutator) ext4_mutator_init();
     ext4b_set_logger(fuzz_log, NULL);
     atexit(fuzz_stats);
 
     if (argc && argv && !getenv("EXT4_FUZZ_NO_SELFTEST"))
         fuzz_self_test(*argc, *argv);
     return 0;
+}
+
+/*
+ * The structure-aware mutator and crossover.
+ *
+ * libFuzzer calls these instead of its own when they are defined. Both fall
+ * back to the built-in mutator for inputs the resolver cannot make sense of,
+ * and EXT4_FUZZ_NO_CUSTOM_MUTATOR turns them off entirely, which is the
+ * control an A/B needs.
+ */
+size_t LLVMFuzzerCustomMutator(uint8_t *data, size_t size, size_t max_size,
+                               unsigned seed);
+size_t LLVMFuzzerCustomCrossOver(const uint8_t *a, size_t a_len,
+                                 const uint8_t *b, size_t b_len,
+                                 uint8_t *out, size_t max_out, unsigned seed);
+
+size_t LLVMFuzzerCustomMutator(uint8_t *data, size_t size, size_t max_size,
+                               unsigned seed)
+{
+    if (!g_custom_mutator) return LLVMFuzzerMutate(data, size, max_size);
+    return ext4_mutate(data, size, max_size, seed);
+}
+
+size_t LLVMFuzzerCustomCrossOver(const uint8_t *a, size_t a_len,
+                                 const uint8_t *b, size_t b_len,
+                                 uint8_t *out, size_t max_out, unsigned seed)
+{
+    if (!g_custom_mutator) {
+        size_t n = a_len < max_out ? a_len : max_out;
+        memcpy(out, a, n);
+        return n;
+    }
+    return ext4_crossover(a, a_len, b, b_len, out, max_out, seed);
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
