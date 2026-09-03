@@ -774,6 +774,7 @@ typedef struct {
     uint32_t      inode;
     unsigned long inodes;
     unsigned long attrs;
+    unsigned long lookups;
     char          names[32][256];
     size_t        nnames;
 } xwalk_ctx;
@@ -805,15 +806,65 @@ static void xwalk_inode(xwalk_ctx *x, uint32_t ino)
     }
 }
 
+/*
+ * A lookup is not a slower readdir.
+ *
+ * readdir walks a directory's leaves linearly; ext4b_lookup enters the dx
+ * index and descends it, which is different code and the code an indexed
+ * directory's corruption lives in. One lookup of a name that cannot be there
+ * forces a full descent to a leaf whatever the entries say -- and a fixture
+ * whose finding is in that descent cannot be reproduced by `ls` at all, which
+ * is how one of them arrived here reproducible only from the fuzzer.
+ */
+static void xwalk_lookups(xwalk_ctx *x, uint32_t dir,
+                          const char (*names)[256], size_t n)
+{
+    uint32_t out = 0;
+    ext4b_item_type t = EXT4B_TYPE_UNKNOWN;
+    for (size_t i = 0; i < n; i++)
+        (void)ext4b_lookup(x->dev, dir, names[i], strlen(names[i]), &out, &t);
+
+    static const char absent[] = ".no-such-name-0e5a1f";
+    (void)ext4b_lookup(x->dev, dir, absent, sizeof(absent) - 1, &out, &t);
+}
+
 static bool xwalk_dirent(void *ctx, const char *name, size_t name_len,
                          uint32_t ino, ext4b_item_type type,
                          uint64_t next_cookie);
+
+/* Names seen in one directory, for the lookup pass over it. */
+typedef struct { char names[64][256]; size_t n; } xwalk_names;
+
+static bool xwalk_collect(void *ctx, const char *name, size_t name_len,
+                          uint32_t ino, ext4b_item_type type,
+                          uint64_t next_cookie)
+{
+    (void)ino; (void)type; (void)next_cookie;
+    xwalk_names *c = (xwalk_names *)ctx;
+    if (c->n >= 64) return false;
+    if (name_len > 255) name_len = 255;
+    memcpy(c->names[c->n], name, name_len);
+    c->names[c->n][name_len] = '\0';
+    c->n++;
+    return true;
+}
 
 static void xwalk_dir(xwalk_ctx *x, uint32_t ino, unsigned depth)
 {
     if (depth > 32)
         return;
     xwalk_inode(x, ino);
+
+    /* Collect first, then look the names up: the lookup path and the readdir
+     * path must not be interleaved, because one of them holds a block. */
+    {
+        static xwalk_names collected;
+        collected.n = 0;
+        (void)ext4b_readdir(x->dev, ino, 0, xwalk_collect, &collected);
+        xwalk_lookups(x, ino, (const char (*)[256])collected.names, collected.n);
+        x->lookups += collected.n + 1;
+    }
+
     uint32_t saved = x->inode;
     x->inode = depth;
     (void)ext4b_readdir(x->dev, ino, 0, xwalk_dirent, x);
@@ -1420,10 +1471,13 @@ int main(int argc, char **argv)
         "                     extents per file and bytes per extent, which\n"
         "                     is what e2fsck's %% non-contiguous cannot say\n"
             "  xattr <path>       list extended attributes\n"
-            "  xattrwalk [path]   list and read back the attributes of every\n"
-            "                     inode under path -- the walk a mounted\n"
-            "                     volume does, which a named-file verb\n"
-            "                     cannot reach on a damaged tree\n"
+            "  walk [path]        the whole read-only walk the fuzzer does:\n"
+            "                     readdir, a lookup of every name AND of one\n"
+            "                     that cannot be there (which is what enters\n"
+            "                     the htree index), and every inode's\n"
+            "                     attributes listed and read back. Reaches\n"
+            "                     what a named-file verb cannot on a damaged\n"
+            "                     tree.  ('xattrwalk' is the old spelling.)\n"
             "  df                 free/available space as the OS is told it\n"
             "  groups [bad]       per-group free counts the allocator uses\n"
             "                     ('bad' lists only the groups that differ)\n"
@@ -1883,7 +1937,7 @@ int main(int argc, char **argv)
         if (r != 0)
             fprintf(stderr, "listxattr: %s\n", ext4b_strerror(r));
 
-    } else if (strcmp(cmd, "xattrwalk") == 0) {
+    } else if (strcmp(cmd, "walk") == 0 || strcmp(cmd, "xattrwalk") == 0) {
         const char *path = (argc > 3) ? argv[3] : "/";
         uint32_t ino = resolve(dev, path, NULL);
         if (!ino) { rc = 1; goto unmount; }
@@ -1891,7 +1945,8 @@ int main(int argc, char **argv)
         memset(&x, 0, sizeof x);
         x.dev = dev;
         xwalk_dir(&x, ino, 0);
-        printf("%lu inode(s), %lu attribute(s)\n", x.inodes, x.attrs);
+        printf("%lu inode(s), %lu attribute(s), %lu lookup(s)\n",
+               x.inodes, x.attrs, x.lookups);
 
     } else if (strcmp(cmd, "getxattr") == 0) {
         /* Reads one attribute by name, and -- the reason this exists -- prints

@@ -710,12 +710,34 @@ int ext4b_probe(ext4b_device *dev, ext4b_probe_info *out)
         else if (reserved_gdt > bs / 4)
             why = "reserved GDT blocks exceed what one block can address";
 
-        if (!why && (out->feature_incompat & 0x0080)) {   /* 64BIT */
+        /*
+         * s_desc_size, whether or not 64BIT is set.
+         *
+         * ext4 itself ignores the field without 64BIT, and the first version
+         * of this gate did too. lwext4 does not: ext4_sb_get_desc_size()
+         * returns the stored value clamped only at the bottom, and every
+         * descriptor address in the tree is computed from it. An odd value
+         * makes (i % dsc_cnt) * dsc_size an odd offset, and the struct
+         * pointer built on it is misaligned:
+         *
+         *   ext4_block_group.h:158: runtime error: member access within
+         *   misaligned address ... which requires 4 byte alignment
+         *
+         * reached from our own free-space audit during ext4b_mount. A value
+         * larger than the block makes bsize / dsc_size zero, and the next
+         * line divides by it. So: if it is set at all, it has to be a size a
+         * descriptor table could have.
+         */
+        if (!why) {
             uint32_t desc_size = rd16(sb, SBF_DESC_SIZE);
-            if (desc_size < 32 || desc_size > bs)
-                why = "group descriptor size is outside [32, block size]";
-            else if (desc_size & (desc_size - 1))
-                why = "group descriptor size is not a power of two";
+            if (desc_size != 0) {
+                if (desc_size < 32 || desc_size > bs)
+                    why = "group descriptor size is outside [32, block size]";
+                else if (desc_size & (desc_size - 1))
+                    why = "group descriptor size is not a power of two";
+            } else if (out->feature_incompat & 0x0080) {   /* 64BIT */
+                why = "64-bit volume with no group descriptor size";
+            }
         }
 
         /* And the group count has to fit in the 32 bits every caller uses. */

@@ -1,0 +1,8 @@
+{
+  "id": "0010",
+  "slug": "an-odd-group-descriptor-size",
+  "found_by": "the in-process fuzzer, read-only mode, the campaign after a corpus merge",
+  "symptom": "s_desc_size was only validated when INCOMPAT_64BIT was set, because that is when ext4 itself uses it. lwext4 uses it always -- ext4_sb_get_desc_size clamps only the lower bound -- and every descriptor address is computed from it. An odd value makes (i % dsc_cnt) * dsc_size an odd offset, and the struct pointer built on it is misaligned: 'member access within misaligned address, which requires 4 byte alignment' at ext4_block_group.h:158, reached from our own free-space audit during ext4b_mount. A value larger than the block makes bsize / dsc_size zero and the next line divides by it.",
+  "fixed_by": "the geometry gate in ext4b_probe (Core/shim/ext4_bridge.c), extended to check s_desc_size whenever it is non-zero",
+  "reproduce": "build/bin/ext4dump <img> probe"
+}

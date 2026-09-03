@@ -32,3 +32,5 @@
 0006-a-directory-entry-longer-than-its-block.img.gz  rw    probe,ls+/,check  0067  a directory entry whose rec_len runs past its block; the insert path asserted on it, and a rec_len of zero would have spun
 0007-a-zero-length-directory-entry.img.gz  rw    probe,ls+/,check  0067  an entry whose rec_len is zero: the insert walk advanced by it and spun, holding the mount
 0008-a-bitmap-marked-past-its-own-end.img.gz  ro    probe,ls+/,check,df,groups  0068  a BLOCK_UNINIT group whose head-block count exceeds its own bitmap; materialising it wrote past the block
+0009-an-htree-count-past-its-limit.img.gz  ro    probe,walk+/,check  0069  an index block whose count exceeds its limit; the count sized the region the checksum read
+0010-an-odd-group-descriptor-size.img.gz  ro    probe,ls+/,check,df  gate  s_desc_size odd, which lwext4 uses whether or not 64BIT is set; every descriptor pointer built from it was misaligned

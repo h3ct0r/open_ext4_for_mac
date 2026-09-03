@@ -1,0 +1,63 @@
+Subject: an htree count is bounded by its limit before it sizes a checksum
+
+ext4_dir_dx_csum_verify() checks that the index block's limit fits inside
+the block -- and then hands ext4_dir_dx_checksum() the COUNT, which is
+what sizes the region crc32c reads. Both come off the medium, and nothing
+required count <= limit.
+
+    ERROR: AddressSanitizer: heap-buffer-overflow
+      crc32 <- ext4_crc32c <- ext4_dir_dx_checksum
+      <- ext4_dir_dx_csum_verify <- ext4_dir_dx_find_entry
+      <- ext4_dir_find_entry
+
+which is a lookup: opening a file by name in an indexed directory.
+
+A directory claiming more entries than its own index block can hold is
+corrupt, so verify treats it as a checksum failure -- which is exactly
+the question the caller asked. The writer gets the same bound for the
+other reason: stamping a checksum computed over bytes outside the block
+would be worse than not stamping one.
+
+Found by fuzzing, read-only pass, in the campaign after a corpus merge.
+
+Fixture Tests/fixtures/hostile/0009-an-htree-count-past-its-limit.img.gz.
+
+--- a/src/ext4_dir_idx.c
++++ b/src/ext4_dir_idx.c
+@@ -300,6 +300,22 @@
+ 			/* There is no space to hold the checksum */
+ 			return true;
+ 		}
++		/*
++		 * limit is checked against the block above; count was not, and
++		 * count is what sizes the region ext4_dir_dx_checksum reads.
++		 * Both come off the medium, and a count past the limit sends
++		 * crc32c beyond the block:
++		 *
++		 *   AddressSanitizer: heap-buffer-overflow
++		 *     crc32 <- ext4_crc32c <- ext4_dir_dx_checksum
++		 *     <- ext4_dir_dx_csum_verify <- ext4_dir_dx_find_entry
++		 *
++		 * A directory that claims more entries than its own index
++		 * block can hold is corrupt, so this is a checksum failure --
++		 * which is exactly what the caller is asking about.
++		 */
++		if (cnt < 0 || cnt > limit)
++			return false;
+ 		t = (void *)(((struct ext4_dir_idx_entry *)climit) + limit);
+ 
+ 		uint32_t c;
+@@ -334,6 +350,13 @@
+ 			return;
+ 		}
+ 
++		/* The writer's half of the same bound: count sizes the region
++		 * being checksummed, and stamping a checksum computed over
++		 * bytes outside the block would be worse than not stamping
++		 * one. See the note in ext4_dir_dx_csum_verify. */
++		if (count < 0 || count > limit)
++			return;
++
+ 		t = (void *)(((struct ext4_dir_idx_entry *)climit) + limit);
+ 		t->checksum = to_le32(ext4_dir_dx_checksum(inode_ref, dirent,
+ 					coff, count, t));

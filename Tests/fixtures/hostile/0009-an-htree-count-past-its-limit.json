@@ -1,0 +1,9 @@
+{
+  "id": "0009",
+  "slug": "an-htree-count-past-its-limit",
+  "found_by": "the in-process fuzzer, read-only mode, the campaign after a corpus merge",
+  "symptom": "ext4_dir_dx_csum_verify checks that the index block's limit fits inside the block, then hands ext4_dir_dx_checksum the COUNT, which is what sizes the region crc32c reads. Nothing required count <= limit. AddressSanitizer heap-buffer-overflow in crc32, reached from ext4_dir_find_entry -- opening a file by name in an indexed directory.",
+  "fixed_by": "patches/lwext4/0069-an-htree-count-is-bounded-by-its-limit-before-it-sizes-a-checksum.patch",
+  "reproduce": "build/bin/ext4dump <img> walk /",
+  "note_on_verb": "walk, not ls: readdir alone never enters the dx index. The verb grew a lookup pass for this fixture, because a finding only the fuzzer can reproduce is a finding nobody else can confirm."
+}
