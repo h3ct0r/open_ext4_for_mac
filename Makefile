@@ -43,6 +43,30 @@ LWEXT4_DEFS := -DCONFIG_USE_DEFAULT_CFG=1 \
 
 INCLUDES := -I$(LWEXT4_DIR)/include -I$(LWEXT4_DIR)/include/misc -I$(SHIM_DIR) -I$(CRYPTO_DIR)
 
+# Shared/ is compiled into both the extension and the container app. It holds
+# what they have in common and cannot pass between them any other way -- an app
+# extension has no IPC back to its host: the keychain items an encrypted
+# volume's master key travels in, and the volume events the extension writes
+# because it has no other way to tell anybody anything.
+SHARED_SRCS := $(wildcard Shared/*.swift)
+
+# The event store, driven directly by a test.
+#
+# Nearly everything that can be wrong with that store -- a half-written file
+# the app reads mid-write, a log that grows without bound, a label off a
+# stranger's disk that becomes a path, a schema that does not survive a round
+# trip -- has nothing to do with FSKit and needs no mounted volume, no
+# installed extension and nobody to approve anything. This binary links the
+# same Shared/ sources both bundles do and exercises them offline.
+#
+# Never shipped: nothing in the app or the appex links it. macOS only, because
+# there is no swiftc on the Linux oracle runner; the suite skips there.
+ifeq ($(HOST_OS),Linux)
+  EVENT_PROBE :=
+else
+  EVENT_PROBE := $(BUILD)/bin/event_probe
+endif
+
 ifeq ($(CONFIG),debug)
   OPT := -O0 -g -fsanitize=address,undefined
 else ifeq ($(CONFIG),cov)
@@ -183,7 +207,7 @@ ARGON2_CFLAGS := $(CFLAGS) -Wno-everything -I$(ARGON2_DIR)
 CORE_LIB      := $(BUILD)/lib/$(CONFIG)/libext4core.a
 CORE_TEST_LIB := $(BUILD)/lib/$(CONFIG)/libext4core-test.a
 
-.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-fuzz test-fuzz-regressions test-reorder test-crypto test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline ci-linux print-fuzz-flags fuzz-build fuzz fuzz-rw fuzz-repro fuzz-minimize fuzz-merge fuzz-check fuzz-cov fuzz-cov-gate
+.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-fuzz test-fuzz-regressions test-reorder test-crypto test-events test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline ci-linux print-fuzz-flags fuzz-build fuzz fuzz-rw fuzz-repro fuzz-minimize fuzz-merge fuzz-check fuzz-cov fuzz-cov-gate
 
 all: app
 
@@ -366,7 +390,7 @@ $(BUILD)/.tools-config: FORCE
 	@mkdir -p $(BUILD)
 	@printf '%s' "$(CONFIG)" | cmp -s - $@ 2>/dev/null || printf '%s' "$(CONFIG)" > $@
 
-tools: verify-patches $(BUILD)/bin/ext4dump $(BUILD)/bin/cryptotest $(BUILD)/bin/datafile $(BUILD)/bin/ext4_stampcheck
+tools: verify-patches $(BUILD)/bin/ext4dump $(BUILD)/bin/cryptotest $(BUILD)/bin/datafile $(BUILD)/bin/ext4_stampcheck $(EVENT_PROBE)
 
 # The fuzzing stamper's oracle. Built with the ordinary compiler and linked
 # against nothing of ours -- it is a SECOND implementation of ext4's
@@ -382,6 +406,15 @@ $(BUILD)/bin/ext4_stampcheck: tools/fuzz/ext4_stampcheck.c tools/fuzz/ext4_csum.
 # Links nothing of ours: it drives a MOUNTED volume through ordinary syscalls,
 # which is the point. A helper that went through the core could not tell us
 # whether the core and FSKit disagree.
+# tools/events/main.swift, not event_probe.swift: swiftc allows top-level
+# statements in a file called main.swift and nowhere else, and a 90-line test
+# driver reads better as a script than as a @main struct wrapped around one.
+$(BUILD)/bin/event_probe: tools/events/main.swift $(SHARED_SRCS)
+	@mkdir -p $(dir $@)
+	swiftc -target arm64-apple-macos$(DEPLOY_TARGET) -swift-version 5 -O \
+	    $(SHARED_SRCS) tools/events/main.swift -o $@
+	@echo "built $@"
+
 $(BUILD)/bin/datafile: tools/datafile.c $(BUILD)/.tools-config
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(OPT) -Wall -Wextra -o $@ $<
@@ -389,6 +422,12 @@ $(BUILD)/bin/datafile: tools/datafile.c $(BUILD)/.tools-config
 $(BUILD)/bin/cryptotest: tools/cryptotest.c $(CORE_TEST_LIB) $(BUILD)/.tools-config
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(CFLAGS) $< $(CORE_TEST_LIB) $(CORE_LDLIBS) -o $@
+
+# The volume-event store: what the extension writes when it has to refuse a
+# volume, and what the app reads back. Offline -- no mount, no installed
+# extension, nobody approving anything.
+test-events: tools
+	@bash Tests/run_events_tests.sh
 
 test-crypto: $(BUILD)/bin/cryptotest
 	@$(BUILD)/bin/cryptotest
@@ -827,11 +866,6 @@ APPEX      := $(BUILD)/$(APP_NAME).app/Contents/Extensions/$(EXT_NAME).appex
 # before returning, with no way to undo it if the kernel then fails the I/O.
 # Until that is implemented, all I/O goes through FSVolume.ReadWriteOperations,
 # where allocation stays inside a transaction we control.
-# Shared/ is compiled into both the extension and the container app. It holds
-# the one thing they have in common: the keychain items an encrypted volume's
-# master key travels in. An app extension has no IPC back to its host, so that
-# is the whole channel between them.
-SHARED_SRCS := $(wildcard Shared/*.swift)
 SWIFT_SRCS  := $(wildcard Extension/*.swift) $(SHARED_SRCS)
 
 SWIFTFLAGS := -target arm64-apple-macos$(DEPLOY_TARGET) \

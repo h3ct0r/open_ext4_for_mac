@@ -52,6 +52,14 @@ struct Ext4MacApp {
             exit(Ext4Unlock.forget(which))
         case "list":
             exit(Ext4Unlock.list())
+
+        // What the extension had to say about a volume. It cannot say it
+        // itself: no window, no notification, and one FSKit sentence for every
+        // way a mount can fail.
+        case "last-error":
+            exit(Ext4Events.lastError(arguments))
+        case "events":
+            exit(Ext4Events.events(arguments))
         case "mount":
             guard let device = arguments.first else { usage(1) }
             exit(Ext4Mount.command(device))
@@ -146,6 +154,10 @@ struct Ext4MacApp {
         Ext4Mac forget <uuid|disk>  forget a volume's key again
         Ext4Mac version             which build the installed bundles are
         Ext4Mac list                which volumes are unlocked
+        Ext4Mac last-error <uuid|disk>
+                                    why the extension refused or degraded a
+                                    volume, and what to do about it
+        Ext4Mac events [n]          the last n volume events (default 10)
         Ext4Mac mount /dev/diskN    mount a volume whose key is stored
         Ext4Mac menu                watch for encrypted volumes and ask
         Ext4Mac login-item [on|off] start at login, so the extension stays

@@ -230,6 +230,12 @@ stage "5c. checksums that act" bash Tests/run_csum_tests.sh
 # What interleaved allocation costs, and that the reservation gives it back.
 stage "5d. fragmentation" bash Tests/run_fragmentation_tests.sh
 
+# The channel the extension uses to say anything at all. Offline: the store,
+# the schema, the rotation, the sanitising and the app's reader, none of which
+# need a mounted volume. The extension writing one of these from a real
+# refused mount is a mounted-path cell and is not here yet.
+stage "5e. user-visible events" bash Tests/run_events_tests.sh
+
 if docker info >/dev/null 2>&1; then
   stage "6. LUKS containers" bash Tests/run_luks_tests.sh
   stage "7. crash consistency" bash Tests/run_crash_tests.sh

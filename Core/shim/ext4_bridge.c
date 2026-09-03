@@ -1267,8 +1267,16 @@ int ext4b_mount(ext4b_device *dev, bool read_only)
     if (dev->read_only && info.needs_recovery) {
         /* No replay on a read-only mount, so no way to show the committed
          * state: every file predates the crash. Without this line, "the
-         * files look old" is unattributable in the field. */
-        bridge_log(2, "read-only mount of an unreplayed journal: "
+         * files look old" is unattributable in the field.
+         *
+         * Level 3, which is the error channel. It was 2, and 2 is the level
+         * for things worth having in a log somebody streams on purpose --
+         * which nobody does while looking at a volume whose files look wrong.
+         * The Swift logger routes >= 3 to os_log's error channel, and the
+         * per-mount ring buffer keeps level-3 lines so they can be shown to
+         * the person holding the stick rather than only to whoever thinks to
+         * go looking. This is the one line that explains the symptom. */
+        bridge_log(3, "read-only mount of an unreplayed journal: "
                       "contents predate the last crash");
     }
 

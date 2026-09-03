@@ -330,10 +330,17 @@ struct.pack_into('<I', sb, 0x3FC, crc32c(bytes(sb[:0x3FC])))
 f.seek(1024); f.write(sb); f.close()
 EOF
 out=$("$DUMP" "$IMG" groups 2>&1)
-if grep -q "read-only mount of an unreplayed journal" <<<"$out"; then
+# Level 3, not 2. The level is the whole difference between a line in a log
+# nobody streams and a line the extension can put in front of the person
+# holding the stick: the Swift logger routes >= 3 to os_log's error channel,
+# and Part B's per-mount ring buffer captures level-3 lines into the event it
+# writes for the app to read. "The files look old" is exactly the complaint
+# this line answers, so it has to travel.
+if grep -q "\[core:3\] read-only mount of an unreplayed journal" <<<"$out"; then
   ok "a read-only mount of a dirty volume says the contents predate the crash"
 else
-  bad "a read-only mount of a dirty volume says so" "$(head -2 <<<"$out")"
+  bad "a read-only mount of a dirty volume says so, at level 3" \
+      "$(grep -i unreplayed <<<"$out" | head -1)"
 fi
 if grep -q "pre-recovery" <<<"$out"; then
   ok "the audit labels its totals pre-recovery when the journal is unreplayed"

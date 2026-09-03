@@ -92,6 +92,16 @@ stage typecheck      make typecheck
 # extension and the container app still link.
 stage app            make app
 
+# The extension's only way to tell a person anything: what it writes when it
+# refuses a volume, and what the app reads back. Offline, which is the point --
+# the parts of that channel most likely to be wrong (a torn read, a log that
+# never stops growing, a device name that becomes a path) need no FSKit.
+#
+# After `app`, not before: the reader half of this suite runs the built
+# Ext4Mac binary, and having it build the bundle first would turn the stage
+# above into a cache hit that proves nothing.
+stage events         bash Tests/run_events_tests.sh
+
 # Suites added by later phases. Each is listed the day it exists, so that
 # forgetting to register one shows up as a shorter summary rather than as
 # nothing at all:
