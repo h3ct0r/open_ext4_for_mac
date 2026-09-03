@@ -528,8 +528,20 @@ static bool ext4_xattr_is_block_valid(struct ext4_inode_ref *inode_ref,
 	 * Check if those entries are maliciously corrupted to inflict harm
 	 * upon us.
 	 */
-	for (; !EXT4_XATTR_IS_LAST_ENTRY(entry);
-	     entry = EXT4_XATTR_NEXT(entry)) {
+	for (;; entry = EXT4_XATTR_NEXT(entry)) {
+		/* The same bounds-before-dereference as the ibody walk. The
+		 * first entry here is always in range -- it sits 32 bytes into
+		 * a block -- but the loop advances by a length taken from the
+		 * medium, and the check that used to guard that was inside the
+		 * body, after the fields had already been read. */
+		if ((char *)entry + sizeof(uint32_t) > (char *)end)
+			return false;
+		if (EXT4_XATTR_IS_LAST_ENTRY(entry))
+			break;
+		if ((char *)entry + sizeof(struct ext4_xattr_entry) >
+		    (char *)end)
+			return false;
+
 		if (!to_le32(entry->e_value_size) &&
 		    to_le16(entry->e_value_offs))
 			return false;
@@ -583,6 +595,24 @@ static bool ext4_xattr_is_ibody_valid(struct ext4_inode_ref *inode_ref)
 	entry = EXT4_XATTR_IFIRST(iheader);
 	base = iheader;
 	end = (char *)inode_ref->inode + inode_size;
+
+	/*
+	 * Where the header lands is decided by i_extra_isize, which comes off
+	 * the medium: EXT4_XATTR_IHDR adds it to the inode pointer, so a
+	 * corrupt value puts the header -- and with it the first entry --
+	 * past the end of the inode buffer. Everything below dereferences
+	 * both, starting with the magic number, and min_offs (end - base)
+	 * underflows into an enormous size_t on the way.
+	 *
+	 * Found by fuzzing: one byte changed in a group descriptor moved a
+	 * group's inode table 39 blocks earlier, into the metadata region, and
+	 * listing one file's attributes read off the end of the inode table
+	 * block.
+	 */
+	if ((char *)iheader < (char *)inode_ref->inode ||
+	    (char *)entry + sizeof(uint32_t) > (char *)end)
+		return false;
+
 	min_offs = (char *)end - (char *)base;
 
 	/*
@@ -595,8 +625,21 @@ static bool ext4_xattr_is_ibody_valid(struct ext4_inode_ref *inode_ref)
 	 * Check if those entries are maliciously corrupted to inflict harm
 	 * upon us.
 	 */
-	for (; !EXT4_XATTR_IS_LAST_ENTRY(entry);
-	     entry = EXT4_XATTR_NEXT(entry)) {
+	for (;; entry = EXT4_XATTR_NEXT(entry)) {
+		/*
+		 * Bounds before the dereference, not after. The terminator is
+		 * four zero bytes, so four is what has to be readable to ask
+		 * whether this is the last entry; a real entry needs the whole
+		 * struct before its fields can be read.
+		 */
+		if ((char *)entry + sizeof(uint32_t) > (char *)end)
+			return false;
+		if (EXT4_XATTR_IS_LAST_ENTRY(entry))
+			break;
+		if ((char *)entry + sizeof(struct ext4_xattr_entry) >
+		    (char *)end)
+			return false;
+
 		if (!to_le32(entry->e_value_size) &&
 		    to_le16(entry->e_value_offs))
 			return false;
