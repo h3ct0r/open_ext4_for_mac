@@ -50,6 +50,11 @@
 #include <ext4_bcache.h>
 #include <ext4_crc32.h>
 
+/* memcpy, used by ext4_sb_write_trans below. Apple's headers pull this in
+ * through something else; glibc does not, and the file does not build on
+ * Linux without it. */
+#include <string.h>
+
 uint32_t ext4_block_group_cnt(struct ext4_sblock *s)
 {
 	uint64_t blocks_count = ext4_sb_get_blocks_cnt(s);
