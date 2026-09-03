@@ -710,12 +710,25 @@ int ext4_dir_find_in_block(struct ext4_block *block, struct ext4_sblock *sb,
 
 	/* Walk through the block and check entries */
 	while ((uint8_t *)de < addr_limit) {
-		/* Termination condition */
-		if ((uint8_t *)de + name_len > addr_limit)
+		/*
+		 * The fixed 8-byte header has to be inside the block before any
+		 * field in it is read: name_len and the record length both live
+		 * in that header, and the old bound used the SEARCHED name's
+		 * length instead -- so a de one byte short of the limit, looking
+		 * for a 1-byte name, passed the guard and then read inode,
+		 * name_len, rec_len and up to name_len name bytes off the end of
+		 * the block buffer. The walk advances by an on-disk rec_len that
+		 * is only checked for zero, so de can land at any offset. Bound
+		 * the header first, then the name the entry itself claims.
+		 */
+		if ((uint8_t *)de + sizeof(struct ext4_fake_dir_entry) > addr_limit)
 			break;
 
 		/* Valid entry - check it */
 		if (ext4_dir_en_get_inode(de) != 0) {
+			if ((uint8_t *)de->name + ext4_dir_en_get_name_len(sb, de)
+			    > addr_limit)
+				return EINVAL;
 			/* For more efficient compare only lengths firstly*/
 			uint16_t el = ext4_dir_en_get_name_len(sb, de);
 			if (el == name_len) {
