@@ -155,7 +155,7 @@ ARGON2_CFLAGS := $(CFLAGS) -Wno-everything -I$(ARGON2_DIR)
 CORE_LIB      := $(BUILD)/lib/$(CONFIG)/libext4core.a
 CORE_TEST_LIB := $(BUILD)/lib/$(CONFIG)/libext4core-test.a
 
-.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-fuzz test-fuzz-regressions test-reorder test-crypto test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline print-fuzz-flags fuzz-build fuzz fuzz-rw fuzz-repro fuzz-minimize fuzz-merge fuzz-cov fuzz-cov-gate
+.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-fuzz test-fuzz-regressions test-reorder test-crypto test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline print-fuzz-flags fuzz-build fuzz fuzz-rw fuzz-repro fuzz-minimize fuzz-merge fuzz-check fuzz-cov fuzz-cov-gate
 
 all: app
 
@@ -604,8 +604,18 @@ FUZZ_BIN   := $(BUILD)/bin/ext4_fuzz
 # working directory. A relative -dict= or -artifact_prefix= would then be
 # resolved from there -- the dictionary silently not loading, which reads as a
 # campaign that simply is not finding much.
+#
+# Two memory limits, not one, because they mean different things.
+# -malloc_limit_mb catches a SINGLE allocation the driver was talked into by
+# an input -- a corrupt count multiplied by a size -- which is a finding with
+# an input attached. -rss_limit_mb catches total process memory, and on a
+# filesystem fuzzer that is dominated by the corpus: seeds are megabytes, so
+# five hundred inputs is gigabytes, and a run hits the limit with no input to
+# blame. The first 2048 MB run produced exactly that -- a zero-byte oom
+# artifact at corpus 294/1202Mb, rss 2098. Generous rss, tight malloc.
 FUZZ_ARGS  := -dict=$(CURDIR)/tools/fuzz/ext4.dict -max_len=8388608 \
-              -rss_limit_mb=2048 -use_value_profile=1 -detect_leaks=0 \
+              -rss_limit_mb=4096 -malloc_limit_mb=512 \
+              -use_value_profile=1 -detect_leaks=0 \
               -artifact_prefix=$(CURDIR)/$(FUZZ_DIR)/crashes/ \
               -max_total_time=$(FUZZ_TIME) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS)
 
@@ -731,6 +741,35 @@ fuzz-cov:
 # this asserts the campaign is still reaching the code it was aimed at.
 fuzz-cov-gate:
 	@bash scripts/fuzz_coverage.sh
+
+# What the crashes directory means, in one place, because the soak and CI both
+# have to decide the same way.
+#
+# A zero-byte artifact carries no input: libFuzzer writes one when it hits the
+# RSS limit outside any particular input, which on this target means the
+# corpus outgrew the limit rather than that the driver did anything wrong.
+# There is nothing to reproduce and nothing to minimize. Report it, say what
+# to do about it, and do not call it a finding -- a red build nobody can act
+# on teaches people to ignore red builds.
+fuzz-check:
+	@n=0; empty=0; \
+	for f in $(FUZZ_DIR)/crashes/*; do \
+	  [ -e "$$f" ] || continue; \
+	  if [ -s "$$f" ]; then n=$$((n+1)); else empty=$$((empty+1)); fi; \
+	done; \
+	if [ "$$empty" -gt 0 ]; then \
+	  echo "note: $$empty empty artifact(s) -- libFuzzer ran out of room for"; \
+	  echo "      the corpus, not for an input. Run 'make fuzz-merge'."; \
+	fi; \
+	if [ "$$n" -gt 0 ]; then \
+	  echo "the fuzzer produced $$n artifact(s) with an input:"; \
+	  ls -l $(FUZZ_DIR)/crashes | grep -v '^total' | awk '$$5 > 0'; \
+	  echo ""; \
+	  echo "  make fuzz-repro FILE=$(FUZZ_DIR)/crashes/<name>"; \
+	  echo "  then Tests/fuzz/README.md, 'The triage loop'."; \
+	  exit 1; \
+	fi; \
+	echo "no artifacts with an input"
 
 fuzz-merge: fuzz-build
 	@mkdir -p $(FUZZ_DIR)/corpus/ro $(FUZZ_DIR)/corpus/rw $(FUZZ_DIR)/merged

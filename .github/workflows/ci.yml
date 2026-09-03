@@ -115,3 +115,109 @@ jobs:
             .fuzz/findings/**
           if-no-files-found: ignore
           retention-days: 14
+
+  # The in-process fuzzer, which the other two jobs deliberately do not run:
+  # it needs a libFuzzer runtime, and a runner without one must not be able to
+  # turn the whole matrix red. scripts/fuzz_build.sh exits 77 rather than
+  # failing when the runtime is absent, and this job treats that as a skip.
+  #
+  # Five minutes per mode is not a campaign, it is a smoke test: enough to
+  # prove the harness still builds, still mounts, and still reaches the code
+  # the coverage gate names. The real campaigns are the nightly and the
+  # developer's soak, which run with a corpus that has been growing for weeks.
+  fuzz-macos:
+    name: fuzzer smoke (macOS, arm64)
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: install e2fsprogs
+        run: |
+          brew install e2fsprogs
+          echo "/opt/homebrew/opt/e2fsprogs/sbin" >> "$GITHUB_PATH"
+          echo "/opt/homebrew/opt/e2fsprogs/bin" >> "$GITHUB_PATH"
+
+      # Xcode's clang on the runner ships libclang_rt.fuzzer_osx.a, which
+      # Apple's Command Line Tools clang does not. If that ever stops being
+      # true, Homebrew LLVM is the fallback and the build script says so.
+      - name: pick a compiler with a libFuzzer runtime
+        id: cc
+        run: |
+          for cc in "$(xcrun -f clang)" /opt/homebrew/opt/llvm/bin/clang; do
+            [ -x "$cc" ] || continue
+            rt="$("$cc" -print-libgcc-file-name 2>/dev/null)" || continue
+            if [ -f "$(dirname "$rt")/libclang_rt.fuzzer_osx.a" ]; then
+              echo "found $cc"
+              echo "fuzz_cc=$cc" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "no compiler here ships a libFuzzer runtime; installing llvm"
+          brew install llvm
+          echo "fuzz_cc=/opt/homebrew/opt/llvm/bin/clang" >> "$GITHUB_OUTPUT"
+
+      # The corpus is the point of running this repeatedly. Keyed on the
+      # branch so a pull request grows its own, with restore-keys falling back
+      # to master's -- a new branch inherits weeks of exploration instead of
+      # starting from the seeds.
+      - name: cache the corpus
+        uses: actions/cache@v4
+        with:
+          path: .fuzz/corpus
+          key: fuzz-corpus-${{ github.ref_name }}-${{ github.run_number }}
+          restore-keys: |
+            fuzz-corpus-${{ github.ref_name }}-
+            fuzz-corpus-master-
+
+      - name: build the harness
+        run: |
+          set +e
+          FUZZ_CC='${{ steps.cc.outputs.fuzz_cc }}' bash scripts/fuzz_build.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 77 ]; then
+            echo "SKIP: no libFuzzer runtime on this runner"
+            echo "skip=1" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          exit "$rc"
+
+      # `|| true`, deliberately: libFuzzer exits non-zero for a crash AND for
+      # an out-of-memory that is really the corpus being large. The
+      # fuzz-check step below is the judge, and it can tell them apart.
+      - name: five minutes each way
+        if: env.skip != '1'
+        run: |
+          make fuzz    FUZZ_TIME=300 FUZZ_JOBS=2 || true
+          make fuzz-rw FUZZ_TIME=300 FUZZ_JOBS=2 || true
+
+      # The gate, not the campaign: a run that found nothing because it
+      # reached nothing looks identical to a clean one without this.
+      - name: coverage gate
+        if: env.skip != '1'
+        run: bash scripts/fuzz_coverage.sh
+
+      # `make fuzz` already exits non-zero when libFuzzer reports a crash, but
+      # a crash found by one -jobs worker can leave the artifact behind while
+      # the parent still exits 0. Ask the directory -- through the same target
+      # the soak uses, so the two decide the same way. It distinguishes an
+      # artifact with an input (a finding) from a zero-byte one (libFuzzer ran
+      # out of room for the corpus, which is nothing to reproduce).
+      - name: any artifact with an input is a failure
+        if: always() && env.skip != '1'
+        run: make fuzz-check
+
+      - name: artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-macos-artifacts
+          path: |
+            .fuzz/crashes/**
+            .fuzz/logs/**
+            .fuzz/cov/print-*.txt
+          if-no-files-found: ignore
+          retention-days: 14

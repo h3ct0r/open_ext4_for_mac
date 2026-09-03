@@ -190,7 +190,7 @@ fuzz_interlude() {
 
     mkdir -p "$ROOT/.fuzz/crashes" "$ROOT/.fuzz/logs"
     local before after new
-    before=$(ls -1 "$ROOT/.fuzz/crashes" 2>/dev/null | wc -l | tr -d " ")
+    before=$(find "$ROOT/.fuzz/crashes" -type f -size +0 2>/dev/null | wc -l | tr -d " ")
 
     local secs=$(( FUZZ_MIN * 60 ))
     local mode
@@ -212,12 +212,15 @@ fuzz_interlude() {
             | tail -1 || echo ""
     fi
 
-    after=$(ls -1 "$ROOT/.fuzz/crashes" 2>/dev/null | wc -l | tr -d " ")
+    # Count only artifacts that carry an input. A zero-byte one means
+    # libFuzzer ran out of room for the corpus, which is a reason to merge and
+    # not a reason to stop a soak that is otherwise doing its job.
+    after=$(find "$ROOT/.fuzz/crashes" -type f -size +0 2>/dev/null | wc -l | tr -d " ")
     if [ "$after" -gt "$before" ]; then
         echo ""
         echo "      THE FUZZER FOUND SOMETHING in round $round:"
-        ls -1t "$ROOT/.fuzz/crashes" | head -$(( after - before )) \
-            | sed "s|^|        .fuzz/crashes/|"
+        find "$ROOT/.fuzz/crashes" -type f -size +0 -exec ls -1t {} + 2>/dev/null \
+            | head -$(( after - before )) | sed "s|^.*/|        .fuzz/crashes/|"
         echo ""
         echo "      make fuzz-repro FILE=.fuzz/crashes/<name>"
         echo "      then Tests/fuzz/README.md, 'The triage loop'."

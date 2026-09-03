@@ -1,0 +1,9 @@
+{
+  "id": "0008",
+  "slug": "a-bitmap-marked-past-its-own-end",
+  "found_by": "the in-process fuzzer, a two-minute campaign after a corpus merge; two separate inputs reached the same site",
+  "symptom": "ext4_fs_init_block_bitmap marks a group's head blocks in use when materialising a bitmap for a BLOCK_UNINIT group. bit_max is built from on-disk values and the loop WRITES one bit per iteration into a block-sized buffer. AddressSanitizer heap-buffer-overflow in ext4_bmap_bit_set, reached from ext4_fs_get_block_group_ref during an ordinary inode lookup -- an out-of-bounds write from mounting a volume.",
+  "note": "Clamped rather than refused: the group's real head blocks are still marked and the mount proceeds. Refusing would turn a recoverable volume into an unmountable one, and a descriptor claiming more than its bitmap can describe is corrupt in a way e2fsck reports anyway.",
+  "fixed_by": "patches/lwext4/0068-a-bitmap-holds-as-many-bits-as-it-holds.patch",
+  "reproduce": "build/bin/ext4dump <img> ls /"
+}
