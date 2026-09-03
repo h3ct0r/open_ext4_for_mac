@@ -275,13 +275,14 @@ static void mut_superblock(fz_layout *L)
         { 0x060, 4 },  /* s_feature_incompat    */
         { 0x064, 4 },  /* s_feature_ro_compat   */
         { 0x0E0, 4 },  /* s_journal_inum        */
-        { 0x0EC, 4 },  /* s_last_orphan         */
-        { 0x0FC, 2 },  /* s_reserved_gdt_blocks */
+        { 0x0EC, 4 },  /* s_hash_seed[0]        */
+        { 0x0FC, 1 },  /* s_def_hash_version    */
         { 0x0FE, 2 },  /* s_desc_size           */
         { 0x150, 4 },  /* s_blocks_count_hi     */
-        { 0x175, 1 },  /* s_log_groups_per_flex */
-        { 0x175, 1 },
-        { 0x26C, 1 },  /* s_checksum_type       */
+        { 0x0CE, 2 },  /* s_reserved_gdt_blocks */
+        { 0x174, 1 },  /* s_log_groups_per_flex */
+        { 0x175, 1 },  /* s_checksum_type       */
+        { 0x0E8, 4 },  /* s_last_orphan         */
         { 0x270, 4 },  /* s_checksum_seed       */
     };
     unsigned i = rnd_below((uint32_t)(sizeof f / sizeof f[0]));

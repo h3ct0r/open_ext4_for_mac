@@ -187,9 +187,10 @@ class Mutator:
                  (0x054, 4, "s_first_ino"), (0x058, 2, "s_inode_size"),
                  (0x05C, 4, "s_feature_compat"), (0x060, 4, "s_feature_incompat"),
                  (0x064, 4, "s_feature_ro_compat"), (0x0E0, 4, "s_journal_inum"),
-                 (0x0EC, 4, "s_last_orphan"), (0x0FC, 2, "s_reserved_gdt_blocks"),
+                 (0x0CE, 2, "s_reserved_gdt_blocks"), (0x0E8, 4, "s_last_orphan"),
+                 (0x0EC, 4, "s_hash_seed0"), (0x0FC, 1, "s_def_hash_version"),
                  (0x0FE, 2, "s_desc_size"), (0x150, 4, "s_blocks_count_hi"),
-                 (0x175, 1, "s_log_groups_per_flex"), (0x26C, 1, "s_checksum_type"),
+                 (0x174, 1, "s_log_groups_per_flex"), (0x175, 1, "s_checksum_type"),
                  (0x270, 4, "s_checksum_seed")]
 
     def s_superblock(self):

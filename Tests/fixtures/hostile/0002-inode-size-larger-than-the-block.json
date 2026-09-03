@@ -1,0 +1,23 @@
+{
+  "id": "0002",
+  "slug": "inode-size-larger-than-the-block",
+  "found_by": "the in-process fuzzer, read-only mode, 137 inputs into a campaign seeded from s03",
+  "base": "mke2fs -t ext4 -b 1024 -g 1024 -N 128 -I 256 -O metadata_csum,64bit,extent,dir_index,^resize_inode -J size=1 on 4 MiB, one file /d/a",
+  "note_on_base": "Rebuilt smaller than the artifact the fuzzer produced. The original was a 6 MiB s03 mutant carrying 300 KiB of incompressible random data, which does not gzip; this reproduces the same two edits on a volume that compresses to six kilobytes. The bug is a property of the superblock, not of the file data.",
+  "edits": [
+    {
+      "what": "superblock s_inode_size (offset 0x58)",
+      "from": 256,
+      "to": 54915
+    },
+    {
+      "what": "superblock s_checksum (offset 0x3FC), re-stamped so the volume still passes the checksum gate",
+      "from": "0xd21bf137",
+      "to": "0xc317b39a"
+    }
+  ],
+  "symptom": "ext4b_probe accepted an inode size larger than the block size, and ext4_fs_inode_checksum then read s_inode_size bytes out of a block-sized buffer on the first readdir: AddressSanitizer heap-buffer-overflow at ext4_fs.c:739, reached from __ext4_fs_get_inode_ref via ext4b_readdir. Six bytes on the medium, an out-of-bounds read from an `ls`.",
+  "why_it_was_reachable": "Only because the mutator re-stamped the superblock checksum. Without that the volume is refused at the gate and nothing downstream runs -- which is the argument for having a stamper, demonstrated rather than asserted.",
+  "fixed_by": "the geometry gate in ext4b_probe (Core/shim/ext4_bridge.c)",
+  "reproduce": "build/bin/ext4dump <img> ls /"
+}

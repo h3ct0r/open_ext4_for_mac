@@ -25,3 +25,4 @@
 #
 # file                                mode  verbs                                    fix     note
 0001-corrupt-extent-header.img.gz     ro    probe,ls+/,cat+/victim,extents+/victim,check  0048  eh_entries 0x4000 and eh_max 0xFFFF in the root header, which lives in the inode and so passed through no block validator
+0002-inode-size-larger-than-the-block.img.gz  ro    probe,ls+/,check,df,groups  gate  s_inode_size 54915 with the superblock checksum re-stamped; the inode checksum routine then read 54915 bytes out of a block-sized buffer

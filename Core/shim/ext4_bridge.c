@@ -516,6 +516,18 @@ void ext4b_set_txn_batch(ext4b_device *dev, uint32_t batch)
 #define SBF_FREE_BLOCKS_HI     0x158
 #define SBF_CHECKSUM_SEED      0x270
 #define SBF_CHECKSUM           0x3FC
+/* The geometry fields. Everything the driver later computes an ADDRESS from,
+ * which is the class that turns a bad value into an out-of-bounds access
+ * rather than a wrong answer. See the gate in ext4b_probe. */
+#define SBF_FIRST_DATA_BLOCK   0x014
+#define SBF_BLOCKS_PER_GROUP   0x020
+#define SBF_INODES_PER_GROUP   0x028
+#define SBF_FIRST_INO          0x054
+#define SBF_INODE_SIZE         0x058
+#define SBF_JOURNAL_INUM       0x0E0
+#define SBF_RESERVED_GDT       0x0CE
+#define SBF_DESC_SIZE          0x0FE
+#define SBF_LOG_GROUPS_PER_FLEX 0x174
 
 #define EXT_MAGIC 0xEF53
 
@@ -627,6 +639,102 @@ int ext4b_probe(ext4b_device *dev, ext4b_probe_info *out)
                  "superblock claims %llu blocks, larger than the device",
                  (unsigned long long)out->block_count);
         return EOK;
+    }
+
+    /*
+     * The geometry gate.
+     *
+     * Everything above this point checks that the volume is ext and that it
+     * fits on the device. This checks that the numbers the driver will
+     * compute ADDRESSES from are possible -- which is a different question,
+     * and the one that decides whether a corrupt superblock produces a wrong
+     * answer or an out-of-bounds access.
+     *
+     * Found by fuzzing, and this is what it looked like: s_inode_size changed
+     * from 256 to 54915, the superblock checksum re-stamped so the volume
+     * still passed every check above, and then ext4_fs_inode_checksum read
+     * 54915 bytes out of a block-sized buffer on the first readdir. Six bytes
+     * on the medium, a heap-buffer-overflow from an `ls`.
+     *
+     * Each of these is a value ext4 itself cannot produce. Refusing them is
+     * not a policy choice about what to support; it is declining to do
+     * arithmetic on numbers that cannot be right. The reasons are named
+     * individually because "unsupported filesystem" sends a user looking for
+     * a different driver, and "e2fsck is the fix" sends them somewhere
+     * useful.
+     */
+    {
+        uint32_t bs                = out->block_size;
+        uint32_t inode_size        = rd16(sb, SBF_INODE_SIZE);
+        uint32_t first_data_block  = rd32(sb, SBF_FIRST_DATA_BLOCK);
+        uint32_t blocks_per_group  = rd32(sb, SBF_BLOCKS_PER_GROUP);
+        uint32_t inodes_per_group  = rd32(sb, SBF_INODES_PER_GROUP);
+        uint32_t first_ino         = rd32(sb, SBF_FIRST_INO);
+        uint32_t journal_inum      = rd32(sb, SBF_JOURNAL_INUM);
+        uint32_t reserved_gdt      = rd16(sb, SBF_RESERVED_GDT);
+        uint32_t flex_shift        = sb[SBF_LOG_GROUPS_PER_FLEX];
+        uint32_t rev_level         = rd32(sb, 0x04C);
+        const char *why = NULL;
+        char detail[96];
+
+        /* rev 0 has no s_inode_size field at all: the value is fixed at 128
+         * and the field holds something else entirely. */
+        if (rev_level == 0)
+            inode_size = 128;
+
+        if (inode_size < 128 || inode_size > bs)
+            why = "inode size is outside [128, block size]";
+        else if (inode_size & (inode_size - 1))
+            why = "inode size is not a power of two";
+        else if (blocks_per_group < 8 || blocks_per_group > 8u * bs)
+            why = "blocks per group is outside [8, 8 x block size]";
+        else if (blocks_per_group % 8)
+            why = "blocks per group is not a multiple of 8";
+        else if (inodes_per_group == 0 || inodes_per_group > 8u * bs)
+            why = "inodes per group is outside [1, 8 x block size]";
+        else if (inodes_per_group % 8)
+            why = "inodes per group is not a multiple of 8";
+        else if (inodes_per_group > out->inode_count)
+            why = "inodes per group exceeds the total inode count";
+        else if (first_data_block != (bs == 1024 ? 1u : 0u))
+            why = "first data block does not match the block size";
+        else if (out->block_count <= first_data_block)
+            why = "the volume has no blocks past its first";
+        /* Below 11, the reserved inodes overlap the ones the driver hands
+         * out; ext4 has never used a value other than 11 on a rev-1 volume. */
+        else if (rev_level != 0 && first_ino < 11)
+            why = "first non-reserved inode is below 11";
+        else if (journal_inum > out->inode_count)
+            why = "journal inode is past the end of the inode table";
+        else if (flex_shift > 31)
+            why = "flex_bg group shift is impossible";
+        else if (reserved_gdt > bs / 4)
+            why = "reserved GDT blocks exceed what one block can address";
+
+        if (!why && (out->feature_incompat & 0x0080)) {   /* 64BIT */
+            uint32_t desc_size = rd16(sb, SBF_DESC_SIZE);
+            if (desc_size < 32 || desc_size > bs)
+                why = "group descriptor size is outside [32, block size]";
+            else if (desc_size & (desc_size - 1))
+                why = "group descriptor size is not a power of two";
+        }
+
+        /* And the group count has to fit in the 32 bits every caller uses. */
+        if (!why) {
+            uint64_t groups = (out->block_count - first_data_block +
+                               blocks_per_group - 1) / blocks_per_group;
+            if (groups == 0 || groups > 0xFFFFFFFFull)
+                why = "the volume needs more block groups than ext4 can address";
+        }
+
+        if (why) {
+            out->verdict = EXT4B_PROBE_UNSUPPORTED;
+            snprintf(detail, sizeof(detail), "%s", why);
+            snprintf(out->unsupported, sizeof(out->unsupported),
+                     "superblock geometry is impossible: %s "
+                     "(the superblock is damaged; e2fsck is the fix)", detail);
+            return EOK;
+        }
     }
 
     /*
