@@ -3,6 +3,7 @@
 //  SPDX-License-Identifier: GPL-3.0-or-later
 //
 
+#include "crypto_portable.h"
 #include "luks.h"
 
 #include "aes_xts.h"

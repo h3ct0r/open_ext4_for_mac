@@ -3,11 +3,9 @@
 //  SPDX-License-Identifier: GPL-3.0-or-later
 //
 
+#include "crypto_portable.h"
 #include "crypto_hash.h"
 
-#include <CommonCrypto/CommonCryptor.h>   /* kCCSuccess */
-#include <CommonCrypto/CommonDigest.h>
-#include <CommonCrypto/CommonKeyDerivation.h>
 #include <errno.h>
 #include <string.h>
 
@@ -46,12 +44,10 @@ int crypto_hash_compute(crypto_hash h, const uint8_t *data, size_t len,
 {
     if (!out || (!data && len))
         return EINVAL;
-    switch (h) {
-    case CRYPTO_HASH_SHA1:   CC_SHA1(data,   (CC_LONG)len, out); return 0;
-    case CRYPTO_HASH_SHA256: CC_SHA256(data, (CC_LONG)len, out); return 0;
-    case CRYPTO_HASH_SHA512: CC_SHA512(data, (CC_LONG)len, out); return 0;
-    default:                 return EINVAL;
-    }
+    size_t n = crypto_hash_size(h);
+    if (n == 0)
+        return EINVAL;
+    return ext4b_digest(n, data, len, out);
 }
 
 int crypto_pbkdf2(crypto_hash h,
@@ -60,22 +56,12 @@ int crypto_pbkdf2(crypto_hash h,
                   uint32_t iterations,
                   uint8_t *out, size_t out_len)
 {
-    CCPseudoRandomAlgorithm prf;
-    switch (h) {
-    case CRYPTO_HASH_SHA1:   prf = kCCPRFHmacAlgSHA1;   break;
-    case CRYPTO_HASH_SHA256: prf = kCCPRFHmacAlgSHA256; break;
-    case CRYPTO_HASH_SHA512: prf = kCCPRFHmacAlgSHA512; break;
-    default: return EINVAL;
-    }
+    size_t n = crypto_hash_size(h);
+    if (n == 0)
+        return EINVAL;
     if (!out || out_len == 0 || iterations == 0)
         return EINVAL;
 
-    /* An empty passphrase is legal in LUKS, and CommonCrypto accepts a NULL
-     * pointer only with a zero length, so normalise rather than pass NULL. */
-    const char *pw = (const char *)(password ? password : (const uint8_t *)"");
-
-    int rc = CCKeyDerivationPBKDF(kCCPBKDF2, pw, password_len,
-                                  salt, salt_len, prf, iterations,
-                                  out, out_len);
-    return rc == kCCSuccess ? 0 : EIO;
+    return ext4b_pbkdf2(n, password, password_len, salt, salt_len,
+                        iterations, out, out_len);
 }

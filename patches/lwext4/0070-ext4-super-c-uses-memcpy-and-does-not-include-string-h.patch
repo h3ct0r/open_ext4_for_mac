@@ -1,0 +1,33 @@
+Subject: ext4_super.c uses memcpy and does not include string.h
+
+ext4_sb_write_trans() -- added by patch 0023 -- calls memcpy. The file
+never included <string.h>, and on macOS it builds anyway because Apple's
+headers pull the declaration in through something else.
+
+glibc does not:
+
+    ext4_super.c:202: error: implicit declaration of function 'memcpy'
+
+which is the first thing that stops this tree compiling on Linux, and it
+would stop it compiling on any host whose headers are tidier than Apple's.
+An implicit declaration is also an int-returning one, so on a system where
+it merely warned, the pointer would be truncated.
+
+Found while porting the tools to Linux, so that the oracle suites can run
+against the real Linux ext4 on a CI runner rather than only inside Docker
+on a developer's Mac.
+
+--- a/src/ext4_super.c
++++ b/src/ext4_super.c
+@@ -50,6 +50,11 @@
+ #include <ext4_bcache.h>
+ #include <ext4_crc32.h>
+ 
++/* memcpy, used by ext4_sb_write_trans below. Apple's headers pull this in
++ * through something else; glibc does not, and the file does not build on
++ * Linux without it. */
++#include <string.h>
++
+ uint32_t ext4_block_group_cnt(struct ext4_sblock *s)
+ {
+ 	uint64_t blocks_count = ext4_sb_get_blocks_cnt(s);

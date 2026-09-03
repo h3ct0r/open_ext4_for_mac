@@ -3,6 +3,7 @@
 //  SPDX-License-Identifier: GPL-3.0-or-later
 //
 
+#include "crypto_portable.h"
 #include "af_split.h"
 
 #include <errno.h>

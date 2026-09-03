@@ -3,9 +3,9 @@
 //  SPDX-License-Identifier: GPL-3.0-or-later
 //
 
+#include "crypto_portable.h"
 #include "aes_xts.h"
 
-#include <CommonCrypto/CommonCryptor.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,9 +37,9 @@ struct aes_xts_key {
     uint8_t tweak_key[32];  /* key2: encrypts the sector number */
     size_t  half_len;       /* 16 or 32                         */
 
-    CCCryptorRef data_enc;  /* key1, ECB, encrypting            */
-    CCCryptorRef data_dec;  /* key1, ECB, decrypting            */
-    CCCryptorRef tweak_enc; /* key2, ECB, encrypting            */
+    ext4b_ecb data_enc;     /* key1, ECB, encrypting            */
+    ext4b_ecb data_dec;     /* key1, ECB, decrypting            */
+    ext4b_ecb tweak_enc;    /* key2, ECB, encrypting            */
 };
 
 /*
@@ -84,15 +84,13 @@ static inline void xor_block(uint8_t *dst, const uint8_t src[AES_BLOCK])
     memcpy(dst + 8, &d1, sizeof d1);
 }
 
-/* Run a prepared ECB cryptor over a block-aligned buffer. */
-static int aes_ecb_run(CCCryptorRef ref, const uint8_t *in, uint8_t *out,
+/* Run a prepared ECB cryptor over a block-aligned buffer.
+ * The backend is CommonCrypto on macOS and OpenSSL on Linux; see
+ * crypto_portable.h, which is the only file that knows which. */
+static int aes_ecb_run(ext4b_ecb ref, const uint8_t *in, uint8_t *out,
                        size_t len)
 {
-    size_t moved = 0;
-    CCCryptorStatus s = CCCryptorUpdate(ref, in, len, out, len, &moved);
-    if (s != kCCSuccess || moved != len)
-        return EIO;
-    return 0;
+    return ext4b_ecb_run(ref, in, out, len);
 }
 
 aes_xts_key *aes_xts_key_create(const uint8_t *key, size_t key_len)
@@ -110,15 +108,9 @@ aes_xts_key *aes_xts_key_create(const uint8_t *key, size_t key_len)
     memcpy(k->data_key,  key,                k->half_len);
     memcpy(k->tweak_key, key + k->half_len,  k->half_len);
 
-    if (CCCryptorCreate(kCCEncrypt, kCCAlgorithmAES, kCCOptionECBMode,
-                        k->data_key, k->half_len, NULL,
-                        &k->data_enc) != kCCSuccess ||
-        CCCryptorCreate(kCCDecrypt, kCCAlgorithmAES, kCCOptionECBMode,
-                        k->data_key, k->half_len, NULL,
-                        &k->data_dec) != kCCSuccess ||
-        CCCryptorCreate(kCCEncrypt, kCCAlgorithmAES, kCCOptionECBMode,
-                        k->tweak_key, k->half_len, NULL,
-                        &k->tweak_enc) != kCCSuccess) {
+    if (ext4b_ecb_create(&k->data_enc,  1, k->data_key,  k->half_len) != 0 ||
+        ext4b_ecb_create(&k->data_dec,  0, k->data_key,  k->half_len) != 0 ||
+        ext4b_ecb_create(&k->tweak_enc, 1, k->tweak_key, k->half_len) != 0) {
         aes_xts_key_destroy(k);
         return NULL;
     }
@@ -130,9 +122,9 @@ void aes_xts_key_destroy(aes_xts_key *k)
 {
     if (!k)
         return;
-    if (k->data_enc)  CCCryptorRelease(k->data_enc);
-    if (k->data_dec)  CCCryptorRelease(k->data_dec);
-    if (k->tweak_enc) CCCryptorRelease(k->tweak_enc);
+    ext4b_ecb_free(k->data_enc);
+    ext4b_ecb_free(k->data_dec);
+    ext4b_ecb_free(k->tweak_enc);
     /* memset_s rather than memset: the compiler is entitled to delete a plain
      * memset of memory that is about to be freed, which is exactly the case
      * where it matters. */

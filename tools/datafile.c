@@ -20,6 +20,11 @@
  * 4096 for exactly 4096 bytes is a different bug from one that is wrong from a
  * random offset by a few bytes, and a checksum cannot tell them apart.
  */
+/* fallocate(2) on glibc. Harmless on macOS, which never sees it. */
+#ifndef __APPLE__
+#define _GNU_SOURCE
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -88,7 +93,14 @@ static int do_write(const char *path, uint64_t bytes, uint64_t seed,
          * past the current end of file. A failure is reported rather than
          * ignored: silently falling back to an ordinary write would make this
          * tool measure the very path it exists to avoid.
+         *
+         * Linux spells it fallocate(2), and it is the real thing rather than
+         * a stand-in: the driver's ext4b_preallocate answers both, and this
+         * tool exists to drive them through a MOUNTED volume rather than
+         * through our own core. On Linux it drives the kernel's ext4, which
+         * is the point of running it there at all.
          */
+#ifdef __APPLE__
         fstore_t st = { .fst_flags = F_ALLOCATEALL,
                         .fst_posmode = F_PEOFPOSMODE,
                         .fst_offset = 0,
@@ -101,6 +113,15 @@ static int do_write(const char *path, uint64_t bytes, uint64_t seed,
             return 1;
         }
         printf("preallocated %lld bytes\n", (long long)st.fst_bytesalloc);
+#else
+        if (fallocate(fd, 0, 0, (off_t)bytes) < 0) {
+            fprintf(stderr, "fallocate(%llu): %s\n",
+                    (unsigned long long)bytes, strerror(errno));
+            close(fd);
+            return 1;
+        }
+        printf("preallocated %llu bytes\n", (unsigned long long)bytes);
+#endif
     }
 
     uint8_t *buf = malloc(CHUNK);

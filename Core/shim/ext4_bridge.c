@@ -2220,7 +2220,17 @@ int ext4b_listxattr(ext4b_device *dev, uint32_t inode,
  */
 static int xattr_errno(int rc)
 {
+    /*
+     * ENOATTR is macOS's name; Linux calls the same condition ENODATA and has
+     * no ENOATTR at all. The shim's callers on macOS need ENOATTR -- Finder
+     * stops copying a file without it -- so the mapping stays, and on Linux
+     * the answer is already the right one.
+     */
+#ifdef ENOATTR
     return rc == ENODATA ? ENOATTR : rc;
+#else
+    return rc;
+#endif
 }
 
 int ext4b_getxattr(ext4b_device *dev, uint32_t inode,

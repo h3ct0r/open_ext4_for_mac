@@ -19,9 +19,26 @@
 #include <unistd.h>
 #include <time.h>
 #include <sys/stat.h>
-#include <sys/disk.h>   /* DKIOCGETBLOCKCOUNT */
 #include <sys/ioctl.h>
 #include <inttypes.h>
+
+/*
+ * Three things this tool needs are spelled differently on the two systems it
+ * has to build on, and only three. It runs on macOS because that is where the
+ * driver ships, and on Linux because that is where the oracle suites can be
+ * run without a virtual machine -- the Linux kernel's own ext4 is the second
+ * opinion on everything this writes, and a CI runner cannot give us that on
+ * macOS at all.
+ *
+ * The differences are: how you ask a block device its size, how you ask a
+ * drive to actually commit its cache, and how you preallocate. Everything
+ * else in this file is POSIX.
+ */
+#ifdef __APPLE__
+#include <sys/disk.h>   /* DKIOCGETBLOCKCOUNT */
+#else
+#include <linux/fs.h>   /* BLKGETSIZE64, BLKSSZGET */
+#endif
 
 /* One write held in the modelled drive's volatile cache; see below. */
 typedef struct {
@@ -618,10 +635,25 @@ static int file_flush(void *ctx)
         return cache_commit(c);
     }
 
+    /*
+     * F_FULLFSYNC is the macOS call that asks the drive to commit its cache,
+     * as against fsync, which only gets the data out of the kernel. Linux has
+     * no equivalent for a file descriptor -- fdatasync is the closest, and on
+     * a real drive it is a weaker promise. That matters for the crash suites'
+     * meaning, not for their mechanics: they run against image files, where
+     * both calls reach the host filesystem's page cache and no further.
+     */
+#ifdef __APPLE__
     if (fcntl(c->fd, F_FULLFSYNC) == 0)
         return 0;
     if (errno != ENOTSUP && errno != ENOTTY && errno != EINVAL)
         return EIO;
+#else
+    if (fdatasync(c->fd) == 0)
+        return 0;
+    if (errno != EINVAL && errno != ENOTSUP)
+        return EIO;
+#endif
 
     return fsync(c->fd) == 0 ? 0 : EIO;
 }
@@ -1651,9 +1683,30 @@ int main(int argc, char **argv)
     if (dev_bytes == 0 && (S_ISBLK(st.st_mode) || S_ISCHR(st.st_mode))) {
         uint32_t sector = 0;
         uint64_t sectors = 0;
+        bool got = false;
+#ifdef __APPLE__
         if (ioctl(fd, DKIOCGETBLOCKSIZE, &sector) == 0 &&
             ioctl(fd, DKIOCGETBLOCKCOUNT, &sectors) == 0) {
             dev_bytes = sectors * (uint64_t)sector;
+            got = true;
+        }
+#else
+        /* Linux gives the size in bytes directly, and the sector size
+         * separately. There is no character-device node for a disk to
+         * address, so the alignment below never applies -- but the block
+         * device does have a sector size and it is worth having. */
+        {
+            uint64_t bytes = 0;
+            int ssz = 0;
+            if (ioctl(fd, BLKGETSIZE64, &bytes) == 0 && bytes > 0) {
+                dev_bytes = bytes;
+                got = true;
+                if (ioctl(fd, BLKSSZGET, &ssz) == 0 && ssz > 0)
+                    sector = (uint32_t)ssz;
+            }
+        }
+#endif
+        if (got) {
             /* A raw character device transfers whole sectors only. Recording
              * the size here is what lets the tool address /dev/rdiskN, which
              * is the difference between a format that streams and one that
@@ -1661,7 +1714,7 @@ int main(int argc, char **argv)
             if (S_ISCHR(st.st_mode) && sector > 1)
                 fc.align = sector;
         } else {
-            perror("DKIOCGETBLOCKCOUNT");
+            perror("could not read the device size");
             return 1;
         }
     }
