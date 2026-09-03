@@ -617,6 +617,33 @@ int ext4_dir_try_insert_entry(struct ext4_sblock *sb,
 		uint16_t rec_len = ext4_dir_en_get_entry_len(start);
 		uint8_t itype = ext4_dir_en_get_inode_type(sb, start);
 
+		/*
+		 * rec_len comes off the medium, and nothing had bounded it.
+		 * Three things went wrong with that, all in this loop:
+		 *
+		 *  - the free-entry path below hands rec_len to
+		 *    ext4_dir_write_entry as the new entry's length, which
+		 *    asserts entry_len <= block_size. A rec_len of 0xFFFF on a
+		 *    1 KiB volume aborts the driver -- from a create, on a
+		 *    read-WRITE mount, which is the worst place to abort.
+		 *  - the split path computes rec_len - sz in uint16 arithmetic,
+		 *    and sz is derived from name_len, which is also off the
+		 *    medium. sz > rec_len wraps to about 65000 and the same
+		 *    assert fires from the other side.
+		 *  - the advance at the bottom is start += rec_len. Zero is an
+		 *    infinite loop, and the driver holds the mount while it
+		 *    spins.
+		 *
+		 * An entry shorter than the fixed header cannot be one, and one
+		 * that runs past the block is not in the block. Both are
+		 * corruption on the medium rather than an invariant of the
+		 * code, so this is an error return: the caller allocates a new
+		 * block or fails the create, and e2fsck gets the volume.
+		 */
+		if (rec_len < sizeof(struct ext4_fake_dir_entry) ||
+		    (uint8_t *)start + rec_len > (uint8_t *)stop)
+			return EIO;
+
 		/* If invalid and large enough entry, use it */
 		if ((inode == 0) && (itype != EXT4_DIRENTRY_DIR_CSUM) &&
 		    (rec_len >= required_len)) {
@@ -638,6 +665,12 @@ int ext4_dir_try_insert_entry(struct ext4_sblock *sb,
 
 			if ((used_len % 4) != 0)
 				sz += 4 - (used_len % 4);
+
+			/* name_len is on-disk too, so sz can exceed rec_len --
+			 * and the subtraction below is unsigned. See the note
+			 * at the top of the loop. */
+			if (sz > rec_len)
+				return EIO;
 
 			uint16_t free_space = rec_len - sz;
 
