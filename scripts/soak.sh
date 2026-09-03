@@ -13,8 +13,15 @@
 # script is only to run it repeatedly, stop dead at the first failure, and
 # keep the evidence.
 #
-#   bash scripts/soak.sh              until it fails, or you interrupt it
+#   bash scripts/soak.sh                    until it fails, or you interrupt it
 #   SOAK_ROUNDS=5 bash scripts/soak.sh
+#   bash scripts/soak.sh --fuzz 10          and ten minutes of fuzzing in each
+#                                           mode between rounds, stopping on
+#                                           the first crash artifact
+#   bash scripts/soak.sh --offline          rounds are scripts/ci_offline.sh
+#                                           instead of the full chain: no
+#                                           Docker, no extension, no hands --
+#                                           which is what a CI runner has
 #
 # Stopping at the first failure is deliberate. A soak that carries on past a
 # red round gives you a pass rate, and a pass rate is the wrong shape of
@@ -53,6 +60,20 @@ mkdir -p "$OUT"
 
 ROUNDS="${SOAK_ROUNDS:-0}"        # 0 = keep going
 
+# --fuzz MIN   spend MIN minutes fuzzing between rounds, in each mode
+# --offline    run scripts/ci_offline.sh as the round instead of the full
+#              validation chain -- for a machine with no Docker and no
+#              enabled extension, which is every CI runner
+FUZZ_MIN=0
+OFFLINE=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --fuzz)    FUZZ_MIN="${2:-10}"; shift 2 ;;
+        --offline) OFFLINE=1; shift ;;
+        *) echo "usage: soak.sh [--fuzz MINUTES] [--offline]"; exit 2 ;;
+    esac
+done
+
 # A round that skipped half its stages is not a round.
 #
 # run_full_validation.sh treats a missing prerequisite as SKIP rather than
@@ -83,7 +104,11 @@ require_prereqs() {
     echo "  (SOAK_ALLOW_SKIPS=1 overrides, if a partial soak is what you want.)"
     return 1
 }
-if [ "${SOAK_ALLOW_SKIPS:-0}" != "1" ]; then
+# --offline rounds are the offline set, which by definition needs none of
+# the things require_prereqs insists on. Asking for Docker and an enabled
+# extension before running a suite that uses neither would make the variant
+# unusable exactly where it is for.
+if [ "$OFFLINE" -eq 0 ] && [ "${SOAK_ALLOW_SKIPS:-0}" != "1" ]; then
     require_prereqs || exit 2
 fi
 started=$(date "+%Y-%m-%d %H:%M")
@@ -91,6 +116,7 @@ passed=0
 slept_rounds=0
 partial_rounds=0
 failed_at=""
+failed_kind="the validation round"
 
 # Seconds of the kernel's last wake. Changes across a round exactly when the
 # machine slept during it.
@@ -113,18 +139,97 @@ report() {
         echo "      $partial_rounds round(s) skipped stages and were not counted"
     fi
     if [ -n "$failed_at" ]; then
-        echo "      round $failed_at FAILED -- $OUT/round-$failed_at.log"
+        echo "      round $failed_at FAILED ($failed_kind)"
+        if [ "$failed_kind" = "the fuzzer" ]; then
+            echo "      artifacts in .fuzz/crashes/, logs in .fuzz/logs/"
+        else
+            echo "      $OUT/round-$failed_at.log"
+        fi
     fi
     echo ""
     echo "for docs/STATUS.md:"
+    # Name the set. "N clean rounds" means something quite different for the
+    # full chain and for the offline subset, and a line that does not say
+    # which is a line that will be read as the stronger one.
+    local what="the full set"
+    [ "$OFFLINE" -eq 1 ] && what="the offline set"
+    [ "$FUZZ_MIN" -gt 0 ] && what="$what with ${FUZZ_MIN}m of fuzzing between rounds"
     if [ -n "$failed_at" ]; then
-        echo "  soak: $passed clean round(s) of the full set, then a failure in round $failed_at ($(date +%Y-%m-%d))"
+        echo "  soak: $passed clean round(s) of $what, then a failure in round $failed_at ($(date +%Y-%m-%d))"
     else
-        echo "  soak: $passed clean round(s) of the full set as of $(date +%Y-%m-%d)"
+        echo "  soak: $passed clean round(s) of $what as of $(date +%Y-%m-%d)"
     fi
     exit $([ -n "$failed_at" ] && echo 1 || echo 0)
 }
 trap report INT TERM
+
+# Fuzzing between rounds.
+#
+# A validation round is the same inputs every time; the point of a soak is
+# elapsed time against a fixed target. The fuzzer is the opposite -- new
+# inputs, guided by what it has already reached -- and the corpus in .fuzz/
+# persists across rounds, so a long soak is also a long campaign. They cost
+# different things and find different things, which is why both.
+#
+# Returns non-zero when a new crash artifact appears, which stops the soak:
+# the same reasoning as stopping at the first failing round. A pass rate is
+# the wrong shape of answer, and a crash the soak ran past is a crash nobody
+# will look at.
+FUZZ_BIN="$ROOT/build/bin/ext4_fuzz"
+
+fuzz_interlude() {
+    [ "$FUZZ_MIN" -gt 0 ] || return 0
+
+    if [ ! -x "$FUZZ_BIN" ]; then
+        if ! bash "$ROOT/scripts/fuzz_build.sh" >/dev/null 2>&1; then
+            echo "      (no libFuzzer runtime here; --fuzz has nothing to run)"
+            FUZZ_MIN=0
+            return 0
+        fi
+    fi
+
+    mkdir -p "$ROOT/.fuzz/crashes" "$ROOT/.fuzz/logs"
+    local before after new
+    before=$(ls -1 "$ROOT/.fuzz/crashes" 2>/dev/null | wc -l | tr -d " ")
+
+    local secs=$(( FUZZ_MIN * 60 ))
+    local mode
+    for mode in fuzz fuzz-rw; do
+        printf "      %-8s %dm  " "$mode" "$FUZZ_MIN"
+        local t0; t0=$(date +%s)
+        caffeinate -i make -C "$ROOT" "$mode" FUZZ_TIME="$secs" \
+            > "$ROOT/.fuzz/logs/round-$round-$mode.txt" 2>&1
+        printf "%ds\n" "$(( $(date +%s) - t0 ))"
+    done
+
+    # Every tenth round, distil. A corpus grows monotonically and most of it
+    # is redundant; without this the sweep at the start of each campaign costs
+    # more than the campaign.
+    if [ $(( round % 10 )) -eq 0 ]; then
+        printf "      merging the corpus  "
+        make -C "$ROOT" fuzz-merge > "$ROOT/.fuzz/logs/round-$round-merge.txt" 2>&1
+        grep -o "merged corpus: .*" "$ROOT/.fuzz/logs/round-$round-merge.txt" \
+            | tail -1 || echo ""
+    fi
+
+    after=$(ls -1 "$ROOT/.fuzz/crashes" 2>/dev/null | wc -l | tr -d " ")
+    if [ "$after" -gt "$before" ]; then
+        echo ""
+        echo "      THE FUZZER FOUND SOMETHING in round $round:"
+        ls -1t "$ROOT/.fuzz/crashes" | head -$(( after - before )) \
+            | sed "s|^|        .fuzz/crashes/|"
+        echo ""
+        echo "      make fuzz-repro FILE=.fuzz/crashes/<name>"
+        echo "      then Tests/fuzz/README.md, 'The triage loop'."
+        # The round number alone, because report() builds a log path from it.
+        # "round 1 (fuzzer)" produced ".soak/round-1 (fuzzer).log", which is
+        # not a file anybody has.
+        failed_at="$round"
+        failed_kind="the fuzzer"
+        return 1
+    fi
+    return 0
+}
 
 round=0
 while :; do
@@ -137,7 +242,16 @@ while :; do
     printf "round %d  %s  " "$round" "$(date '+%H:%M:%S')"
 
     w0=$(wake_stamp)
-    caffeinate -i bash "$ROOT/scripts/run_full_validation.sh" > "$log" 2>&1
+    if [ "$OFFLINE" -eq 1 ]; then
+        caffeinate -i env REQUIRE_ALL=1 FUZZ_SEED="$round" \
+            bash "$ROOT/scripts/ci_offline.sh" > "$log" 2>&1
+    else
+        # FUZZ_SEED is the round number, so a long soak is a long campaign
+        # rather than the same three hundred mutants over and over. Stage 2c
+        # reads it.
+        caffeinate -i env FUZZ_SEED="$round" \
+            bash "$ROOT/scripts/run_full_validation.sh" > "$log" 2>&1
+    fi
     rc=$?
     w1=$(wake_stamp)
     took=$(( $(date +%s) - t0 ))
@@ -179,6 +293,7 @@ while :; do
         # A passing round's log is 99% of the disk this produces and none of
         # the value; the failing one is what anybody will read.
         rm -f "$log"
+        fuzz_interlude || report
     else
         printf "FAIL  (%ds)\n" "$took"
         echo ""
