@@ -31,6 +31,10 @@ signing.local.env
 Tests/fixtures/*.img
 tools/difftest/out/
 
+# Python bytecode from the mutation campaign's modules
+__pycache__/
+*.pyc
+
 # macOS
 .DS_Store
 Extension/Ext4FS.entitlements

@@ -155,7 +155,7 @@ ARGON2_CFLAGS := $(CFLAGS) -Wno-everything -I$(ARGON2_DIR)
 CORE_LIB      := $(BUILD)/lib/$(CONFIG)/libext4core.a
 CORE_TEST_LIB := $(BUILD)/lib/$(CONFIG)/libext4core-test.a
 
-.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-reorder test-crypto test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline print-fuzz-flags fuzz-build fuzz fuzz-rw fuzz-repro fuzz-minimize fuzz-merge fuzz-cov fuzz-cov-gate
+.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-fuzz test-reorder test-crypto test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline print-fuzz-flags fuzz-build fuzz fuzz-rw fuzz-repro fuzz-minimize fuzz-merge fuzz-cov fuzz-cov-gate
 
 all: app
 
@@ -321,13 +321,30 @@ $(CORE_TEST_LIB): $(LWEXT4_OBJS) $(SHIM_TEST_OBJS) $(CRYPTO_OBJS) $(ARGON2_OBJS)
 # --- test tooling ------------------------------------------------------------
 # ext4dump drives the core against a plain file, with no FSKit, no signing and
 # no mounting. This is what makes the core testable in CI.
+#
+# The binaries live at one path whatever the CONFIG, because fifteen suites
+# name build/bin/ext4dump. That makes them the one place the per-CONFIG object
+# tree does not protect: after `make tools CONFIG=debug`, a plain `make tools`
+# finds the binary newer than the release library and leaves the ASan build
+# sitting there. Every suite then measures the sanitizer build while its
+# output says nothing about it -- and a bounds run reported 52 assertions
+# instead of 50 for exactly that reason, which is the harmless version of the
+# same mistake.
+#
+# `make validate` and `make test-asan` both begin with `make clean`, so the
+# two entry points that matter were never wrong; a developer switching by hand
+# was. The stamp makes the config a prerequisite, so switching relinks.
+$(BUILD)/.tools-config: FORCE
+	@mkdir -p $(BUILD)
+	@printf '%s' "$(CONFIG)" | cmp -s - $@ 2>/dev/null || printf '%s' "$(CONFIG)" > $@
+
 tools: verify-patches $(BUILD)/bin/ext4dump $(BUILD)/bin/cryptotest $(BUILD)/bin/datafile $(BUILD)/bin/ext4_stampcheck
 
 # The fuzzing stamper's oracle. Built with the ordinary compiler and linked
 # against nothing of ours -- it is a SECOND implementation of ext4's
 # checksums, and it exists to disagree with the first one when the first one
 # is wrong. Needs no libFuzzer, so `make validate` can run it.
-$(BUILD)/bin/ext4_stampcheck: tools/fuzz/ext4_stampcheck.c tools/fuzz/ext4_csum.c tools/fuzz/ext4_csum.h
+$(BUILD)/bin/ext4_stampcheck: tools/fuzz/ext4_stampcheck.c tools/fuzz/ext4_csum.c tools/fuzz/ext4_csum.h $(BUILD)/.tools-config
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(OPT) -Wall -Wextra -Itools/fuzz \
 	    tools/fuzz/ext4_stampcheck.c tools/fuzz/ext4_csum.c -o $@
@@ -337,11 +354,11 @@ $(BUILD)/bin/ext4_stampcheck: tools/fuzz/ext4_stampcheck.c tools/fuzz/ext4_csum.
 # Links nothing of ours: it drives a MOUNTED volume through ordinary syscalls,
 # which is the point. A helper that went through the core could not tell us
 # whether the core and FSKit disagree.
-$(BUILD)/bin/datafile: tools/datafile.c
+$(BUILD)/bin/datafile: tools/datafile.c $(BUILD)/.tools-config
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(OPT) -Wall -Wextra -o $@ $<
 
-$(BUILD)/bin/cryptotest: tools/cryptotest.c $(CORE_TEST_LIB)
+$(BUILD)/bin/cryptotest: tools/cryptotest.c $(CORE_TEST_LIB) $(BUILD)/.tools-config
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(CFLAGS) $< $(CORE_TEST_LIB) -o $@
 
@@ -351,7 +368,7 @@ test-crypto: $(BUILD)/bin/cryptotest
 # The tool is compiled with EXT4B_TEST_HOOKS so the header exposes the
 # orphan-inspection declarations it calls, and links the test library that
 # actually defines them.
-$(BUILD)/bin/ext4dump: tools/ext4dump.c $(CORE_TEST_LIB) $(BUILD)/.build-id
+$(BUILD)/bin/ext4dump: tools/ext4dump.c $(CORE_TEST_LIB) $(BUILD)/.build-id $(BUILD)/.tools-config
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(CFLAGS) -DEXT4B_TEST_HOOKS=1 $< $(CORE_TEST_LIB) -o $@
 
@@ -398,6 +415,17 @@ test-mount-data: tools
 
 test-bounds: tools
 	@bash Tests/run_bounds_tests.sh
+
+# Mutated images against the offline driver, with no special toolchain: the
+# fuzzing that runs in `make validate`. Against a release build it detects
+# crashes, hangs and writes; under `make test-asan` the same mutants become a
+# memory-safety sweep, which is a strictly wider claim and the suite says
+# which one it is making.
+#
+# FUZZ_COUNT=300 mutants, FUZZ_SEED=1; the soak passes its round number so a
+# long soak is a long campaign rather than the same mutants over and over.
+test-fuzz: tools
+	@bash Tests/run_fuzz_tests.sh
 
 # ext4 inside a LUKS container. Fixtures come from real cryptsetup, and what we
 # write is handed back to cryptsetup and the Linux kernel to read -- a

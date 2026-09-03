@@ -197,6 +197,11 @@ stage eio            bash Tests/run_eio_tests.sh
 stage csum           bash Tests/run_csum_tests.sh
 stage fragmentation  bash Tests/run_fragmentation_tests.sh
 
+# Mutated images against the offline driver. Needs no special toolchain, which
+# is why it can be here at all -- the in-process libFuzzer harness gets its
+# own job, so a runner without the runtime cannot turn this one red.
+stage fuzz           bash Tests/run_fuzz_tests.sh
+
 # Does the Swift half still compile? This is the canary for the runner image
 # having an SDK with FSKit in it: if `macos-15` ever ships an SDK without it,
 # this is the stage that says so, in one line, instead of the app build
@@ -211,7 +216,6 @@ stage app            make app
 # Suites added by later phases. Each is listed the day it exists, so that
 # forgetting to register one shows up as a shorter summary rather than as
 # nothing at all:
-#   stage fuzz             make test-fuzz              (A5)
 #   stage fuzz-regressions make test-fuzz-regressions  (A6)
 #   stage envelope         make test-envelope          (C)
 #   stage uninstall        make test-uninstall         (D)

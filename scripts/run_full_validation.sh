@@ -194,6 +194,13 @@ stage "2. write suite" bash Tests/run_write_tests.sh
 # each with an oracle. Offline, seconds.
 stage "2b. bounds & semantics" bash Tests/run_bounds_tests.sh
 
+# Mutated images, structure-aware, with the checksums re-stamped so an edit
+# reaches the parser it was aimed at rather than being refused at the gate.
+# No special toolchain: this is the fuzzing that can run anywhere, and the
+# in-process libFuzzer harness is the deeper instrument for a machine that
+# has Homebrew LLVM. The seed is the round number under soak.
+stage "2c. mutation campaign" bash Tests/run_fuzz_tests.sh
+
 # Only the format suite's Linux round-trip needs Docker, and it skips that
 # section by itself; the geometry sweep needs nothing but e2fsck.
 stage "3. format" bash Tests/run_format_tests.sh

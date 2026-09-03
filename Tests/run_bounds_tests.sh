@@ -625,10 +625,29 @@ echo "hostile journal geometry"
 run_deadline() {  # run_deadline <seconds> <cmd...>; rc 137 if killed
   local secs=$1; shift
   "$@" & local pid=$!
-  ( sleep "$secs"; kill -9 $pid 2>/dev/null ) & local dog=$!
+  # The watchdog's output goes to /dev/null, and that is not tidiness.
+  #
+  # A caller that captures this function -- out=$(run_deadline 20 ...) -- is
+  # waiting for every process holding the write end of the substitution pipe,
+  # and the backgrounded subshell holds it too. Killing the subshell does not
+  # reap the `sleep` it forked, so the orphaned sleep keeps the pipe open and
+  # the capture blocks for the FULL deadline on every call, however fast the
+  # command was. Redirecting here detaches the watchdog from that pipe.
+  ( sleep "$secs"; kill -9 $pid 2>/dev/null ) >/dev/null 2>&1 & local dog=$!
   wait $pid 2>/dev/null; local rc=$?
   kill $dog 2>/dev/null; wait $dog 2>/dev/null
   return $rc
+}
+
+# Is there a sanitizer watching?
+#
+# Captured, not piped into grep -q: under `set -o pipefail` grep -q exits at
+# the first hit, nm takes SIGPIPE, and the pipeline reports failure -- so a
+# present symbol reads as absent, intermittently, which is the worst way for
+# a check to be wrong.
+have_ubsan() {
+  local syms; syms="$(nm "$DUMP" 2>/dev/null)"
+  case "$syms" in *__ubsan*) return 0 ;; *) return 1 ;; esac
 }
 
 if ! command -v mke2fs >/dev/null; then
@@ -817,7 +836,7 @@ EOF
     ubout=$(run_deadline 20 "$DUMP" "$UBIMG" xattr /victim 2>&1); ubrc=$?
     # Is there a sanitizer watching at all? Without one this proves nothing,
     # and saying "ok" would be a lie told once per release build.
-    if nm "$DUMP" 2>/dev/null | grep -q "__ubsan"; then
+    if have_ubsan; then
       if grep -q "runtime error:" <<<"$ubout"; then
         bad "listing an xattr block is free of undefined behaviour" \
             "$(grep -m1 'runtime error:' <<<"$ubout")"
@@ -843,7 +862,7 @@ EOF
   mke2fs -q -F -b 1024 -N 128 -I 256 -O metadata_csum,64bit,extent,dir_index \
       -J size=1 "$RWIMG" 2>/dev/null
   rwout=$(run_deadline 20 "$DUMP" "$RWIMG" mkdir /ubdir 2>&1); rwrc=$?
-  if nm "$DUMP" 2>/dev/null | grep -q "__ubsan"; then
+  if have_ubsan; then
     if grep -q "runtime error:" <<<"$rwout"; then
       bad "a read-write mount is free of undefined behaviour" \
           "$(grep -m1 'runtime error:' <<<"$rwout")"

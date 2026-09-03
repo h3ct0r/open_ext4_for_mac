@@ -24,7 +24,11 @@ FAIL=0
 # assertion would otherwise abort the suite at the first red instead of
 # counting it.
 ok()  { PASS=$((PASS+1)); echo "  ok    $*"; }
-bad() { FAIL=$((FAIL+1)); echo "  FAIL  $*"; shift; [ $# -gt 0 ] && echo "        $*"; return 0; }
+# "$1", not "$*": the headline is the assertion, and the rest is the detail
+# printed under it. With "$*" the detail appeared on both lines, so every
+# failure with an explanation printed it twice -- harmless, and it made a
+# four-finding run read as eight lines of the same thing.
+bad() { FAIL=$((FAIL+1)); echo "  FAIL  $1"; shift; [ $# -gt 0 ] && echo "        $*"; return 0; }
 
 # Print the tally and exit nonzero on any failure.
 finish() {

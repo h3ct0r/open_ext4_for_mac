@@ -1691,6 +1691,45 @@ int main(int argc, char **argv)
         goto out;
     }
 
+    /*
+     * Deliberate failures, for the mutation campaign's own red-first cells.
+     *
+     * Tests/run_fuzz_tests.sh classifies every mutant by what the tool did:
+     * 134 is a crash, 137 is a hang, and a changed md5 on a read-only verb is
+     * a write. Those three classifications are the whole product of the
+     * suite, and a classifier that has never been shown to fire is a
+     * classifier nobody has tested -- the campaign would report "300 mutants,
+     * all clean" just as cheerfully if it were broken.
+     *
+     * EXT4DUMP_PLANT=abort trips a real lwext4 assertion, =spin never
+     * returns, =write modifies the image through a second descriptor. Read
+     * here in the tool, so scripts/check_ship_surface.sh is unaffected: the
+     * shipping core still reads no environment.
+     */
+    const char *plant = getenv("EXT4DUMP_PLANT");
+    if (plant) {
+        if (strcmp(plant, "abort") == 0) {
+            fprintf(stderr, "plant: tripping an lwext4 assertion\n");
+            ext4b_trip_assert();
+        } else if (strcmp(plant, "spin") == 0) {
+            fprintf(stderr, "plant: spinning\n");
+            fflush(stderr);
+            for (;;) { }
+        } else if (strcmp(plant, "write") == 0) {
+            fprintf(stderr, "plant: writing one byte behind the driver's back\n");
+            int fd = open(image, O_RDWR);
+            if (fd >= 0) {
+                unsigned char byte = 0xA5;
+                (void)!pwrite(fd, &byte, 1, 0);
+                close(fd);
+            }
+        } else {
+            fprintf(stderr, "EXT4DUMP_PLANT must be abort, spin or write\n");
+            rc = 2;
+            goto unmount;
+        }
+    }
+
     ext4b_statfs_info sfs;
     if (ext4b_statfs(dev, &sfs) == 0 && strcmp(cmd, "ls") == 0) {
         printf("# %" PRIu64 "/%" PRIu64 " blocks free, avail=%" PRIu64
