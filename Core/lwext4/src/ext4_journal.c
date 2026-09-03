@@ -1972,22 +1972,50 @@ int jbd_recover(struct jbd_fs *jbd_fs)
 		 * vanished at exactly this seam and stranded its inode. */
 		(void)ext4_sb_read(jbd_fs->inode_ref.fs->bdev,
 				   &jbd_fs->inode_ref.fs->sb);
-		/* If we successfully replay the journal,
-		 * clear EXT4_FINCOM_RECOVER flag on the
-		 * ext4 superblock, and set the start of
-		 * journal to 0.*/
-		uint32_t features_incompatible =
-			ext4_get32(&jbd_fs->inode_ref.fs->sb,
+
+		/* And ask whether what came back is still a filesystem.
+		 *
+		 * The log replays whatever it holds, by block number. A log
+		 * that stages arbitrary bytes for block 1 of a 1 KiB volume --
+		 * four debugfs commands to produce, and what a torn write to a
+		 * journal can leave -- replaces the superblock with them, and
+		 * this reload then loads them. Everything after this point
+		 * believes the result: the first thing that happens is a shift
+		 * by s_log_block_size, which for the value one such log left
+		 * (955747801) is undefined behaviour, and the flag edits below
+		 * would write the garbage back out over the medium.
+		 *
+		 * Recovery cannot repair this and must not paper over it. Fail,
+		 * leave EXT4_FINCOM_RECOVER set, and let e2fsck have it. */
+		if (ext4_get16(&jbd_fs->inode_ref.fs->sb, magic) !=
+			EXT4_SUPERBLOCK_MAGIC ||
+		    ext4_get32(&jbd_fs->inode_ref.fs->sb, log_block_size) > 6) {
+			ext4_dbg(DEBUG_JBD, DBG_ERROR
+				 "replay left an unusable superblock: magic "
+				 "0x%04" PRIx16 ", log_block_size %" PRIu32
+				 "\n",
+				 ext4_get16(&jbd_fs->inode_ref.fs->sb, magic),
+				 ext4_get32(&jbd_fs->inode_ref.fs->sb,
+					    log_block_size));
+			r = EIO;
+		} else {
+			/* If we successfully replay the journal,
+			 * clear EXT4_FINCOM_RECOVER flag on the
+			 * ext4 superblock, and set the start of
+			 * journal to 0.*/
+			uint32_t features_incompatible =
+				ext4_get32(&jbd_fs->inode_ref.fs->sb,
+					   features_incompatible);
+			jbd_set32(&jbd_fs->sb, start, 0);
+			jbd_set32(&jbd_fs->sb, sequence, info.last_trans_id);
+			features_incompatible &= ~EXT4_FINCOM_RECOVER;
+			ext4_set32(&jbd_fs->inode_ref.fs->sb,
+				   features_incompatible,
 				   features_incompatible);
-		jbd_set32(&jbd_fs->sb, start, 0);
-		jbd_set32(&jbd_fs->sb, sequence, info.last_trans_id);
-		features_incompatible &= ~EXT4_FINCOM_RECOVER;
-		ext4_set32(&jbd_fs->inode_ref.fs->sb,
-			   features_incompatible,
-			   features_incompatible);
-		jbd_fs->dirty = true;
-		r = ext4_sb_write(jbd_fs->bdev,
-				  &jbd_fs->inode_ref.fs->sb);
+			jbd_fs->dirty = true;
+			r = ext4_sb_write(jbd_fs->bdev,
+					  &jbd_fs->inode_ref.fs->sb);
+		}
 	}
 
 	/* The shape of what just happened, for the host to log. The numbers

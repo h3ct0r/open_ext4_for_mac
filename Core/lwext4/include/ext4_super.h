@@ -92,7 +92,19 @@ static inline void ext4_sb_set_free_blocks_cnt(struct ext4_sblock *s,
  * @return  block size in bytes*/
 static inline uint32_t ext4_sb_get_block_size(struct ext4_sblock *s)
 {
-	return 1024 << to_le32(s->log_block_size);
+	uint32_t log = to_le32(s->log_block_size);
+
+	/* ext4 tops out at 64 KiB blocks, so anything above 6 is corruption --
+	 * and shifting by it is undefined, not merely wrong. This is not a
+	 * theoretical guard: a journal that replayed arbitrary bytes over the
+	 * superblock left 955747801 here, and every caller of this function
+	 * then shifted by it. Clamped rather than refused because this is an
+	 * inline accessor with no way to report; the callers that matter check
+	 * the superblock themselves. */
+	if (log > 6)
+		log = 6;
+
+	return 1024u << log;
 }
 
 /**@brief   Block group descriptor size.
