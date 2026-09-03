@@ -62,8 +62,16 @@ else ifeq ($(CONFIG),fuzz)
   # link anything but a release core.
   FUZZ_CC ?= /opt/homebrew/opt/llvm/bin/clang
   CC      := $(FUZZ_CC)
+  #
+  # -fno-sanitize-recover=undefined is not a detail. By default UBSan PRINTS
+  # "runtime error: ..." and carries on, so a campaign finds undefined
+  # behaviour, says so once in a log nobody reads, writes no artifact, and
+  # reports itself green. The first 30-second run here did exactly that with
+  # a null-pointer offset in the xattr parser. Fatal, so it becomes a crash
+  # with the input attached, like every other finding.
   OPT     := -O1 -g -fno-omit-frame-pointer \
-             -fsanitize=address,undefined -fsanitize=fuzzer-no-link
+             -fsanitize=address,undefined -fno-sanitize-recover=undefined \
+             -fsanitize=fuzzer-no-link
 else
   OPT := -O2 -g
 endif
@@ -136,7 +144,7 @@ ARGON2_CFLAGS := $(CFLAGS) -Wno-everything -I$(ARGON2_DIR)
 CORE_LIB      := $(BUILD)/lib/$(CONFIG)/libext4core.a
 CORE_TEST_LIB := $(BUILD)/lib/$(CONFIG)/libext4core-test.a
 
-.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-reorder test-crypto test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline fuzz-build fuzz fuzz-rw fuzz-repro fuzz-minimize fuzz-merge
+.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-reorder test-crypto test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline print-fuzz-flags fuzz-build fuzz fuzz-rw fuzz-repro fuzz-minimize fuzz-merge
 
 all: app
 
@@ -526,14 +534,27 @@ FUZZ_BIN   := $(BUILD)/bin/ext4_fuzz
 
 # Common flags for a libFuzzer run. -max_len covers the largest seed (8 MiB);
 # -rss_limit_mb is generous because ASan's shadow accounts against it.
-FUZZ_ARGS  := -dict=tools/fuzz/ext4.dict -max_len=8388608 -rss_limit_mb=2048 \
-              -use_value_profile=1 -artifact_prefix=$(FUZZ_DIR)/crashes/ \
+#
+# Absolute paths throughout: the recipes below cd into $(FUZZ_DIR)/logs first,
+# because -jobs=N makes libFuzzer scatter fuzz-0.log..fuzz-N.log into the
+# working directory. A relative -dict= or -artifact_prefix= would then be
+# resolved from there -- the dictionary silently not loading, which reads as a
+# campaign that simply is not finding much.
+FUZZ_ARGS  := -dict=$(CURDIR)/tools/fuzz/ext4.dict -max_len=8388608 \
+              -rss_limit_mb=2048 -use_value_profile=1 -detect_leaks=0 \
+              -artifact_prefix=$(CURDIR)/$(FUZZ_DIR)/crashes/ \
               -max_total_time=$(FUZZ_TIME) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS)
 
 # The guard is on the runtime file, not on a version string: Homebrew's LLVM
 # moves, and what actually matters is whether libclang_rt.fuzzer_osx.a sits
 # next to the compiler's own runtime. Exit 77 (SKIP), not 1: a machine without
 # it has not failed anything, it just cannot run this.
+# What scripts/fuzz_build.sh stamps, so that a flag change invalidates the
+# fuzz objects. Everything that decides the generated code, and nothing that
+# does not: the build id changes on every commit and would rebuild the world.
+print-fuzz-flags:
+	@echo "$(CC)|$(OPT)|$(TARGET_FLAG)|$(LWEXT4_DEFS)|$(EXTRA_CFLAGS)"
+
 # The guard lives in the script, not here, because make collapses a recipe's
 # exit code into its own 2: a caller that needs to tell "no libFuzzer runtime
 # on this machine" (77, a SKIP) from "the harness does not compile" (a
@@ -548,7 +569,7 @@ fuzz-build:
 $(FUZZ_BIN): $(FUZZ_SRCS) $(CORE_TEST_LIB)
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(CFLAGS) -DEXT4B_TEST_HOOKS=1 \
-	    -fsanitize=fuzzer,address,undefined \
+	    -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined \
 	    $(FUZZ_SRCS) $(CORE_TEST_LIB) -o $@
 	@echo "built $@"
 

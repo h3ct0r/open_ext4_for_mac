@@ -519,11 +519,40 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
  * last one (which is where `make fuzz` puts the seeds). A one-file repro run
  * therefore never self-tests the very artifact it was asked to reproduce.
  */
+static uint8_t *fuzz_slurp(const char *path, size_t *out_len)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    long n = ftell(f);
+    if (n < 2048 || n > (64L << 20)) { fclose(f); return NULL; }
+    rewind(f);
+    uint8_t *buf = (uint8_t *)malloc((size_t)n);
+    if (!buf) { fclose(f); return NULL; }
+    size_t got = fread(buf, 1, (size_t)n, f);
+    fclose(f);
+    if (got != (size_t)n) { free(buf); return NULL; }
+    *out_len = (size_t)n;
+    return buf;
+}
+
+#define FZ_SELFTEST_SCAN 64
+
 static void fuzz_self_test(int argc, char **argv)
 {
     char sample[4096] = { 0 };
+    uint8_t *buf = NULL;
+    size_t   n   = 0;
 
-    for (int i = argc - 1; i >= 1 && sample[0] == '\0'; i--) {
+    /*
+     * Take the first file in the directory that actually MOUNTS, not the
+     * first file at all. The seed corpus deliberately contains images this
+     * driver refuses -- inline_data, encrypt, casefold -- and the first run
+     * of this picked s08_encrypt, reported "probe=0 mount=0, stable over 3
+     * runs" and called that a passing self-test. A canary that is satisfied
+     * by never reaching a mount is not a canary.
+     */
+    for (int i = argc - 1; i >= 1 && buf == NULL; i--) {
         struct stat st;
         if (argv[i][0] == '-') continue;
         if (stat(argv[i], &st) != 0 || !S_ISDIR(st.st_mode)) continue;
@@ -531,31 +560,42 @@ static void fuzz_self_test(int argc, char **argv)
         DIR *dh = opendir(argv[i]);
         if (!dh) continue;
         struct dirent *de;
-        while ((de = readdir(dh)) != NULL) {
+        unsigned scanned = 0;
+        while ((de = readdir(dh)) != NULL && scanned < FZ_SELFTEST_SCAN) {
             if (de->d_name[0] == '.') continue;
             char path[4096];
             snprintf(path, sizeof path, "%s/%s", argv[i], de->d_name);
             struct stat fs2;
-            if (stat(path, &fs2) == 0 && S_ISREG(fs2.st_mode) && fs2.st_size >= 2048) {
+            if (stat(path, &fs2) != 0 || !S_ISREG(fs2.st_mode) || fs2.st_size < 2048)
+                continue;
+            scanned++;
+
+            size_t len = 0;
+            uint8_t *cand = fuzz_slurp(path, &len);
+            if (!cand) continue;
+
+            uint64_t before = g_mounted;
+            fuzz_one_ro(cand, len);
+            if (g_mounted > before) {
+                buf = cand; n = len;
                 snprintf(sample, sizeof sample, "%s", path);
                 break;
             }
+            free(cand);
         }
         closedir(dh);
-    }
-    if (sample[0] == '\0') return;
 
-    FILE *f = fopen(sample, "rb");
-    if (!f) return;
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return; }
-    long n = ftell(f);
-    if (n < 2048 || n > (64L << 20)) { fclose(f); return; }
-    rewind(f);
-    uint8_t *buf = (uint8_t *)malloc((size_t)n);
-    if (!buf) { fclose(f); return; }
-    size_t got = fread(buf, 1, (size_t)n, f);
-    fclose(f);
-    if (got != (size_t)n) { free(buf); return; }
+        if (buf == NULL && scanned > 0) {
+            fprintf(stderr,
+                    "ext4_fuzz: SELF-TEST FAILED\n"
+                    "  none of the %u images in %s mounted.\n"
+                    "  The harness is not reaching a mount at all, so whatever\n"
+                    "  this campaign measures, it is not the driver.\n",
+                    scanned, argv[i]);
+            abort();
+        }
+    }
+    if (buf == NULL) return;
 
     uint64_t m0 = g_mounted, p0 = g_probed;
     fuzz_one_ro(buf, (size_t)n);

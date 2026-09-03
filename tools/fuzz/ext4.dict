@@ -1,0 +1,119 @@
+# libFuzzer dictionary for ext2/3/4 on-disk structures.
+#
+# A dictionary is not decoration here. Almost every structure the driver
+# parses is behind a magic number or a small enumerated field, and a mutator
+# working byte by byte will not invent 0xF30A in the right place before the
+# campaign ends. These are the tokens that let a random edit land somewhere
+# that gets parsed instead of somewhere that gets rejected.
+#
+# Byte order matters and is not uniform: ext4's own structures are little
+# endian, JBD2's are big endian because the journal format came from ext3 and
+# was defined network order. Both are here, spelled the way they appear on the
+# medium.
+
+# --- superblock ---
+sb_magic="\x53\xEF"
+sb_magic_at_1024="\x53\xEF\x00\x00"
+sb_state_clean="\x01\x00"
+sb_state_error="\x02\x00"
+sb_rev_dynamic="\x01\x00\x00\x00"
+sb_inode_size_128="\x80\x00"
+sb_inode_size_256="\x00\x01"
+sb_log_bs_0="\x00\x00\x00\x00"
+sb_log_bs_2="\x02\x00\x00\x00"
+
+# --- feature words, as they sit in the superblock ---
+# INCOMPAT: filetype|recover|extents|64bit|flex_bg
+incompat_filetype="\x02\x00\x00\x00"
+incompat_recover="\x04\x00\x00\x00"
+incompat_extents="\x40\x00\x00\x00"
+incompat_64bit="\x80\x00\x00\x00"
+incompat_flex_bg="\x00\x02\x00\x00"
+incompat_inline_data="\x00\x80\x00\x00"
+incompat_encrypt="\x00\x00\x01\x00"
+incompat_csum_seed="\x00\x20\x00\x00"
+incompat_meta_bg="\x10\x00\x00\x00"
+incompat_mmp="\x00\x01\x00\x00"
+ro_compat_metadata_csum="\x00\x04\x00\x00"
+ro_compat_bigalloc="\x00\x02\x00\x00"
+ro_compat_gdt_csum="\x10\x00\x00\x00"
+ro_compat_huge_file="\x08\x00\x00\x00"
+ro_compat_quota="\x00\x01\x00\x00"
+compat_dir_index="\x20\x00\x00\x00"
+compat_has_journal="\x04\x00\x00\x00"
+
+# --- inode ---
+inode_mode_dir="\xED\x41"
+inode_mode_reg="\xA4\x81"
+inode_mode_link="\xFF\xA1"
+inode_mode_chr="\x00\x20"
+inode_flag_extents="\x00\x00\x08\x00"
+inode_flag_index="\x00\x10\x00\x00"
+inode_flag_inline="\x00\x00\x00\x10"
+inode_flag_huge="\x00\x00\x04\x00"
+inode_flag_ea_inode="\x00\x00\x20\x00"
+
+# --- extent tree ---
+extent_magic="\x0A\xF3"
+extent_hdr_root="\x0A\xF3\x01\x00\x04\x00\x00\x00"
+extent_hdr_full="\x0A\xF3\xFF\xFF\xFF\xFF\x00\x00"
+extent_hdr_depth1="\x0A\xF3\x01\x00\x04\x00\x01\x00"
+extent_len_max="\x00\x80"
+extent_len_over="\x01\x80"
+
+# --- directory entries ---
+# rec_len values that tile a block wrongly, and the tail marker (a fake entry
+# with inode 0 and rec_len 12 carrying the checksum).
+dirent_reclen_12="\x0C\x00"
+dirent_reclen_zero="\x00\x00"
+dirent_reclen_max="\xFF\xFF"
+dirent_reclen_block="\x00\x04"
+dirent_tail="\x0C\x00\x00\xDE"
+dirent_filetype_max="\x07"
+dirent_filetype_bad="\x08"
+
+# --- htree ---
+dx_hash_legacy="\x00"
+dx_hash_half_md4="\x01"
+dx_hash_tea="\x02"
+dx_hash_legacy_ue="\x03"
+dx_hash_half_md4_ue="\x04"
+dx_hash_tea_ue="\x05"
+dx_hash_siphash="\x06"
+dx_info_length_8="\x08"
+dx_indirect_0="\x00"
+dx_indirect_3="\x03"
+dx_indirect_255="\xFF"
+dx_root_marker="\x00\x00\x00\x00\x0C\x00\x01\x02"
+
+# --- extended attributes ---
+xattr_magic="\x00\x00\x02\xEA"
+xattr_magic_le="\xEA\x02\x00\x00"
+xattr_index_user="\x01"
+xattr_index_trusted="\x04"
+xattr_index_security="\x06"
+xattr_index_system="\x07"
+xattr_terminator="\x00\x00\x00\x00"
+
+# --- JBD2, big endian ---
+jbd_magic="\xC0\x3B\x39\x98"
+jbd_desc_block="\xC0\x3B\x39\x98\x00\x00\x00\x01"
+jbd_commit_block="\xC0\x3B\x39\x98\x00\x00\x00\x02"
+jbd_sb_v1="\xC0\x3B\x39\x98\x00\x00\x00\x03"
+jbd_sb_v2="\xC0\x3B\x39\x98\x00\x00\x00\x04"
+jbd_revoke_block="\xC0\x3B\x39\x98\x00\x00\x00\x05"
+jbd_flag_escape="\x00\x00\x00\x01"
+jbd_flag_same_uuid="\x00\x00\x00\x02"
+jbd_flag_last_tag="\x00\x00\x00\x08"
+jbd_csum_v3="\x00\x00\x00\x10"
+
+# --- multi-mount protection ---
+mmp_magic="\x00\x4D\x4D\x50"
+mmp_magic_le="\x50\x4D\x4D\x00"
+
+# --- values that break arithmetic ---
+u16_max="\xFF\xFF"
+u32_max="\xFF\xFF\xFF\xFF"
+u64_max="\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF"
+u32_high_bit="\x00\x00\x00\x80"
+u64_high_bit="\x00\x00\x00\x00\x00\x00\x00\x80"

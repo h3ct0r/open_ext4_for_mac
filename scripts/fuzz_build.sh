@@ -39,4 +39,27 @@ if [ -z "$rt" ] || [ ! -f "$(dirname "$rt")/libclang_rt.fuzzer_osx.a" ]; then
   exit 77
 fi
 
+# Object files do not depend on the flags that produced them.
+#
+# This is stated in the Makefile about EXTRA_CFLAGS and it is just as true of
+# the fuzz configuration's OPT. Adding -fno-sanitize-recover=undefined here
+# changed nothing at all until build/obj/fuzz was removed by hand: the
+# campaign kept printing "runtime error:" and carrying on, exactly as it had
+# before, and the flag looked like it did not work. Half an hour, and the
+# wrong conclusion was one step away.
+#
+# So record the flags that built the tree and wipe the configuration's objects
+# when they change. Only build/obj/fuzz and build/lib/fuzz -- the release and
+# debug trees are not ours to invalidate.
+STAMP="build/.fuzz-flags"
+WANT="$(make --no-print-directory CONFIG=fuzz FUZZ_CC="$FUZZ_CC" print-fuzz-flags 2>/dev/null)"
+if [ -n "$WANT" ]; then
+  if [ ! -f "$STAMP" ] || [ "$(cat "$STAMP" 2>/dev/null)" != "$WANT" ]; then
+    [ -f "$STAMP" ] && echo "fuzz: build flags changed; rebuilding the fuzz objects"
+    rm -rf build/obj/fuzz build/lib/fuzz build/bin/ext4_fuzz
+    mkdir -p build
+    printf '%s' "$WANT" > "$STAMP"
+  fi
+fi
+
 exec make --no-print-directory CONFIG=fuzz FUZZ_CC="$FUZZ_CC" build/bin/ext4_fuzz
