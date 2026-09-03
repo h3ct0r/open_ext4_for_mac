@@ -155,6 +155,16 @@ int ext4_sb_write(struct ext4_blockdev *bdev, struct ext4_sblock *s)
 	 * journaled superblock updates (ext4_sb_write_trans) put it there.
 	 * Tell the cached copy, or the next journaled update commits stale
 	 * bytes over what was just written. */
+
+	/* Except during mount, where the logical block size is not known yet:
+	 * ext4_mount() calls ext4_fs_init() -- which writes the superblock to
+	 * clear VALID_FS -- and only then ext4_block_set_lb_size(). lg_bsize
+	 * is zero until that call, so the modulo below is a division by zero,
+	 * on every read-write mount, since this hunk landed. Nothing can be in
+	 * the cache that early either, so there is nothing to update. */
+	if (bdev->lg_bsize == 0)
+		return EOK;
+
 	ext4_bcache_update_if_cached(bdev->bc,
 			(bdev->lg_bsize > EXT4_SUPERBLOCK_OFFSET) ? 0 : 1,
 			EXT4_SUPERBLOCK_OFFSET % bdev->lg_bsize,
