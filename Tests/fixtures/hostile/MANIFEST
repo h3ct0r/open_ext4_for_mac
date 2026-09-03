@@ -34,3 +34,4 @@
 0008-a-bitmap-marked-past-its-own-end.img.gz  ro    probe,ls+/,check,df,groups  0068  a BLOCK_UNINIT group whose head-block count exceeds its own bitmap; materialising it wrote past the block
 0009-an-htree-count-past-its-limit.img.gz  ro    probe,walk+/,check  0069  an index block whose count exceeds its limit; the count sized the region the checksum read
 0010-an-odd-group-descriptor-size.img.gz  ro    probe,ls+/,check,df  gate  s_desc_size odd, which lwext4 uses whether or not 64BIT is set; every descriptor pointer built from it was misaligned
+0011-a-revision-0-superblock-with-an-inode-size-that-is-not-128.img.gz  ro    probe,ls+/,check  gate  fixture 0002 with s_rev_level set to 0: the gate used to substitute 128 for rev 0 instead of validating the field lwext4 actually reads

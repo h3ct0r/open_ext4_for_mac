@@ -448,6 +448,7 @@ enum Ext4Unlock {
 
         var failures = 0
         var deleted = 0
+        var unseen = 0
         for uuid in uuids.sorted() {
             let r = forget(uuid: uuid, in: directory, includeKeychain: includeKeychain)
             // The two halves fail independently, so report both. "NOT
@@ -460,6 +461,16 @@ enum Ext4Unlock {
                          + (r.keychainError.map { " (\($0))" } ?? "")
                          + files)
                 failures += 1
+            } else if r.keychain == .deleted {
+                print("  \(uuid): forgotten\(files)")
+                deleted += 1
+            } else if includeKeychain {
+                // Files went, the keychain saw nothing. That is not "forgotten":
+                // the keychain cannot tell "never stored" from "stored by a
+                // build this one cannot see", and the single-UUID path refuses
+                // to say forgot in this state for that reason. So does this.
+                print("  \(uuid): no keychain item visible to this build\(files)")
+                unseen += 1
             } else if r.removedSomething {
                 print("  \(uuid): forgotten\(files)")
                 deleted += 1
@@ -469,6 +480,11 @@ enum Ext4Unlock {
         }
         print("")
         print("forgot \(deleted) of \(uuids.count)")
+        if unseen > 0 {
+            complain("\(unseen) had no keychain item visible to this build; if the"
+                     + " installed app stored them, forget them with that:")
+            complain("    /Applications/Ext4Mac.app/Contents/MacOS/Ext4Mac forget --all --yes")
+        }
 
         // Ask again rather than trusting the loop: this verb exists because
         // the old one reported success without checking.
@@ -477,7 +493,7 @@ enum Ext4Unlock {
             complain("\(left.count) keychain item(s) remain: \(left.joined(separator: ", "))")
             return 1
         }
-        return failures == 0 ? 0 : 1
+        return (failures == 0 && unseen == 0) ? 0 : 1
     }
 
     /// Which volumes we hold keys for. Never prints key material.

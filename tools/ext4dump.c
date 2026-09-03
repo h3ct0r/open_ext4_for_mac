@@ -1089,7 +1089,7 @@ static int run_script(ext4b_device *dev, const char *path)
 
     const char *cont = getenv("EXT4DUMP_SCRIPT_CONTINUE");
     bool keep_going = cont && *cont && strcmp(cont, "0") != 0;
-    unsigned long failed = 0;
+    unsigned long failed = 0, ran = 0;
     char line[4096];
     unsigned long lineno = 0;
     int rc = 0;
@@ -1109,6 +1109,7 @@ static int run_script(ext4b_device *dev, const char *path)
         if (argc == 2 || argv[2][0] == '#')
             continue;
 
+        ran++;
         rc = run_write_command(dev, argc, argv);
         if (rc != 0) {
             fprintf(stderr, "%s:%lu: %s failed\n", path, lineno, argv[2]);
@@ -1121,6 +1122,12 @@ static int run_script(ext4b_device *dev, const char *path)
 
     if (keep_going && failed)
         fprintf(stderr, "script: %lu command(s) failed, kept going\n", failed);
+    /* Always, and to stderr with the rest: a test that feeds a script has
+     * to be able to tell "ran and all was well" from "never received the
+     * script" -- a heredoc handed to a backgrounded command is /dev/null,
+     * and two suites ran that way for weeks reporting every write path
+     * clean. Zero here is the line that says so. */
+    fprintf(stderr, "script: %lu command(s) run\n", ran);
 
     if (f != stdin)
         fclose(f);

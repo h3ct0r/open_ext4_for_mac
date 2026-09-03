@@ -264,6 +264,12 @@ else
   for i in 1 2 3 4; do
     "$PROBE" write "$D" refused "disk20s$i" "" "filler $i" >/dev/null
   done
+  # A negative count used to trap inside Collection.suffix -- a stack trace
+  # from the verb somebody runs because something already went wrong.
+  "$APP" events -1 "$D" >/dev/null 2>&1; rc=$?
+  [ "$rc" = "2" ] && ok "a negative count is a usage error, not a crash (rc=2)" \
+                  || bad "a negative count is a usage error, not a crash" "rc=$rc"
+
   n=$("$APP" events 5 "$D" 2>/dev/null | wc -l | tr -d ' ')
   [ "$n" = "5" ] && ok "the recent list prints what was asked for" \
                  || bad "the recent list prints what was asked for" "got $n lines"

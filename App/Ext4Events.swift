@@ -48,7 +48,16 @@ enum Ext4Events {
     static func events(_ arguments: [String]) -> Int32 {
         var rest = arguments
         var count = VolumeEventStore.recentCount
-        if let first = rest.first, let n = Int(first) { count = n; rest.removeFirst() }
+        if let first = rest.first, let n = Int(first) {
+            // Collection.suffix traps on a negative length. A diagnostic verb
+            // somebody runs because something already went wrong must not
+            // add a crash to it.
+            guard n >= 0 else {
+                print("usage: Ext4Mac events [count] [events-directory]")
+                return 2
+            }
+            count = n; rest.removeFirst()
+        }
         guard let dir = directory(rest.first) else {
             FileHandle.standardError.write(
                 "Ext4Mac: no events directory\n".data(using: .utf8)!)

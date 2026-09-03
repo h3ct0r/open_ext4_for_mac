@@ -181,7 +181,7 @@ public enum VolumeEventStore {
             lines.append(contentsOf: text.split(separator: "\n").map(String.init))
         }
         let decoder = JSONDecoder()
-        return lines.suffix(count).compactMap { line in
+        return lines.suffix(max(count, 0)).compactMap { line in
             guard let data = line.data(using: .utf8) else { return nil }
             return try? decoder.decode(VolumeEvent.self, from: data)
         }

@@ -47,6 +47,19 @@ final class SecureBytes: @unchecked Sendable {
     /// can be had, and `Ext4Mac selftest` does.
     let isLocked: Bool
 
+    /// Whether this build asks at all. False only under the test-only
+    /// LUKS_NO_MLOCK define; `Ext4Mac selftest` asserts this rather than
+    /// `isLocked`, because a refusal is the host's RLIMIT_MEMLOCK and not a
+    /// regression, and the design decision on record is availability over
+    /// hygiene.
+    static var lockAttempted: Bool {
+#if LUKS_NO_MLOCK
+        return false
+#else
+        return true
+#endif
+    }
+
     var count: Int { buffer.count }
     var isEmpty: Bool { buffer.count == 0 }
 

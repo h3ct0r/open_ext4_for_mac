@@ -673,20 +673,53 @@ int ext4b_probe(ext4b_device *dev, ext4b_probe_info *out)
         uint32_t reserved_gdt      = rd16(sb, SBF_RESERVED_GDT);
         uint32_t flex_shift        = sb[SBF_LOG_GROUPS_PER_FLEX];
         uint32_t rev_level         = rd32(sb, 0x04C);
+        uint32_t log_block         = rd32(sb, 0x018);
+        uint32_t log_cluster       = rd32(sb, 0x01C);
+        bool     bigalloc          = (rd32(sb, 0x064) & 0x0200) != 0;
         const char *why = NULL;
         char detail[96];
 
-        /* rev 0 has no s_inode_size field at all: the value is fixed at 128
-         * and the field holds something else entirely. */
-        if (rev_level == 0)
-            inode_size = 128;
+        /*
+         * A bigalloc volume allocates in clusters of 2^(log_cluster -
+         * log_block) blocks, and mke2fs sets s_blocks_per_group to
+         * clusters_per_group x that ratio -- so the bitmap bound below is
+         * 8 x block size CLUSTERS, i.e. that many blocks times the ratio.
+         * The first version of this gate compared against 8 x block size
+         * blocks and refused every healthy bigalloc volume as a damaged
+         * superblock, telling its owner to run e2fsck on a clean filesystem
+         * that used to mount read-only. Bounded, because the shift is off
+         * the medium too.
+         */
+        uint32_t cluster_ratio = 1;
+        if (bigalloc) {
+            if (log_cluster < log_block || log_cluster - log_block > 16)
+                why = "bigalloc cluster size is smaller than the block size or absurd";
+            else
+                cluster_ratio = 1u << (log_cluster - log_block);
+        }
 
-        if (inode_size < 128 || inode_size > bs)
+        /*
+         * rev 0 has no s_inode_size field: the inode is 128 bytes by
+         * definition. But lwext4 reads the field regardless of revision --
+         * ext4_fs_inode_checksum, the xattr walk and the inode initialiser
+         * all use ext4_get16(sb, inode_size) raw -- so a rev-0 superblock
+         * whose field says 54915 is the fixture-0002 overflow with one more
+         * byte changed. The first version of this gate REPLACED the value
+         * with 128 for rev 0 and validated the replacement, which is exactly
+         * backwards: the number that needs validating is the one lwext4 will
+         * use. A rev-0 volume that says anything but 128 is refused.
+         */
+        if (why)
+            ;
+        else if (rev_level == 0 && inode_size != 128)
+            why = "revision-0 superblock with an inode size other than 128";
+        else if (inode_size < 128 || inode_size > bs)
             why = "inode size is outside [128, block size]";
         else if (inode_size & (inode_size - 1))
             why = "inode size is not a power of two";
-        else if (blocks_per_group < 8 || blocks_per_group > 8u * bs)
-            why = "blocks per group is outside [8, 8 x block size]";
+        else if (blocks_per_group < 8 || blocks_per_group > 8u * bs * cluster_ratio)
+            why = bigalloc ? "blocks per group is outside [8, 8 x block size x cluster ratio]"
+                           : "blocks per group is outside [8, 8 x block size]";
         else if (blocks_per_group % 8)
             why = "blocks per group is not a multiple of 8";
         else if (inodes_per_group == 0 || inodes_per_group > 8u * bs)

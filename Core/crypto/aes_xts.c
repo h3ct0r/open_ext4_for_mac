@@ -11,6 +11,9 @@
 #include <string.h>
 #include "secure_mem.h"
 
+/* See secure_mem.h: the one definition. */
+int ext4b_secure_lock_errno;
+
 #define AES_BLOCK 16
 
 /*

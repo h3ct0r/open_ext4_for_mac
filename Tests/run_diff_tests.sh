@@ -122,8 +122,15 @@ oracle '
   # Lines that name a block device count only if they name ours. Lines that
   # name none -- JBD2 mostly -- are ours by elimination: the ring was cleared
   # immediately before the mount above.
+  #
+  # The kernel spells the device two ways and both have to match: ext4_msg
+  # prints "EXT4-fs (loop0): ...", but ext4_error and ext4_warning print
+  # "EXT4-fs error (device loop0): ..." -- and those are the lines the clean-log
+  # cell exists to catch. The first version of this filter matched only the
+  # first spelling, which made that cell unable to fail for exactly the
+  # complaints it was written for.
   dmesg | grep -iE "EXT4|JBD2" \
-        | grep -E "\($(basename "$dev")\):|^\[[^]]*\] JBD2:" > m2l.dmesg || true
+        | grep -E "\((device )?$(basename "$dev")\):|^\[[^]]*\] JBD2:" > m2l.dmesg || true
   losetup -d "$dev" 2>/dev/null || true
 ' >/dev/null
 

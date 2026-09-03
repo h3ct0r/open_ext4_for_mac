@@ -185,10 +185,17 @@ struct Ext4MacApp {
         // and the wipe in deinit does nothing whatsoever for a copy the kernel
         // made while we were not looking.
         let secret = SecureBytes(utf8: "correct horse battery staple")
-        check("key material is locked into memory, not swappable",
-              secret.isLocked,
-              "mlock did not take -- built with LUKS_NO_MLOCK, or "
-              + "RLIMIT_MEMLOCK is too small to lock one page")
+        // Asks, not granted. A build that never calls mlock is the regression
+        // (red under -DLUKS_NO_MLOCK); a kernel that refuses is this machine's
+        // RLIMIT_MEMLOCK, and the decision on record is that the volume opens
+        // anyway -- so that is reported, not failed. The first version of this
+        // cell went red under `ulimit -l 0` with the code entirely correct.
+        check("key material asks to be locked into memory, not swappable",
+              SecureBytes.lockAttempted,
+              "this build never calls mlock (LUKS_NO_MLOCK)")
+        if SecureBytes.lockAttempted && !secret.isLocked {
+            print("        (asked, and this host refused: RLIMIT_MEMLOCK)")
+        }
         check("and it holds what was put in it", secret.count == 28,
               "count is \(secret.count)")
 

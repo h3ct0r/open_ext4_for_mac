@@ -294,6 +294,27 @@ else
   bad "an impossible group sets the exit code" "rc=$rc"
 fi
 
+# --- bigalloc keeps its read-only verdict --------------------------------------
+echo
+echo "a healthy bigalloc volume"
+# mke2fs sets s_blocks_per_group to clusters_per_group x cluster_ratio, which
+# is above 8 x block size for any ratio over 1. The first geometry gate compared
+# against 8 x block size and refused every bigalloc volume as a damaged
+# superblock -- "e2fsck is the fix" -- where before it had probed READ_ONLY,
+# accurately named. Recorded red with that binary: verdict UNSUPPORTED.
+BAIMG="$WORK/bigalloc.img"; rm -f "$BAIMG"; dd if=/dev/zero of="$BAIMG" bs=1M count=64 2>/dev/null
+if mke2fs -q -F -t ext4 -b 4096 -O bigalloc -C 65536 "$BAIMG" >/dev/null 2>&1; then
+  v=$("$DUMP" "$BAIMG" probe 2>&1 | awk '/^verdict:/{print $2}')
+  n=$("$DUMP" "$BAIMG" probe 2>&1 | sed -n 's/^note: *//p' | head -1)
+  if [ "$v" = "READ_ONLY" ]; then
+    ok "bigalloc probes READ_ONLY, not as a damaged superblock ($n)"
+  else
+    bad "bigalloc probes READ_ONLY, not as a damaged superblock" "verdict=$v: $n"
+  fi
+else
+  echo "  (this mke2fs cannot make a bigalloc volume; cell skipped)"
+fi
+
 # --- pre-recovery totals are labelled as such -------------------------------
 echo
 echo "unreplayed journal in the audit"

@@ -119,15 +119,30 @@ while read -r file mode verbs fix note; do
     # whose whole finding was a "runtime error:" line printed during journal
     # replay. UBSan without -fno-sanitize-recover prints and carries on, so
     # the exit code says nothing.
-    run_deadline 60 "$DUMP" "$img" script - > "$WORK/rw-out.txt" 2>&1 <<'SCRIPT'
-mkdir /hostile
-create /hostile/a
-write /hostile/a some-bytes
-rm /hostile/a
-SCRIPT
+    # A file, not a heredoc: run_deadline backgrounds its command, and an
+    # asynchronous command's stdin is /dev/null. See the check below.
+    printf 'mkdir /hostile\ncreate /hostile/a\nwrite /hostile/a some-bytes\nrm /hostile/a\n' \
+      > "$WORK/rw-script.txt"
+    run_deadline 60 "$DUMP" "$img" script "$WORK/rw-script.txt" > "$WORK/rw-out.txt" 2>&1
     rc=$?
+    # The script has to have RUN. For its first weeks this suite fed the
+    # script through a heredoc to run_deadline, which backgrounds the command,
+    # and bash hands an asynchronous command /dev/null on stdin: ext4dump ran
+    # an empty script, exited 0, and every rw row passed having written
+    # nothing. ext4dump now ends every script with "script: N command(s) run"
+    # and N must be nonzero -- a create that FAILS still counts as run, which
+    # is the difference between "refused" and "never asked".
     if [ "$rc" -ge 128 ]; then
+      # First, because a crash ends the process before any trailer.
       bad "$file: the write path does not crash or hang" "rc=$rc (fix: $fix)"
+      failed=1
+    elif ! grep -qE "^script: [1-9][0-9]* command\(s\) run|^mount failed" "$WORK/rw-out.txt"; then
+      # Either the script ran (N >= 1 -- a create that FAILS still counts), or
+      # the read-write mount was refused before it could, and said so. A
+      # refusal is a legitimate outcome for a fixture like 0005, whose whole
+      # finding is that replay must not be believed. Silence is neither.
+      bad "$file: the write script ran at all" \
+          "$(grep -m1 '^script:' "$WORK/rw-out.txt" || echo 'no script: trailer and no refusal -- the script never reached ext4dump')"
       failed=1
     elif grep -qE 'AddressSanitizer|LeakSanitizer|runtime error:' "$WORK/rw-out.txt"; then
       bad "$file: the write path is free of sanitizer reports" \

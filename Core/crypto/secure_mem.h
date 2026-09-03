@@ -28,11 +28,17 @@
 #ifndef EXT4B_SECURE_MEM_H
 #define EXT4B_SECURE_MEM_H
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+/* memset_s: Apple provides it, glibc does not, and crypto_portable.h is where
+ * that difference lives. Included here rather than relied on from whichever
+ * file happens to include this one first -- patch 0070 is what an unstated
+ * include costs on Linux. */
+#include "crypto_portable.h"
 
 static inline size_t ext4b_page_size(void)
 {
@@ -47,6 +53,30 @@ static inline size_t ext4b_page_size(void)
  * value back to ext4b_secure_free, because it is what was locked and what has
  * to be wiped. `*locked_out` receives whether the lock took.
  */
+/* Why the last ext4b_secure_alloc did not lock, or 0 if it did (or never
+ * tried). One value per process is enough: it exists so a test can tell "the
+ * code did not ask" from "the code asked and this machine said no", and
+ * those need different responses -- the first is a regression, the second is
+ * a RLIMIT_MEMLOCK the runner or the sandbox set, which the caller has
+ * already decided to live with. */
+/* Defined once, in aes_xts.c. A `static` inside a static inline function is
+ * a separate object in every translation unit that includes this header, and
+ * the first version of this was exactly that: cryptotest read its own copy,
+ * which nothing had written, and reported "errno 0" for a refused lock. */
+extern int ext4b_secure_lock_errno;
+static inline int *ext4b_secure_lock_errno_slot(void) { return &ext4b_secure_lock_errno; }
+
+/* Does this build ask the kernel to lock at all? False only under the
+ * test-only LUKS_NO_MLOCK define. */
+static inline bool ext4b_secure_lock_attempted(void)
+{
+#ifdef LUKS_NO_MLOCK
+    return false;
+#else
+    return true;
+#endif
+}
+
 static inline void *ext4b_secure_alloc(size_t len, size_t *alloc_out, bool *locked_out)
 {
     size_t page = ext4b_page_size();
@@ -62,6 +92,7 @@ static inline void *ext4b_secure_alloc(size_t len, size_t *alloc_out, bool *lock
     bool locked = false;
 #ifndef LUKS_NO_MLOCK
     locked = (mlock(p, rounded) == 0);
+    *ext4b_secure_lock_errno_slot() = locked ? 0 : errno;
 #endif
     if (alloc_out)  *alloc_out = rounded;
     if (locked_out) *locked_out = locked;

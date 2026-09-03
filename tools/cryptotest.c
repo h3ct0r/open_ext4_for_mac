@@ -15,6 +15,7 @@
 //  so a symmetric error cannot hide.
 //
 #include "aes_xts.h"
+#include "secure_mem.h"
 #include "json.h"
 
 /* SHA-256 for the fixture digests below. Through the portability header, so
@@ -310,13 +311,28 @@ int main(void)
         aes_xts_key *k = aes_xts_key_create(key, sizeof key);
         if (!k) {
             bad("a key schedule is created", NULL);
+        } else if (!ext4b_secure_lock_attempted()) {
+            /* The regression this cell exists for: a build that does not ask.
+             * Red under -DLUKS_NO_MLOCK=1, which is how it is proven. */
+            bad("the key schedule is locked into memory, not swappable",
+                "this build never calls mlock (LUKS_NO_MLOCK)");
+            aes_xts_key_destroy(k);
+        } else if (aes_xts_key_is_locked(k)) {
+            ok("the key schedule is locked into memory, not swappable");
+            aes_xts_key_destroy(k);
         } else {
-            if (aes_xts_key_is_locked(k))
-                ok("the key schedule is locked into memory, not swappable");
-            else
-                bad("the key schedule is locked into memory, not swappable",
-                    "mlock did not take -- built with LUKS_NO_MLOCK, or "
-                    "RLIMIT_MEMLOCK is too small to lock one page");
+            /* The code asked and this machine said no. That is a property of
+             * the machine -- RLIMIT_MEMLOCK on a CI runner, a sandbox -- and
+             * the design decision on record is availability over hygiene:
+             * the volume still opens. A red here would be a red about the
+             * host, so it is a pass with the refusal on the record. The
+             * first version of this cell failed under `ulimit -l 0` with the
+             * code entirely correct. */
+            char d[96];
+            snprintf(d, sizeof d, "asked, refused by the kernel (errno %d) -- "
+                     "RLIMIT_MEMLOCK on this host", *ext4b_secure_lock_errno_slot());
+            ok("the key schedule asks to be locked into memory");
+            printf("         %s\n", d);
             aes_xts_key_destroy(k);
         }
     }

@@ -51,7 +51,13 @@
  * the compiler must load the pointer and call through it, so it cannot
  * conclude the write is dead.
  */
-static void *(*const ext4b_volatile_memset)(void *, int, size_t) = memset;
+/* `const volatile`, and both words matter. `const` alone is a compile-time
+ * constant that the optimiser folds straight back to memset, after which the
+ * wipe of a buffer that is about to be freed is a dead store and is deleted --
+ * gcc -O2 removes the entire call. `volatile` is what forces the load through
+ * the pointer, so the compiler cannot know what it calls and must call it.
+ * The same idiom, spelled the same way, is in argon2/core.c. */
+static void *(*const volatile ext4b_volatile_memset)(void *, int, size_t) = memset;
 
 static inline int memset_s(void *dst, size_t dstsz, int ch, size_t n)
 {

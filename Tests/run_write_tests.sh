@@ -438,13 +438,20 @@ echo "extended attributes that are not there"
 # one where it runs: macOS ENOATTR (93), "Attribute not found"; Linux ENODATA
 # (96), "No data available". The bug this guards against is answering EIO, or
 # answering with the OTHER system's number -- macOS getxattr(2) cannot return
-# ENODATA at all -- so both spellings pass and nothing else does.
+# ENODATA at all, and that is the case that stopped Finder copying files. So
+# the accepted spelling is chosen by the platform, not accepted on both: a
+# macOS build that answered ENODATA must fail here, and an either-or match
+# would have let it through.
+case "$(uname -s)" in
+  Darwin) XATTR_MISSING_TEXT="Attribute not found" ;;
+  *)      XATTR_MISSING_TEXT="No data available" ;;
+esac
 xattr_missing() {  # xattr_missing <path> <label>
   local out
   out=$("$DUMP" "$IMG" getxattr "$1" user.definitely.missing 2>&1)
   case "$out" in
-    *"Attribute not found"*|*"No data available"*) ok "$2" ;;
-    *) bad "$2" "got: $out" ;;
+    *"$XATTR_MISSING_TEXT"*) ok "$2" ;;
+    *) bad "$2" "got: $out (wanted '$XATTR_MISSING_TEXT' on $(uname -s))" ;;
   esac
 }
 op "create a file that has never had an xattr" create /noattr.txt

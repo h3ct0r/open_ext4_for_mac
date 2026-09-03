@@ -200,7 +200,7 @@ ARGON2_SRCS := $(ARGON2_DIR)/argon2.c $(ARGON2_DIR)/core.c $(ARGON2_DIR)/ref.c \
                $(ARGON2_DIR)/thread.c $(ARGON2_DIR)/encoding.c \
                $(ARGON2_DIR)/blake2/blake2b.c
 ARGON2_OBJS := $(patsubst $(CRYPTO_DIR)/%.c,$(OBJ)/crypto/%.o,$(ARGON2_SRCS))
-ARGON2_CFLAGS := $(CFLAGS) -Wno-everything -I$(ARGON2_DIR)
+ARGON2_CFLAGS := $(CFLAGS) $(NO_WARN) -I$(ARGON2_DIR)
 
 # The shipping library (shim built plain) and the test library (shim built
 # with EXT4B_TEST_HOOKS). lwext4/crypto/argon2 objects are shared.

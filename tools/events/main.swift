@@ -88,7 +88,7 @@ case "count":
 case "logsize":
     let log = dir.appendingPathComponent("events.log")
     let size = (try? FileManager.default.attributesOfItem(atPath: log.path)[.size] as? Int) ?? 0
-    print(size ?? 0)
+    print(size)
 
 case "flood":
     guard rest.count >= 2, let n = Int(rest[0]) else { die("flood needs <n> <device> [uuid]") }

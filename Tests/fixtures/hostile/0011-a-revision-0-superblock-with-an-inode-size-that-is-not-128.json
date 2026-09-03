@@ -1,0 +1,13 @@
+{
+  "id": "0011",
+  "slug": "a-revision-0-superblock-with-an-inode-size-that-is-not-128",
+  "found_by": "code review of the geometry gate, after the fact -- not the fuzzer, which had no rev-0 seed",
+  "base": "hostile fixture 0002 (s_inode_size 54915, checksum re-stamped)",
+  "edits": [
+    { "what": "superblock s_rev_level (offset 0x4C)", "from": 1, "to": 0 },
+    { "what": "superblock s_checksum (offset 0x3FC), re-stamped", "from": "0xc317b39a", "to": "(recomputed)" }
+  ],
+  "symptom": "The first geometry gate replaced the inode size with 128 for rev 0 and validated the replacement, so this volume probed USABLE; lwext4 then used the raw 54915 in ext4_fs_inode_checksum and the xattr walk -- the fixture-0002 heap-buffer-overflow with one more byte changed.",
+  "fixed_by": "the geometry gate refuses a rev-0 superblock whose s_inode_size is not exactly 128 (Core/shim/ext4_bridge.c)",
+  "reproduce": "build/bin/ext4dump <img> probe   # must be UNSUPPORTED, naming the revision"
+}

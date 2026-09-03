@@ -40,6 +40,7 @@ SEEDS="$ROOT/.fuzz/seeds"
 FINDINGS="$ROOT/.fuzz/findings/$(date +%Y%m%d-%H%M%S)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/ext4-fuzz.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
+printf 'mkdir /fz\ncreate /fz/a\nwrite /fz/a hello-from-the-campaign\nrm /fz/a\n' > "$WORK/rw-script.txt"
 
 FUZZ_COUNT="${FUZZ_COUNT:-300}"
 FUZZ_SEED="${FUZZ_SEED:-1}"
@@ -325,14 +326,17 @@ for s in "${present[@]}"; do
       # structural check of what it left. This is where a mutant that reads
       # cleanly can still take the write path somewhere it should not go.
       if [ -z "$verdict" ]; then
-        cp "$img" "$WORK/rw.img"
+        imgcopy "$img" "$WORK/rw.img"
+        # The script is a FILE. It was a heredoc, and run_deadline backgrounds
+        # the command it is given; bash hands an asynchronous command /dev/null
+        # on stdin, so for its first weeks this arm ran an empty script against
+        # every mutant and called every one of them clean on the write path.
+        # ext4dump prints "script: N command(s) run" at the end, and the
+        # hostile-regressions suite asserts on that line; this campaign cannot
+        # (a mutant may legitimately refuse the mkdir) and relies on the same
+        # file-not-stdin shape.
         run_deadline 40 env "EXT4DUMP_FAIL_AFTER=$(( RANDOM % 200 ))" \
-            "$DUMP" "$WORK/rw.img" script - >/dev/null 2>&1 <<'SCRIPT'
-mkdir /fz
-create /fz/a
-write /fz/a hello-from-the-campaign
-rm /fz/a
-SCRIPT
+            "$DUMP" "$WORK/rw.img" script "$WORK/rw-script.txt" >/dev/null 2>&1
         rc=$?
         if [ "$rc" -eq 137 ]; then
           verdict="HANG"; hang=$(( hang + 1 ))
