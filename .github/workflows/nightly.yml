@@ -1,0 +1,159 @@
+# What a five-minute smoke test cannot say.
+#
+# ci.yml answers "did this change break anything", on every push, in
+# minutes. This answers a different question: does it still hold up when it
+# is left running. The fuzzer needs hours to reach anything the seeds do not,
+# and a soak's whole product is "nothing found in N rounds" -- neither is
+# worth doing on a pull request, and both are worth doing every night.
+#
+# What it cannot do is the mounted half. Stages 9 to 13 need a signed FSKit
+# extension that a person approved in System Settings, and the pull suite
+# needs hands on a USB stick. Those stay on the developer's Mac under
+# `make validate` and `make soak`, and docs/ENVELOPE.md says so. This is the
+# offline set, over and over, with the fuzzer between rounds.
+name: nightly
+
+on:
+  schedule:
+    # 03:00 UTC. Late enough that the day's pushes have settled, early enough
+    # that the results are there before anyone looks.
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # An hour each way, against a corpus that has been growing since the last
+  # nightly. This is the run that finds things; ci.yml's five minutes is the
+  # run that proves the instrument still works.
+  long-fuzz:
+    name: an hour each way
+    runs-on: macos-15
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: install e2fsprogs
+        run: |
+          brew install e2fsprogs
+          echo "/opt/homebrew/opt/e2fsprogs/sbin" >> "$GITHUB_PATH"
+          echo "/opt/homebrew/opt/e2fsprogs/bin" >> "$GITHUB_PATH"
+
+      - name: pick a compiler with a libFuzzer runtime
+        id: cc
+        run: |
+          for cc in "$(xcrun -f clang)" /opt/homebrew/opt/llvm/bin/clang; do
+            [ -x "$cc" ] || continue
+            rt="$("$cc" -print-libgcc-file-name 2>/dev/null)" || continue
+            if [ -f "$(dirname "$rt")/libclang_rt.fuzzer_osx.a" ]; then
+              echo "fuzz_cc=$cc" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+          done
+          brew install llvm
+          echo "fuzz_cc=/opt/homebrew/opt/llvm/bin/clang" >> "$GITHUB_OUTPUT"
+
+      # The nightly corpus is the one that matters: it accumulates. Keyed on
+      # the run number so each night writes a new entry, restored from the
+      # most recent one -- actions/cache has no update-in-place.
+      - name: cache the corpus
+        uses: actions/cache@v4
+        with:
+          path: .fuzz/corpus
+          key: fuzz-corpus-nightly-${{ github.run_number }}
+          restore-keys: |
+            fuzz-corpus-nightly-
+            fuzz-corpus-master-
+
+      - name: build the harness
+        run: FUZZ_CC='${{ steps.cc.outputs.fuzz_cc }}' bash scripts/fuzz_build.sh
+
+      # Distil first. A corpus that has grown for weeks is mostly redundant,
+      # and the sweep at the start of a campaign costs more than the campaign
+      # -- 553 inputs at 2.2 GB merged down to 8 the first time this was run
+      # by hand, and before that libFuzzer was hitting its memory limit on the
+      # corpus rather than on anything the driver did.
+      - name: distil the corpus
+        run: make fuzz-merge || true
+
+      # `|| true`: libFuzzer exits non-zero for a crash and for an
+      # out-of-memory that is really the corpus. fuzz-check is the judge.
+      - name: an hour of read-only
+        run: make fuzz FUZZ_TIME=3600 FUZZ_JOBS=3 || true
+
+      - name: an hour of read-write
+        run: make fuzz-rw FUZZ_TIME=3600 FUZZ_JOBS=3 || true
+
+      - name: coverage gate
+        run: bash scripts/fuzz_coverage.sh
+
+      - name: any artifact with an input is a failure
+        if: always()
+        run: make fuzz-check
+
+      - name: artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-fuzz
+          path: |
+            .fuzz/crashes/**
+            .fuzz/logs/**
+            .fuzz/cov/print-*.txt
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # The offline set, three times, with ten minutes of fuzzing between rounds.
+  # A suite that has passed once tells you it can pass; a suite that has
+  # passed repeatedly, on a machine in different states, tells you something
+  # else. Three rounds is what fits in a nightly; the developer's soak runs
+  # for days and is where the number in docs/STATUS.md comes from.
+  offline-soak:
+    name: offline soak
+    runs-on: macos-15
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: install e2fsprogs
+        run: |
+          brew install e2fsprogs
+          echo "/opt/homebrew/opt/e2fsprogs/sbin" >> "$GITHUB_PATH"
+          echo "/opt/homebrew/opt/e2fsprogs/bin" >> "$GITHUB_PATH"
+
+      - name: pick a compiler with a libFuzzer runtime
+        id: cc
+        run: |
+          for cc in "$(xcrun -f clang)" /opt/homebrew/opt/llvm/bin/clang; do
+            [ -x "$cc" ] || continue
+            rt="$("$cc" -print-libgcc-file-name 2>/dev/null)" || continue
+            if [ -f "$(dirname "$rt")/libclang_rt.fuzzer_osx.a" ]; then
+              echo "fuzz_cc=$cc" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+          done
+          echo "fuzz_cc=" >> "$GITHUB_OUTPUT"
+
+      - name: soak
+        run: |
+          FUZZ_CC='${{ steps.cc.outputs.fuzz_cc }}' \
+          SOAK_ROUNDS=3 bash scripts/soak.sh --offline --fuzz 10
+
+      - name: sanitizers
+        run: make test-asan
+
+      - name: artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-soak
+          path: |
+            .soak/**
+            .fuzz/crashes/**
+            .fuzz/logs/**
+            build/ci/**
+          if-no-files-found: ignore
+          retention-days: 30
