@@ -552,6 +552,16 @@ test-asan:
 	@bash Tests/run_eio_tests.sh
 	@echo
 	@bash Tests/run_write_tests.sh
+	@echo
+	@# The mutation campaign, and every image that was once a finding.
+	@# Both are worth far more here than in a release build: against
+	@# release they see crashes, hangs and writes; here they see memory
+	@# unsafety, which is what most of the hostile corpus was. Measured --
+	@# 200 superblock-targeted mutants give zero findings against release
+	@# and five heap-buffer-overflows here.
+	@bash Tests/run_fuzz_tests.sh
+	@echo
+	@bash Tests/run_fuzz_regressions_tests.sh
 
 clean:
 	rm -rf $(BUILD)
