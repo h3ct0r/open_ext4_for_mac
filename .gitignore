@@ -20,6 +20,13 @@ signing.local.env
 # Soak logs. Deliberately outside build/, which every soak round deletes.
 .soak/
 
+# Fuzzing state: seed corpus, growing corpus, crash artifacts, logs, coverage
+# reports. Outside build/ for the same reason .soak/ is -- a validation round
+# begins with `make clean`, and a corpus a round deletes is a corpus that never
+# grows. Findings that matter are promoted into Tests/fixtures/hostile/ as
+# gzipped regression rows, which ARE committed.
+.fuzz/
+
 # Test artifacts
 Tests/fixtures/*.img
 tools/difftest/out/

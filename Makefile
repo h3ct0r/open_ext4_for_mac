@@ -42,6 +42,28 @@ INCLUDES := -I$(LWEXT4_DIR)/include -I$(LWEXT4_DIR)/include/misc -I$(SHIM_DIR) -
 
 ifeq ($(CONFIG),debug)
   OPT := -O0 -g -fsanitize=address,undefined
+else ifeq ($(CONFIG),fuzz)
+  # The in-process libFuzzer harness, and only it.
+  #
+  # Apple's Command Line Tools clang ships no libclang_rt.fuzzer_osx.a, so
+  # -fsanitize=fuzzer fails at link; it accepts -fsanitize=fuzzer-no-link and
+  # the coverage flags at compile time, but there is nothing to link against.
+  # Homebrew's LLVM ships the runtime and builds, links and runs the target
+  # against the CLT SDK. So this configuration is the one place in the build
+  # that needs a second compiler, and `make validate` never reaches it.
+  #
+  # -fsanitize=fuzzer-no-link on the *core* objects is the whole point: that
+  # is what gives libFuzzer edge coverage inside lwext4 rather than only
+  # inside the harness. -O1 is ASan's throughput sweet spot.
+  #
+  # Nothing built here can reach the shipping extension: objects and libraries
+  # carry the CONFIG in their path (see OBJ below), so build/obj/fuzz and
+  # build/lib/fuzz are a world of their own, and the appex rule refuses to
+  # link anything but a release core.
+  FUZZ_CC ?= /opt/homebrew/opt/llvm/bin/clang
+  CC      := $(FUZZ_CC)
+  OPT     := -O1 -g -fno-omit-frame-pointer \
+             -fsanitize=address,undefined -fsanitize=fuzzer-no-link
 else
   OPT := -O2 -g
 endif
@@ -61,6 +83,16 @@ LWEXT4_CFLAGS := $(CFLAGS) -Wno-everything
 SHIM_CFLAGS   := $(CFLAGS) -Wextra -Wno-unused-parameter
 
 TARGET_FLAG := -target arm64-apple-macos$(DEPLOY_TARGET)
+
+ifeq ($(CONFIG),fuzz)
+  # Homebrew clang has no default macOS SDK: without this it finds no
+  # <stdio.h> at all, which reads as the project failing to compile rather
+  # than as a missing -isysroot. Appended after TARGET_FLAG is defined, not
+  # inside the OPT block above, because that block runs before this line and a
+  # `+=` there would be overwritten by this assignment.
+  FUZZ_SDK    := $(shell xcrun --show-sdk-path)
+  TARGET_FLAG += -isysroot $(FUZZ_SDK)
+endif
 
 # Objects and libraries carry the CONFIG in their path. Two reasons:
 #
@@ -104,7 +136,7 @@ ARGON2_CFLAGS := $(CFLAGS) -Wno-everything -I$(ARGON2_DIR)
 CORE_LIB      := $(BUILD)/lib/$(CONFIG)/libext4core.a
 CORE_TEST_LIB := $(BUILD)/lib/$(CONFIG)/libext4core-test.a
 
-.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-reorder test-crypto test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline
+.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-reorder test-crypto test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline fuzz-build fuzz fuzz-rw fuzz-repro fuzz-minimize fuzz-merge
 
 all: app
 
@@ -462,6 +494,123 @@ test-asan:
 clean:
 	rm -rf $(BUILD)
 
+# --- fuzzing ------------------------------------------------------------------
+# An in-process libFuzzer target driving the same device seam ext4dump uses,
+# against mutated images held in memory. A filesystem driver mounts untrusted
+# media; every corruption bug found in this project so far lived in a surface a
+# fuzzer would have reached first.
+#
+# Built ONLY with Homebrew clang, into CONFIG=fuzz. `make validate` never needs
+# it: the toolchain-free Python mutation campaign is what runs in validation,
+# and this is the deeper instrument for someone who has the runtime.
+#
+#   make fuzz-build                 build build/bin/ext4_fuzz
+#   make fuzz                       10 minutes, read-only mode
+#   make fuzz-rw FUZZ_TIME=3600     an hour, read-write mode
+#   make fuzz-repro FILE=.fuzz/crashes/crash-abc   one input, symbolised
+#   make fuzz-minimize FILE=...     shrink a crashing input
+#   make fuzz-merge                 distil the corpus to its covering subset
+#
+# Durable state lives in .fuzz/, deliberately NOT under build/: a validation
+# round begins with `make clean`, and a corpus that a round deletes is a corpus
+# that never grows. .soak/ exists for the same reason.
+FUZZ_DIR   := .fuzz
+FUZZ_TIME  ?= 600
+FUZZ_JOBS  ?= 4
+FUZZ_CC    ?= /opt/homebrew/opt/llvm/bin/clang
+
+# Every source under tools/fuzz/ except the ones carrying their own main().
+# A wildcard so that the later phases add a file rather than edit this line.
+FUZZ_SRCS  := $(filter-out tools/fuzz/ext4_stampcheck.c,$(wildcard tools/fuzz/*.c))
+FUZZ_BIN   := $(BUILD)/bin/ext4_fuzz
+
+# Common flags for a libFuzzer run. -max_len covers the largest seed (8 MiB);
+# -rss_limit_mb is generous because ASan's shadow accounts against it.
+FUZZ_ARGS  := -dict=tools/fuzz/ext4.dict -max_len=8388608 -rss_limit_mb=2048 \
+              -use_value_profile=1 -artifact_prefix=$(FUZZ_DIR)/crashes/ \
+              -max_total_time=$(FUZZ_TIME) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS)
+
+# The guard is on the runtime file, not on a version string: Homebrew's LLVM
+# moves, and what actually matters is whether libclang_rt.fuzzer_osx.a sits
+# next to the compiler's own runtime. Exit 77 (SKIP), not 1: a machine without
+# it has not failed anything, it just cannot run this.
+# The guard lives in the script, not here, because make collapses a recipe's
+# exit code into its own 2: a caller that needs to tell "no libFuzzer runtime
+# on this machine" (77, a SKIP) from "the harness does not compile" (a
+# failure) has to run scripts/fuzz_build.sh directly. This target is the
+# convenience wrapper for a human at a terminal.
+fuzz-build:
+	@FUZZ_CC="$(FUZZ_CC)" bash scripts/fuzz_build.sh
+
+# Linked with the full -fsanitize=fuzzer (the core objects carry
+# fuzzer-no-link), and with EXT4B_TEST_HOOKS so the harness can reach the
+# orphan-inspection API and the deliberate-assert hook.
+$(FUZZ_BIN): $(FUZZ_SRCS) $(CORE_TEST_LIB)
+	@mkdir -p $(dir $@)
+	$(CC) $(TARGET_FLAG) $(CFLAGS) -DEXT4B_TEST_HOOKS=1 \
+	    -fsanitize=fuzzer,address,undefined \
+	    $(FUZZ_SRCS) $(CORE_TEST_LIB) -o $@
+	@echo "built $@"
+
+# The seed corpus is generated, never committed: it is mke2fs output, and
+# regenerating it is cheaper than versioning ten disk images.
+$(FUZZ_DIR)/seeds/.stamp:
+	@mkdir -p $(FUZZ_DIR)/seeds
+	@if [ -x Tests/fuzz/make_seeds.sh ] || [ -f Tests/fuzz/make_seeds.sh ]; then \
+	  bash Tests/fuzz/make_seeds.sh || exit $$?; \
+	else \
+	  echo "fuzz: Tests/fuzz/make_seeds.sh does not exist yet (phase A2)."; \
+	  echo "      Running against an empty seed corpus finds nothing:"; \
+	  echo "      libFuzzer would spend its whole budget inventing a"; \
+	  echo "      superblock magic it will never guess."; \
+	  exit 1; \
+	fi
+	@touch $@
+
+fuzz: fuzz-build $(FUZZ_DIR)/seeds/.stamp
+	@mkdir -p $(FUZZ_DIR)/corpus/ro $(FUZZ_DIR)/crashes $(FUZZ_DIR)/logs
+	@cd $(FUZZ_DIR)/logs && EXT4_FUZZ_MODE=ro \
+	  $(CURDIR)/$(FUZZ_BIN) $(CURDIR)/$(FUZZ_DIR)/corpus/ro $(CURDIR)/$(FUZZ_DIR)/seeds \
+	  $(FUZZ_ARGS) -timeout=20
+
+# Read-write is a different question, not more of the same one: it is the only
+# mode that runs jbd2 recovery and the dx split, and it is the only mode where
+# a bug can write. Slower per input, hence the longer per-input timeout.
+fuzz-rw: fuzz-build $(FUZZ_DIR)/seeds/.stamp
+	@mkdir -p $(FUZZ_DIR)/corpus/rw $(FUZZ_DIR)/crashes $(FUZZ_DIR)/logs
+	@cd $(FUZZ_DIR)/logs && EXT4_FUZZ_MODE=rw \
+	  $(CURDIR)/$(FUZZ_BIN) $(CURDIR)/$(FUZZ_DIR)/corpus/rw $(CURDIR)/$(FUZZ_DIR)/seeds \
+	  $(FUZZ_ARGS) -timeout=40
+
+# One input, both modes, verbose, with a symbolised stack. This is the first
+# thing to run against a crash artifact.
+fuzz-repro: fuzz-build
+	@test -n "$(FILE)" || { echo "usage: make fuzz-repro FILE=.fuzz/crashes/crash-..."; exit 1; }
+	@test -f "$(FILE)" || { echo "no such file: $(FILE)"; exit 1; }
+	@EXT4_FUZZ_MODE=both EXT4_FUZZ_VERBOSE=1 \
+	  ASAN_SYMBOLIZER_PATH="$$(dirname $(FUZZ_CC))/llvm-symbolizer" \
+	  ASAN_OPTIONS=symbolize=1:print_stacktrace=1 \
+	  UBSAN_OPTIONS=print_stacktrace=1 \
+	  $(FUZZ_BIN) "$(FILE)"
+
+fuzz-minimize: fuzz-build
+	@test -n "$(FILE)" || { echo "usage: make fuzz-minimize FILE=.fuzz/crashes/crash-..."; exit 1; }
+	@test -f "$(FILE)" || { echo "no such file: $(FILE)"; exit 1; }
+	@mkdir -p $(FUZZ_DIR)/min
+	@EXT4_FUZZ_MODE=both $(FUZZ_BIN) -minimize_crash=1 -runs=100000 \
+	  -artifact_prefix=$(FUZZ_DIR)/min/ "$(FILE)"
+
+# A corpus grows monotonically and most of it is redundant. Merging keeps the
+# smallest subset covering the same edges, which is what makes a cached corpus
+# in CI affordable.
+fuzz-merge: fuzz-build
+	@mkdir -p $(FUZZ_DIR)/corpus/ro $(FUZZ_DIR)/corpus/rw $(FUZZ_DIR)/merged
+	@rm -rf $(FUZZ_DIR)/merged && mkdir -p $(FUZZ_DIR)/merged
+	@EXT4_FUZZ_MODE=ro $(FUZZ_BIN) -merge=1 \
+	  $(FUZZ_DIR)/merged $(FUZZ_DIR)/corpus/ro $(FUZZ_DIR)/seeds
+	@echo "merged corpus: $$(ls $(FUZZ_DIR)/merged | wc -l | tr -d ' ') inputs"
+	@rm -rf $(FUZZ_DIR)/corpus/ro && mv $(FUZZ_DIR)/merged $(FUZZ_DIR)/corpus/ro
+
 # --- FSKit extension ---------------------------------------------------------
 
 APP_NAME   := Ext4Mac
@@ -505,10 +654,12 @@ typecheck: core
 extension: $(APPEX)
 
 $(APPEX): $(SWIFT_SRCS) $(CORE_LIB) Extension/Info.plist $(BUILD)/.build-id
-	@if [ "$(CONFIG)" = "debug" ] && [ -z "$(ALLOW_DEBUG_APPEX)" ]; then \
-	  echo "refusing to build the appex against a debug/ASan core."; \
-	  echo "the shipping extension must be a release build; set"; \
-	  echo "ALLOW_DEBUG_APPEX=1 only if you really mean to."; \
+	@if [ "$(CONFIG)" != "release" ] && [ -z "$(ALLOW_DEBUG_APPEX)" ]; then \
+	  echo "refusing to build the appex against a $(CONFIG) core."; \
+	  echo "the shipping extension must be a release build -- a debug core"; \
+	  echo "carries ASan, and a fuzz core carries ASan and coverage"; \
+	  echo "instrumentation calling into a libFuzzer runtime that is not"; \
+	  echo "there. Set ALLOW_DEBUG_APPEX=1 only if you really mean to."; \
 	  exit 1; \
 	fi
 	@rm -rf "$(APPEX)"
