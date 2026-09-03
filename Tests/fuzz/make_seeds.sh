@@ -276,11 +276,26 @@ if want s06; then
   # journal_write takes a FILE whose contents become the block data; without
   # it the command is a no-op that reports nothing, which is how the first
   # version of this produced a perfectly clean "dirty" seed.
-  head -c 4096 /dev/urandom > "$STAGE/jpayload"
+  #
+  # And the payload has to be the blocks' OWN current contents, not random
+  # bytes. The first version staged /dev/urandom for blocks 1, 2 and 3 --
+  # block 1 is the superblock on a 1 KiB volume -- so replaying this seed
+  # wrote garbage over the superblock and the very next thing the driver did
+  # was shift by a 955-million-bit log_block_size. That is a real finding (a
+  # journal that replays a superblock is trusted rather than re-validated)
+  # but it is not what this seed is for: s06 is meant to be a volume with an
+  # ordinary unreplayed journal, so that recovery RUNS. A seed that destroys
+  # the volume in its first millisecond tests recovery's error path and
+  # nothing else. The hostile version is kept as a fixture instead.
+  #
+  # Blocks 24 and 25 are inode-table blocks here, well clear of the
+  # superblock and the descriptors; staging their own bytes makes the replay
+  # a no-op that still has to be performed.
+  dd if="$img" of="$STAGE/jpayload" bs=1024 skip=24 count=2 2>/dev/null
   {
     echo "journal_open"
-    echo "journal_write -b 1,2,3 $STAGE/jpayload"
-    echo "journal_write -r 20,21 $STAGE/jpayload"
+    echo "journal_write -b 24,25 $STAGE/jpayload"
+    echo "journal_write -r 40,41 $STAGE/jpayload"
     echo "journal_close"
     echo "ssv state 0"          # not cleanly unmounted
     echo "quit"

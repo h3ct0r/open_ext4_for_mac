@@ -128,16 +128,17 @@ static uint32_t  g_bsize     = 512;
 /* Counters, printed by libFuzzer's -print_final_stats path via atexit. They
  * answer the one question a green campaign cannot otherwise answer: did any
  * input get past the probe at all, or was the whole run rejected at byte 56? */
-static uint64_t g_inputs, g_probed, g_mounted;
+static uint64_t g_inputs, g_probed, g_mounted, g_rw_mounted;
 
 static bool g_custom_mutator = true;
 
 static void fuzz_stats(void)
 {
-    fprintf(stderr, "ext4_fuzz: inputs=%llu probed-ext=%llu mounted=%llu\n",
+    fprintf(stderr, "ext4_fuzz: inputs=%llu probed-ext=%llu mounted=%llu rw-mounted=%llu\n",
             (unsigned long long)g_inputs,
             (unsigned long long)g_probed,
-            (unsigned long long)g_mounted);
+            (unsigned long long)g_mounted,
+            (unsigned long long)g_rw_mounted);
     if (g_custom_mutator) ext4_mutator_dump_counts();
 }
 
@@ -497,6 +498,131 @@ done:
     free(d.base);
 }
 
+/* ------------------------------------------------------------ read-write -- */
+
+/*
+ * The read-write pass.
+ *
+ * This is the only path that runs jbd2 recovery -- a mount of a volume whose
+ * superblock says needs_recovery replays the log before anything else -- and
+ * the only one that runs mount-time orphan cleanup. Seeds s06 and s07 exist
+ * for exactly those two, and every mutant descended from them carries the
+ * same trigger. It is also the only mode in which a bug can write, which is
+ * a different and larger class of consequence than a bug that reads.
+ *
+ * Every operation's return code is accepted. A corrupt volume is SUPPOSED to
+ * make these fail; the question is only whether it makes them crash, hang,
+ * or corrupt something the later read-only pass then trips over.
+ */
+static void fuzz_one_rw(const uint8_t *data, size_t size)
+{
+    memdev d = { 0 };
+    d.len       = size - (size % g_bsize);
+    d.read_only = false;
+    if (d.len < 2048) return;
+
+    d.base = (uint8_t *)malloc(d.len);
+    if (!d.base) return;
+    memcpy(d.base, data, d.len);
+
+    ext4b_device *dev = ext4b_device_create(&d, g_bsize, d.len / g_bsize,
+                                            false, memdev_read, memdev_write,
+                                            memdev_flush);
+    if (!dev) { free(d.base); return; }
+
+    /*
+     * Batching is a correctness dimension, not a speed knob: batch=1 gives a
+     * transaction per operation, which is the pre-batching behaviour the
+     * crash suites' oracles compare against, and 16 is what ships. Split by
+     * input parity so a campaign covers both without doubling its cost.
+     */
+    ext4b_set_txn_batch(dev, (size & 1) ? 1 : 16);
+
+    ext4b_probe_info info;
+    memset(&info, 0, sizeof(info));
+    if (ext4b_probe(dev, &info) != 0 || info.verdict != EXT4B_PROBE_USABLE)
+        goto done;
+    g_probed++;
+
+    if (ext4b_mount(dev, false) != 0)
+        goto done;
+    g_mounted++;
+    g_rw_mounted++;
+
+    {
+        /* A fixed script, in the order that makes each step's state the next
+         * step's input. Nothing here is random: the mutation is in the
+         * medium, and a random script would make a finding unreproducible. */
+        /* Large enough for the largest write below. The first version made
+         * this 8192 and then wrote three 4096-byte blocks out of it, which
+         * ASan reported as a global-buffer-overflow in memdev_write -- in the
+         * harness, on every read-write seed, which is the least useful crash
+         * available and exactly what A1's comment about recursion warned of
+         * in a different form. */
+        static const char payload[16384] = { 0 };
+        uint32_t dir = 0, file = 0;
+        size_t   wrote = 0;
+
+        (void)ext4b_create(dev, EXT4B_ROOT_INO, "fzdir", 5, EXT4B_TYPE_DIR,
+                           0755, 0, 0, &dir);
+        if (dir == 0) dir = EXT4B_ROOT_INO;
+
+        (void)ext4b_create(dev, dir, "a", 1, EXT4B_TYPE_FILE, 0644, 0, 0, &file);
+        if (file != 0) {
+            /* Three blocks: past the inline case, into the extent tree. */
+            (void)ext4b_write(dev, file, 0, payload, 3u * 4096, &wrote);
+            /* 600 bytes will not fit in the inode body, so it lands in an
+             * xattr BLOCK -- the parser seed s10 exists for, on the write
+             * side this time. */
+            (void)ext4b_setxattr(dev, file, "user.fz", payload, 600);
+            (void)ext4b_rename(dev, dir, "a", 1, dir, "b", 1);
+            (void)ext4b_truncate(dev, file, 4096);
+            (void)ext4b_unlink(dev, dir, "b", 1);
+        }
+
+        /*
+         * Force a directory index split: forty names into one directory is
+         * more than a 1 KiB leaf holds, so the htree has to grow -- the write
+         * side of the deferred htree path.
+         */
+        for (unsigned i = 0; i < 40; i++) {
+            char name[32];
+            uint32_t child = 0;
+            int n = snprintf(name, sizeof name, "split-%08u", i);
+            (void)ext4b_create(dev, dir, name, (size_t)n, EXT4B_TYPE_FILE,
+                               0644, 0, 0, &child);
+        }
+        {
+            uint32_t out = 0;
+            ext4b_item_type t = EXT4B_TYPE_UNKNOWN;
+            (void)ext4b_lookup(dev, dir, "split-00000021", 14, &out, &t);
+            (void)ext4b_lookup(dev, dir, "split-99999999", 14, &out, &t);
+        }
+
+        (void)ext4b_sync(dev);
+    }
+
+    (void)ext4b_unmount(dev);
+
+    /*
+     * And read back what the writes left, read-only this time. A write path
+     * that corrupts the volume it just wrote is invisible to the write path
+     * itself; it shows up here, or in e2fsck, or in a user's data.
+     */
+    if (ext4b_mount(dev, true) == 0) {
+        ext4b_check_result cr;
+        memset(&cr, 0, sizeof(cr));
+        (void)ext4b_check_tree(dev, &cr);
+        uint32_t head = 0;
+        (void)ext4b_orphan_head(dev, &head);
+        (void)ext4b_unmount(dev);
+    }
+
+done:
+    ext4b_device_destroy(dev);
+    free(d.base);
+}
+
 /* ------------------------------------------------------------ the entries -- */
 
 int LLVMFuzzerInitialize(int *argc, char ***argv);
@@ -582,7 +708,8 @@ static void fuzz_self_test(int argc, char **argv)
             if (!cand) continue;
 
             uint64_t before = g_mounted;
-            fuzz_one_ro(cand, len);
+            if (g_mode == MODE_RW) fuzz_one_rw(cand, len);
+            else                   fuzz_one_ro(cand, len);
             if (g_mounted > before) {
                 buf = cand; n = len;
                 snprintf(sample, sizeof sample, "%s", path);
@@ -604,20 +731,23 @@ static void fuzz_self_test(int argc, char **argv)
     }
     if (buf == NULL) return;
 
+    void (*one)(const uint8_t *, size_t) =
+        (g_mode == MODE_RW) ? fuzz_one_rw : fuzz_one_ro;
+
     uint64_t m0 = g_mounted, p0 = g_probed;
-    fuzz_one_ro(buf, (size_t)n);
+    one(buf, (size_t)n);
     uint64_t first_mount = g_mounted - m0, first_probe = g_probed - p0;
 
     m0 = g_mounted; p0 = g_probed;
-    fuzz_one_ro(buf, (size_t)n);
+    one(buf, (size_t)n);
     uint64_t second_mount = g_mounted - m0, second_probe = g_probed - p0;
 
     /* And once truncated, which fails somewhere in the middle of a mount and
      * so is the input most likely to leave state behind. */
-    fuzz_one_ro(buf, (size_t)n / 2);
+    one(buf, (size_t)n / 2);
 
     m0 = g_mounted;
-    fuzz_one_ro(buf, (size_t)n);
+    one(buf, (size_t)n);
     uint64_t third_mount = g_mounted - m0;
 
     free(buf);
@@ -642,7 +772,7 @@ static void fuzz_self_test(int argc, char **argv)
             sample, (unsigned long long)first_probe, (unsigned long long)first_mount);
 
     /* The self-test's own counts are not campaign results. */
-    g_inputs = 0; g_probed = 0; g_mounted = 0;
+    g_inputs = 0; g_probed = 0; g_mounted = 0; g_rw_mounted = 0;
 }
 
 int LLVMFuzzerInitialize(int *argc, char ***argv)
@@ -721,9 +851,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
     if (g_mode == MODE_RO || g_mode == MODE_BOTH)
         fuzz_one_ro(data, size);
-
-    /* MODE_RW arrives in phase A4: a private copy, a read-write mount (the
-     * only path that runs jbd2 recovery and orphan cleanup), and a fixed
-     * mutation script whose every return code is accepted. */
+    if (g_mode == MODE_RW || g_mode == MODE_BOTH)
+        fuzz_one_rw(data, size);
     return 0;
 }
