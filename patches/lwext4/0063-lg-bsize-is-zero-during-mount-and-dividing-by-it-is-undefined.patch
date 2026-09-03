@@ -1,0 +1,49 @@
+Subject: lg_bsize is zero during mount, and dividing by it is undefined
+
+Patch 0023 added a cache-coherency update to ext4_sb_write: the direct
+write goes past the block cache, so the cached copy of the superblock's
+home block has to be told, or the next journaled update commits stale
+bytes over what was just written. Locating that cached block needs the
+logical block size:
+
+    EXT4_SUPERBLOCK_OFFSET % bdev->lg_bsize
+
+which is a division by zero on every read-write mount, and has been since
+0023 landed. ext4_mount() calls ext4_fs_init() -- which writes the
+superblock to clear VALID_FS -- and only calls ext4_block_set_lb_size()
+afterwards, so lg_bsize is still zero at that point.
+
+    Core/lwext4/src/ext4_super.c:160:27: runtime error: division by zero
+
+Harmless in practice on this target: arm64 yields zero rather than
+trapping, the block index falls out as 1, and the cache is empty that
+early so update_if_cached finds nothing to update. It is undefined
+behaviour nonetheless, it traps on targets that do trap, and one compiler
+release deciding the expression is unreachable would delete the guard
+around it.
+
+Nothing can be cached before the block layer knows its block size, so the
+correct answer is to skip the update entirely.
+
+Found by fuzzing, in the read-write pass, on a pristine e2fsck-clean seed
+rather than a mutated one -- a mount, and nothing else.
+
+--- a/src/ext4_super.c
++++ b/src/ext4_super.c
+@@ -155,6 +155,16 @@
+ 	 * journaled superblock updates (ext4_sb_write_trans) put it there.
+ 	 * Tell the cached copy, or the next journaled update commits stale
+ 	 * bytes over what was just written. */
++
++	/* Except during mount, where the logical block size is not known yet:
++	 * ext4_mount() calls ext4_fs_init() -- which writes the superblock to
++	 * clear VALID_FS -- and only then ext4_block_set_lb_size(). lg_bsize
++	 * is zero until that call, so the modulo below is a division by zero,
++	 * on every read-write mount, since this hunk landed. Nothing can be in
++	 * the cache that early either, so there is nothing to update. */
++	if (bdev->lg_bsize == 0)
++		return EOK;
++
+ 	ext4_bcache_update_if_cached(bdev->bc,
+ 			(bdev->lg_bsize > EXT4_SUPERBLOCK_OFFSET) ? 0 : 1,
+ 			EXT4_SUPERBLOCK_OFFSET % bdev->lg_bsize,

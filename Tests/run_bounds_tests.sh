@@ -831,6 +831,31 @@ EOF
       echo "        (this build has no UBSan; the listing itself succeeded: rc=$ubrc)"
     fi
   fi
+
+  # A read-write mount, which is a different question from a read-only one:
+  # ext4_mount() writes the superblock to clear VALID_FS before the block
+  # layer has been told its logical block size, and patch 0023's
+  # cache-coherency update then took a modulo by that zero. Every read-write
+  # mount, since 0023 landed, on every volume. Nothing noticed because UBSan
+  # only prints when it is not made fatal, and no suite read the printing.
+  RWIMG="$WORK/ub_rw_mount.img"
+  rm -f "$RWIMG"; dd if=/dev/zero of="$RWIMG" bs=1m count=4 2>/dev/null
+  mke2fs -q -F -b 1024 -N 128 -I 256 -O metadata_csum,64bit,extent,dir_index \
+      -J size=1 "$RWIMG" 2>/dev/null
+  rwout=$(run_deadline 20 "$DUMP" "$RWIMG" mkdir /ubdir 2>&1); rwrc=$?
+  if nm "$DUMP" 2>/dev/null | grep -q "__ubsan"; then
+    if grep -q "runtime error:" <<<"$rwout"; then
+      bad "a read-write mount is free of undefined behaviour" \
+          "$(grep -m1 'runtime error:' <<<"$rwout")"
+    elif [ $rwrc -ge 128 ]; then
+      bad "a read-write mount is free of undefined behaviour" "rc=$rwrc"
+    else
+      ok "a read-write mount is free of undefined behaviour (UBSan watching)"
+    fi
+  else
+    echo "  note  the read-write UB cell needs 'make test-asan' to mean anything"
+    echo "        (this build has no UBSan; the mkdir itself returned rc=$rwrc)"
+  fi
 fi
 
 finish
