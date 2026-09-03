@@ -300,6 +300,22 @@ static bool ext4_dir_dx_csum_verify(struct ext4_inode_ref *inode_ref,
 			/* There is no space to hold the checksum */
 			return true;
 		}
+		/*
+		 * limit is checked against the block above; count was not, and
+		 * count is what sizes the region ext4_dir_dx_checksum reads.
+		 * Both come off the medium, and a count past the limit sends
+		 * crc32c beyond the block:
+		 *
+		 *   AddressSanitizer: heap-buffer-overflow
+		 *     crc32 <- ext4_crc32c <- ext4_dir_dx_checksum
+		 *     <- ext4_dir_dx_csum_verify <- ext4_dir_dx_find_entry
+		 *
+		 * A directory that claims more entries than its own index
+		 * block can hold is corrupt, so this is a checksum failure --
+		 * which is exactly what the caller is asking about.
+		 */
+		if (cnt < 0 || cnt > limit)
+			return false;
 		t = (void *)(((struct ext4_dir_idx_entry *)climit) + limit);
 
 		uint32_t c;
@@ -333,6 +349,13 @@ static void ext4_dir_set_dx_csum(struct ext4_inode_ref *inode_ref,
 			/* There is no space to hold the checksum */
 			return;
 		}
+
+		/* The writer's half of the same bound: count sizes the region
+		 * being checksummed, and stamping a checksum computed over
+		 * bytes outside the block would be worse than not stamping
+		 * one. See the note in ext4_dir_dx_csum_verify. */
+		if (count < 0 || count > limit)
+			return;
 
 		t = (void *)(((struct ext4_dir_idx_entry *)climit) + limit);
 		t->checksum = to_le32(ext4_dir_dx_checksum(inode_ref, dirent,
