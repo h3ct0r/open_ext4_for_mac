@@ -1,0 +1,39 @@
+Subject: the other null-pointer sizeof, in the xattr block loop
+
+0003 replaced this idiom in ext4_xattr_list()'s in-inode loop. There are
+two copies of it: the function lists the entries in the inode body, then
+the entries in the xattr block, and each loop sizes its buffer the same
+way. The second one was missed, and stayed missed, because nothing in the
+test corpus ever reached it.
+
+Reaching it needs a volume whose xattrs live in a block rather than in the
+inode -- which is what 128-byte inodes give you, since there is no extra
+inode space for an attribute at all. Every fixture in this project until
+now used 256-byte inodes, so every attribute fitted in the inode body and
+the block loop never ran with an entry in it.
+
+    Core/lwext4/src/ext4_xattr.c:995:51: runtime error: applying non-zero
+    offset 32 to null pointer
+
+Found by fuzzing, on a pristine e2fsck-clean seed rather than on a mutated
+one: seed s10, mke2fs -I 128, listxattr on a file with a 700-byte value.
+The generated code is the same either way; sizeof is what it means.
+
+--- a/src/ext4_xattr.c
++++ b/src/ext4_xattr.c
+@@ -988,13 +988,8 @@
+ 					    *)(list->name + name_len + 1);
+ 			}
+ 
+-			/*
+-			 * Size calculation by pointer arithmetics.
+-			 */
+-			buf_len +=
+-			    (char *)((struct ext4_xattr_list_entry *)0 + 1) +
+-			    name_len + 1 -
+-			    (char *)(struct ext4_xattr_list_entry *)0;
++			buf_len += sizeof(struct ext4_xattr_list_entry) +
++				   name_len + 1;
+ 		}
+ 	}
+ 	if (list_prev)

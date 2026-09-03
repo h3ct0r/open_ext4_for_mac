@@ -773,4 +773,64 @@ PYEOF
   done
 fi
 
+# --- undefined behaviour on ordinary media ----------------------------------
+# Not a corrupt image: a perfectly ordinary one.
+#
+# ext4_xattr_list() sizes its output buffer in two loops -- one for the
+# attributes stored in the inode body, one for those in a separate block --
+# and both used the (char *)((T *)0 + 1) - (char *)(T *)0 idiom to spell
+# sizeof. Patch 0003 fixed the first. The second went on undefined for as
+# long as it did because reaching it needs attributes that do NOT fit in the
+# inode, which means 128-byte inodes, and every fixture in this project used
+# 256-byte ones. A fuzzing seed built with -I 128 found it on the first run,
+# unmutated.
+#
+# This cell is only an assertion under `make test-asan`, where the tool is
+# built with UBSan; in a release build there is nothing to detect and it says
+# so rather than passing quietly.
+echo ""
+echo "undefined behaviour on ordinary media"
+
+if ! command -v mke2fs >/dev/null; then
+  echo "  (mke2fs not found; skipping the 128-byte-inode xattr cell)"
+else
+  UBIMG="$WORK/ub_xattr_block.img"
+  rm -f "$UBIMG"; dd if=/dev/zero of="$UBIMG" bs=1m count=3 2>/dev/null
+  # -I 128: no extra inode space at all, so every attribute goes to a block.
+  mke2fs -q -F -b 1024 -N 128 -I 128 -O ^metadata_csum,^64bit,extent,dir_index \
+      "$UBIMG" 2>/dev/null
+  head -c 700 /dev/urandom | base64 | head -c 700 > "$WORK/ub_value"
+  printf 'hello\n' > "$WORK/ub_file"
+  debugfs -w -f /dev/stdin "$UBIMG" >/dev/null 2>&1 <<EOF
+write $WORK/ub_file victim
+quit
+EOF
+  debugfs -w -f /dev/stdin "$UBIMG" >/dev/null 2>&1 <<EOF
+ea_set -f $WORK/ub_value /victim user.big
+quit
+EOF
+
+  if ! debugfs -R "ea_list /victim" "$UBIMG" 2>/dev/null | grep -q "user.big"; then
+    bad "a 128-byte-inode volume carries an xattr block" \
+        "debugfs would not set the attribute; the cell tested nothing"
+  else
+    ubout=$(run_deadline 20 "$DUMP" "$UBIMG" xattr /victim 2>&1); ubrc=$?
+    # Is there a sanitizer watching at all? Without one this proves nothing,
+    # and saying "ok" would be a lie told once per release build.
+    if nm "$DUMP" 2>/dev/null | grep -q "__ubsan"; then
+      if grep -q "runtime error:" <<<"$ubout"; then
+        bad "listing an xattr block is free of undefined behaviour" \
+            "$(grep -m1 'runtime error:' <<<"$ubout")"
+      elif [ $ubrc -ge 128 ]; then
+        bad "listing an xattr block is free of undefined behaviour" "rc=$ubrc"
+      else
+        ok "listing an xattr block is free of undefined behaviour (UBSan watching)"
+      fi
+    else
+      echo "  note  the xattr-block UB cell needs 'make test-asan' to mean anything"
+      echo "        (this build has no UBSan; the listing itself succeeded: rc=$ubrc)"
+    fi
+  fi
+fi
+
 finish
