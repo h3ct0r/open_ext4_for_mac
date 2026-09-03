@@ -42,6 +42,17 @@ INCLUDES := -I$(LWEXT4_DIR)/include -I$(LWEXT4_DIR)/include/misc -I$(SHIM_DIR) -
 
 ifeq ($(CONFIG),debug)
   OPT := -O0 -g -fsanitize=address,undefined
+else ifeq ($(CONFIG),cov)
+  # Source-level coverage for the fuzz harness: same compiler, same target,
+  # but LLVM's instrumentation-based profiling instead of the sanitizers, so
+  # the HTML report shows which LINES a campaign reached rather than only
+  # which functions. Sanitizers are off deliberately -- a coverage report is
+  # a map, not a bug hunt, and ASan's shadow triples the run time of a sweep
+  # over the whole corpus.
+  FUZZ_CC ?= /opt/homebrew/opt/llvm/bin/clang
+  CC      := $(FUZZ_CC)
+  OPT     := -O1 -g -fprofile-instr-generate -fcoverage-mapping \
+             -fsanitize=fuzzer-no-link
 else ifeq ($(CONFIG),fuzz)
   # The in-process libFuzzer harness, and only it.
   #
@@ -92,7 +103,7 @@ SHIM_CFLAGS   := $(CFLAGS) -Wextra -Wno-unused-parameter
 
 TARGET_FLAG := -target arm64-apple-macos$(DEPLOY_TARGET)
 
-ifeq ($(CONFIG),fuzz)
+ifneq ($(filter $(CONFIG),fuzz cov),)
   # Homebrew clang has no default macOS SDK: without this it finds no
   # <stdio.h> at all, which reads as the project failing to compile rather
   # than as a missing -isysroot. Appended after TARGET_FLAG is defined, not
@@ -144,7 +155,7 @@ ARGON2_CFLAGS := $(CFLAGS) -Wno-everything -I$(ARGON2_DIR)
 CORE_LIB      := $(BUILD)/lib/$(CONFIG)/libext4core.a
 CORE_TEST_LIB := $(BUILD)/lib/$(CONFIG)/libext4core-test.a
 
-.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-reorder test-crypto test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline print-fuzz-flags fuzz-build fuzz fuzz-rw fuzz-repro fuzz-minimize fuzz-merge
+.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-reorder test-crypto test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline print-fuzz-flags fuzz-build fuzz fuzz-rw fuzz-repro fuzz-minimize fuzz-merge fuzz-cov fuzz-cov-gate
 
 all: app
 
@@ -634,6 +645,49 @@ fuzz-minimize: fuzz-build
 # A corpus grows monotonically and most of it is redundant. Merging keeps the
 # smallest subset covering the same edges, which is what makes a cached corpus
 # in CI affordable.
+# The HTML map: which lines of lwext4 and the shim a campaign has reached.
+# Separate binary and separate CONFIG because instrumentation-based coverage
+# and the sanitizers do not belong in the same build -- see the cov block at
+# the top. Needs llvm-profdata and llvm-cov, which come with the same
+# Homebrew LLVM as the fuzzer runtime.
+COV_BIN := $(BUILD)/bin/ext4_fuzz_cov
+
+$(COV_BIN): $(FUZZ_SRCS) $(CORE_TEST_LIB)
+	@mkdir -p $(dir $@)
+	$(CC) $(TARGET_FLAG) $(CFLAGS) -DEXT4B_TEST_HOOKS=1 \
+	    -DEXT4_FUZZ_WEIGHTS_PATH='"$(CURDIR)/tools/fuzz/mutweights.json"' \
+	    -fsanitize=fuzzer -fprofile-instr-generate -fcoverage-mapping \
+	    $(FUZZ_SRCS) $(CORE_TEST_LIB) -o $@
+	@echo "built $@"
+
+fuzz-cov:
+	@$(MAKE) --no-print-directory CONFIG=cov $(COV_BIN)
+	@mkdir -p $(FUZZ_DIR)/cov
+	@rm -f $(FUZZ_DIR)/cov/*.profraw $(FUZZ_DIR)/cov/merged.profdata
+	@for mode in ro rw; do \
+	  echo "  sweeping the corpus in $$mode mode"; \
+	  LLVM_PROFILE_FILE="$(CURDIR)/$(FUZZ_DIR)/cov/$$mode.profraw" \
+	  EXT4_FUZZ_MODE=$$mode EXT4_FUZZ_NO_SELFTEST=1 \
+	    $(COV_BIN) -runs=0 -max_len=8388608 -rss_limit_mb=4096 \
+	      $(FUZZ_DIR)/seeds $(wildcard $(FUZZ_DIR)/corpus/*) \
+	      > $(FUZZ_DIR)/cov/$$mode-run.txt 2>&1 || true; \
+	done
+	@"$$(dirname $(FUZZ_CC))/llvm-profdata" merge -sparse \
+	    $(FUZZ_DIR)/cov/*.profraw -o $(FUZZ_DIR)/cov/merged.profdata
+	@"$$(dirname $(FUZZ_CC))/llvm-cov" show $(COV_BIN) \
+	    -instr-profile=$(FUZZ_DIR)/cov/merged.profdata \
+	    -format=html -output-dir=$(FUZZ_DIR)/cov/html \
+	    -ignore-filename-regex='(argon2|tools/fuzz)' 2>/dev/null
+	@"$$(dirname $(FUZZ_CC))/llvm-cov" report $(COV_BIN) \
+	    -instr-profile=$(FUZZ_DIR)/cov/merged.profdata \
+	    -ignore-filename-regex='(argon2|tools/fuzz)' 2>/dev/null | tail -20
+	@echo "html: $(FUZZ_DIR)/cov/html/index.html"
+
+# The gate, which is the part that can fail. fuzz-cov draws the map;
+# this asserts the campaign is still reaching the code it was aimed at.
+fuzz-cov-gate:
+	@bash scripts/fuzz_coverage.sh
+
 fuzz-merge: fuzz-build
 	@mkdir -p $(FUZZ_DIR)/corpus/ro $(FUZZ_DIR)/corpus/rw $(FUZZ_DIR)/merged
 	@rm -rf $(FUZZ_DIR)/merged && mkdir -p $(FUZZ_DIR)/merged

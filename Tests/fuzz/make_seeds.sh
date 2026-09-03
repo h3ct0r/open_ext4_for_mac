@@ -71,19 +71,14 @@ printf 'x%.0s' $(seq 1 60)                     > "$STAGE/slowlink"
 #                parsers; a corpus with only the first never reaches the
 #                second.
 #   fast + slow symlink, a hardlink, a character device, an empty directory.
-populate() {  # populate <img> <name-count>
-  local img="$1" names="${2:-300}"
+populate() {  # populate <img> <name-count> [linear]
+  local img="$1" names="${2:-300}" many_style="${3:-indexed}"
   {
     echo "mkdir /docs"
     echo "mkdir /empty"
     echo "cd /docs"
     echo "write $STAGE/small.txt small.txt"
     echo "write $STAGE/mid.bin mid.bin"
-    echo "cd /"
-    echo "mkdir /many"
-    echo "cd /many"
-    local i
-    for i in $(seq 1 "$names"); do echo "write $STAGE/small.txt n$i"; done
     echo "cd /"
     echo "symlink /fastlink docs/small.txt"
     echo "symlink /slowlink /$(cat "$STAGE/slowlink")"
@@ -104,6 +99,47 @@ populate() {  # populate <img> <name-count>
     echo "ea_set -f $STAGE/big.xattr /docs/mid.bin user.big"
     echo "quit"
   } | debugfs -w -f /dev/stdin "$img" >/dev/null 2>&1
+
+  # /many goes in through OUR tool, not debugfs.
+  #
+  # debugfs adds directory entries without ever building an htree: 300 names
+  # from it give a linear directory of seven blocks with the INDEX flag
+  # clear. A corpus built that way never reaches ext4_dir_idx.c at all --
+  # ext4_dir_find_entry only takes the dx path on an indexed directory -- and
+  # the coverage gate is what said so: the read-only pass covered
+  # ext4_dir_find_in_block and not one dx function, on a corpus whose whole
+  # point was the htree. lwext4 does build the index, so the seed is built by
+  # the thing being tested. e2fsck is still the judge of the result.
+  if [ -x "$DUMP" ] && [ "$many_style" != "linear" ]; then
+    {
+      echo "mkdir /many"
+      local i
+      for i in $(seq 1 "$names"); do echo "create /many/n$i"; done
+    } | "$DUMP" "$img" script - >/dev/null 2>&1
+  else
+    {
+      echo "mkdir /many"
+      echo "cd /many"
+      local i
+      for i in $(seq 1 "$names"); do echo "write $STAGE/small.txt n$i"; done
+      echo "quit"
+    } | debugfs -w -f /dev/stdin "$img" >/dev/null 2>&1
+  fi
+}
+
+# EXT4_INODE_FLAG_INDEX is 0x1000. A directory without it is a linear one,
+# and a corpus of linear directories tests half of what it claims to.
+check_indexed() {  # check_indexed <name> <img>
+  local flags
+  flags=$(debugfs -R "stat /many" "$2" 2>/dev/null | sed -nE 's/.*Flags: (0x[0-9a-f]+).*/\1/p')
+  if [ -z "$flags" ]; then
+    note "$1: /many is missing entirely"; return 1
+  fi
+  if [ $(( flags & 0x1000 )) -ne 0 ]; then
+    note "$1: /many is an indexed directory (flags $flags)"; return 0
+  fi
+  note "$1: /many is NOT indexed (flags $flags) -- the htree code is unreachable"
+  return 1
 }
 
 # An extent tree one level deep needs more extents than the 60-byte inode
@@ -185,6 +221,7 @@ if want s01; then
   populate "$img"
   deepen_extents "$img"
   check_content s01 "$img" docs empty many fastlink slowlink hardlink chardev || FAILED=1
+  check_indexed s01 "$img" || FAILED=1
   check_xattrs s01 "$img" || FAILED=1
   check_fsck s01 "$img" || FAILED=1
   MADE=$((MADE+1))
@@ -202,6 +239,7 @@ if want s02; then
   populate "$img"
   deepen_extents "$img"
   check_content s02 "$img" docs empty many fastlink slowlink hardlink chardev || FAILED=1
+  check_indexed s02 "$img" || FAILED=1
   check_xattrs s02 "$img" || FAILED=1
   check_fsck s02 "$img" || FAILED=1
   MADE=$((MADE+1))
@@ -225,6 +263,7 @@ if want s03; then
   populate "$img" 200
   deepen_extents "$img"
   check_content s03 "$img" docs empty many fastlink slowlink hardlink chardev || FAILED=1
+  check_indexed s03 "$img" || FAILED=1
   check_xattrs s03 "$img" || FAILED=1
   check_fsck s03 "$img" || FAILED=1
   MADE=$((MADE+1))
@@ -258,6 +297,7 @@ if want s05; then
   mke2fs -q -t ext3 -b 1024 -g 1024 -N 512 -L s05 -O dir_index -J size=1 "$img" 2>/dev/null
   populate "$img"
   check_content s05 "$img" docs empty many fastlink slowlink hardlink chardev || FAILED=1
+  check_indexed s05 "$img" || FAILED=1
   check_xattrs s05 "$img" || FAILED=1
   check_fsck s05 "$img" || FAILED=1
   MADE=$((MADE+1))
@@ -406,7 +446,18 @@ if want s09; then
   if mke2fs -q -t ext4 -b 1024 -g 1024 -N 512 -I 256 -L s09 \
        -O metadata_csum,64bit,extent,dir_index,meta_bg,^resize_inode \
        -J size=1 "$img" 2>/dev/null; then
-    populate "$img"
+    # "linear": /many goes in through debugfs here, not through our own tool.
+    #
+    # Not a preference. Creating files on a meta_bg volume WITH THIS DRIVER
+    # produces a filesystem e2fsck rejects: 150 creates give 59 complaints of
+    # the form "references inode N in group 1 where _INODE_UNINIT is set".
+    # The identical volume without meta_bg is clean, so it is the feature and
+    # not the tool. ext4b_probe lists META_BG in INCOMPAT_SUPPORTED and
+    # returns USABLE, so the driver will mount such a volume read-write and
+    # damage it -- an open finding for A8, with the corrupted image kept at
+    # .fuzz/min/hostile-meta-bg-uninit.img. Until that is fixed, this seed is
+    # about descriptor placement, which is what it was always for.
+    populate "$img" 300 linear
     check_content s09 "$img" docs empty many fastlink slowlink hardlink chardev || FAILED=1
   check_xattrs s09 "$img" || FAILED=1
   check_fsck s09 "$img" || FAILED=1
@@ -427,6 +478,7 @@ if want s10; then
     -J size=1 "$img" 2>/dev/null
   populate "$img"
   check_content s10 "$img" docs empty many fastlink slowlink hardlink chardev || FAILED=1
+  check_indexed s10 "$img" || FAILED=1
   check_xattrs s10 "$img" || FAILED=1
   check_fsck s10 "$img" || FAILED=1
   MADE=$((MADE+1))
