@@ -1,0 +1,20 @@
+{
+  "id": "0003",
+  "slug": "directory-past-its-extent-tree",
+  "found_by": "the in-process fuzzer, read-only mode, first 60-second campaign, unplanted",
+  "base": "Tests/fuzz/make_seeds.sh seed s01 as it stood then (ext4, 1 KiB blocks, metadata_csum, 3 MiB)",
+  "minimization": "libFuzzer's -minimize_crash got nowhere on a structured 3 MiB image ('failed to minimize beyond 3145728 bytes'). Delta-debugging the diff against the seed took it from 4996 bytes in 1664 runs to four bytes in one.",
+  "edits": [
+    {
+      "off": 12547,
+      "what": "inode 14, byte offset 3: i_uid's high byte and the low three bytes of i_size_lo",
+      "from": "00 00 04 00",
+      "to": "ff ff 02 f4",
+      "effect": "a one-block directory becomes one claiming ~16 MB on a 3 MiB volume"
+    }
+  ],
+  "symptom": "ext4_extent_get_blocks returns EOK with fblock 0 for a logical block the tree does not map; the directory walk passes support_unwritten = false, and ext4_assert(*fblock || support_unwritten) aborted. CONFIG_DEBUG_ASSERT ships, so on the installed extension this is a corrupt directory taking the mount down from an `ls`.",
+  "note": "The inode checksum is left wrong on purpose -- lwext4 warns and continues, which is its own observation about how far a bad inode gets.",
+  "fixed_by": "patches/lwext4/0064-a-directory-with-a-hole-is-an-error-not-an-assertion.patch",
+  "reproduce": "build/bin/ext4dump <img> ls /"
+}

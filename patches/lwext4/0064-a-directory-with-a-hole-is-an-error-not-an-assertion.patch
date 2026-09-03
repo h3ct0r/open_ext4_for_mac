@@ -1,0 +1,57 @@
+Subject: a directory with a hole is an error, not an assertion
+
+ext4_fs_get_inode_dblk_idx_internal() ended the extent path with
+
+    ext4_assert(*fblock || support_unwritten);
+
+Block 0 is ext4's hole marker, and the callers that pass
+support_unwritten = false are the directory walks -- ext4_dir_iterator_seek,
+ext4_dir_find_in_block, and three sites in ext4_dir_idx.c -- which need a
+real block rather than a hole.
+
+That condition is a property of the bytes on the medium, not an invariant
+of the code: a directory whose i_size claims more blocks than its extent
+tree maps satisfies it, and such a directory is four bytes of damage away
+from an ordinary one. CONFIG_DEBUG_ASSERT ships, so on the installed
+extension the assert is an abort, and the abort is reached from readdir.
+A corrupt directory takes the mount down from an `ls`.
+
+Found by fuzzing, in the first sixty-second campaign. Delta-minimized to
+four bytes at offset 0x3103 of the seed -- inode 14, byte offset 3,
+spanning i_uid's high byte and the low three bytes of i_size_lo. 00 00 04
+00 becomes ff ff 02 f4, which turns a one-block directory into one
+claiming about 16 MB on a 3 MiB volume.
+
+The callers already propagate a non-EOK return: the iterator stops and
+the caller sees EIO, which is what a damaged directory should produce.
+
+Fixture Tests/fixtures/hostile/0003-directory-past-its-extent-tree.img.gz.
+
+--- a/src/ext4_fs.c
++++ b/src/ext4_fs.c
+@@ -1445,7 +1445,24 @@
+ 		current_block = current_fsblk;
+ 		*fblock = current_block;
+ 
+-		ext4_assert(*fblock || support_unwritten);
++		/*
++		 * Block 0 is ext4's hole marker, and the callers that pass
++		 * support_unwritten = false are the directory walks: they need
++		 * a real block, not a hole.
++		 *
++		 * On the medium that condition is a directory whose i_size
++		 * claims more blocks than its extent tree maps -- four bytes
++		 * of damage on a real volume -- and asserting on it aborted
++		 * the driver from a plain readdir. CONFIG_DEBUG_ASSERT ships,
++		 * so on the installed extension that is an `ls` taking the
++		 * mount down.
++		 *
++		 * It is a property of the bytes, not an invariant of the code,
++		 * so it is an error return. The callers all propagate it: the
++		 * directory iterator stops, and the caller sees EIO.
++		 */
++		if (!*fblock && !support_unwritten)
++			return EIO;
+ 		return EOK;
+ 	}
+ #endif
