@@ -10,15 +10,16 @@
 # rather than against our own reader, so the suite cannot agree with a bug.
 set -uo pipefail
 
-export PATH="/opt/homebrew/opt/e2fsprogs/sbin:/opt/homebrew/opt/e2fsprogs/bin:$PATH"
-
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$ROOT/Tests/lib.sh"
+
 DUMP="$ROOT/build/bin/ext4dump"
 FIX="$ROOT/Tests/fixtures"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-PASS=0; FAIL=0; FSCK_RUNS=0
+FSCK_RUNS=0
+# Its own ok/bad: lib.sh's are plain, these are coloured.
 ok()  { PASS=$((PASS+1)); printf '  \033[32mok\033[0m   %s\n' "$1"; }
 # `bad` must end in a success status. Without it the trailing test is the
 # function's exit code, and it is false whenever there is no detail argument --
@@ -285,8 +286,13 @@ free_blocks() { "$DUMP" "$IMG" ls 2>/dev/null | sed -n 's|^# \([0-9]*\)/.*|\1|p'
 before=$(free_blocks)
 
 op "create /space.bin" create /space.bin && ok "create for space test"
-BIG2=$(python3 -c "import sys; sys.stdout.write('Z'*200000)")
-op "write 200KB"       write /space.bin "$BIG2" && ok "write 200 KB"
+# 200 KB, and it cannot travel as an argument. Linux caps a single argv string
+# at 128 KiB (MAX_ARG_STRLEN) where macOS caps only the total, so the argv
+# spelling of this passed here for a year and then failed the first time the
+# suite ran on the oracle. `put` with the chunk set to the whole file is the
+# same single write with the payload arriving from a file.
+python3 -c "import sys; sys.stdout.write('Z'*200000)" > "$TMP/big2.bin"
+op "write 200KB"       put /space.bin "$TMP/big2.bin" 200000 && ok "write 200 KB"
 after=$(free_blocks)
 [ "$after" -lt "$before" ] && ok "free blocks decreased ($before -> $after)" \
                            || bad "free blocks decreased" "before=$before after=$after"
@@ -411,7 +417,7 @@ op "attribute changes are still allowed" chmod /log.txt 640 \
 echo
 echo "metadata checksum seeds"
 new_image ext4_4k
-digest_before=$(shasum -a 256 "$IMG" | cut -d' ' -f1)
+digest_before=$(sha256 "$IMG")
 
 # A volume whose UUID was changed after creation keeps the checksum seed it was
 # made with, so the seed and the UUID no longer agree. Deriving the seed from
@@ -428,11 +434,16 @@ digest_before=$(shasum -a 256 "$IMG" | cut -d' ' -f1)
 # condition and not a number macOS getxattr(2) can return.
 echo
 echo "extended attributes that are not there"
+# The two systems give this one condition two names, and each is the right
+# one where it runs: macOS ENOATTR (93), "Attribute not found"; Linux ENODATA
+# (96), "No data available". The bug this guards against is answering EIO, or
+# answering with the OTHER system's number -- macOS getxattr(2) cannot return
+# ENODATA at all -- so both spellings pass and nothing else does.
 xattr_missing() {  # xattr_missing <path> <label>
   local out
   out=$("$DUMP" "$IMG" getxattr "$1" user.definitely.missing 2>&1)
   case "$out" in
-    *"Attribute not found"*) ok "$2" ;;
+    *"Attribute not found"*|*"No data available"*) ok "$2" ;;
     *) bad "$2" "got: $out" ;;
   esac
 }
@@ -475,7 +486,7 @@ echo
 echo "4096-byte device blocks"
 
 bs4k_img="$TMP/bs4k.img"
-dd if=/dev/zero of="$bs4k_img" bs=1m count=64 2>/dev/null
+dd if=/dev/zero of="$bs4k_img" bs=1M count=64 2>/dev/null
 export EXT4DUMP_DEVICE_BSIZE=4096
 if "$DUMP" "$bs4k_img" format 4 4096 BS4K >/dev/null 2>&1; then
   ok "format succeeds on a 4096-byte-block device"
@@ -536,7 +547,7 @@ fi
 echo
 echo "growing a file"
 leak_img="$TMP/grow.img"
-rm -f "$leak_img"; dd if=/dev/zero of="$leak_img" bs=1m count=64 2>/dev/null
+rm -f "$leak_img"; dd if=/dev/zero of="$leak_img" bs=1M count=64 2>/dev/null
 "$DUMP" "$leak_img" format 4 >/dev/null 2>&1
 python3 -c "open('$TMP/pattern.bin','wb').write(b'OLD-OWNER-BYTES-HERE!!!!'*(4*1024*1024//24))"
 python3 -c "open('$TMP/short.bin','wb').write(b'C'*5000)"

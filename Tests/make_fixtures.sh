@@ -26,7 +26,7 @@ build_image() {
   local img="$DIR/$name.img"
 
   rm -f "$img"
-  dd if=/dev/zero of="$img" bs=1m count="$size_mb" 2>/dev/null
+  dd if=/dev/zero of="$img" bs=1M count="$size_mb" 2>/dev/null
 
   # shellcheck disable=SC2086
   mke2fs -q -t "$type" -b "$bs" -L "${name:0:16}" $extra "$img"

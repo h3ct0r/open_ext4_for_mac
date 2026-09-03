@@ -7,15 +7,16 @@
 # agree with a bug in the driver.
 set -uo pipefail
 
-export PATH="/opt/homebrew/opt/e2fsprogs/sbin:/opt/homebrew/opt/e2fsprogs/bin:$PATH"
-
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$ROOT/Tests/lib.sh"
+
 DUMP="$ROOT/build/bin/ext4dump"
 FIX="$ROOT/Tests/fixtures"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-PASS=0; FAIL=0
+# Its own ok/bad: lib.sh's are plain, these are coloured, and this suite's
+# output is read by a person at a terminal more often than by anything else.
 ok()   { PASS=$((PASS+1)); printf '  \033[32mok\033[0m   %s\n' "$1"; }
 # `bad` must end in a success status. Without it the trailing test is the
 # function's exit code, and it is false whenever there is no detail argument --
@@ -52,7 +53,7 @@ gen=$("$DUMP" "$FIX/ext3_4k.img" probe | awk '/^generation:/{print $2}')
 expect_eq "ext3 detected as ext3" "ext3" "$gen"
 
 # Random data must not be mistaken for a filesystem.
-dd if=/dev/urandom of="$TMP/noise.img" bs=1m count=2 2>/dev/null
+dd if=/dev/urandom of="$TMP/noise.img" bs=1M count=2 2>/dev/null
 v=$("$DUMP" "$TMP/noise.img" probe | awk '/^verdict:/{print $2}')
 expect_eq "random data is not recognised as ext" "NOT_EXT" "$v"
 
@@ -101,7 +102,7 @@ for img in ext4_4k ext4_1k ext3_4k ext2_4k; do
       ok "$img $f byte-identical"
     else
       bad "$img $f byte-identical" \
-          "ours=$(shasum -a256 "$TMP/ours.bin"|cut -c1-16) ref=$(shasum -a256 "$TMP/ref.bin"|cut -c1-16)"
+          "ours=$(sha256 "$TMP/ours.bin"|cut -c1-16) ref=$(sha256 "$TMP/ref.bin"|cut -c1-16)"
     fi
   done
 done
@@ -145,10 +146,10 @@ echo "read-only guarantee"
 # Nothing we do may modify the image. Compare digests before and after a full
 # traversal — this is the property the read-only release depends on.
 for img in ext4_4k ext3_4k; do
-  before=$(shasum -a 256 "$FIX/$img.img" | cut -d' ' -f1)
+  before=$(sha256 "$FIX/$img.img")
   "$DUMP" "$FIX/$img.img" ls >/dev/null 2>&1
   "$DUMP" "$FIX/$img.img" cat /docs/medium.bin >/dev/null 2>&1
-  after=$(shasum -a 256 "$FIX/$img.img" | cut -d' ' -f1)
+  after=$(sha256 "$FIX/$img.img")
   expect_eq "$img unmodified after read-only use" "$before" "$after"
 done
 
@@ -173,8 +174,8 @@ ls512=$("$DUMP" "$FIX/ext4_4k.img" ls /docs 2>/dev/null)
 ls4k=$(EXT4DUMP_DEVICE_BSIZE=4096 "$DUMP" "$FIX/ext4_4k.img" ls /docs 2>/dev/null)
 expect_eq "directory listing identical at 512 and 4096 device blocks" "$ls512" "$ls4k"
 
-sum512=$("$DUMP" "$FIX/ext4_4k.img" cat /docs/medium.bin 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
-sum4k=$(EXT4DUMP_DEVICE_BSIZE=4096 "$DUMP" "$FIX/ext4_4k.img" cat /docs/medium.bin 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
+sum512=$("$DUMP" "$FIX/ext4_4k.img" cat /docs/medium.bin 2>/dev/null | sha256)
+sum4k=$(EXT4DUMP_DEVICE_BSIZE=4096 "$DUMP" "$FIX/ext4_4k.img" cat /docs/medium.bin 2>/dev/null | sha256)
 expect_eq "file content identical at 512 and 4096 device blocks" "$sum512" "$sum4k"
 
 # ---------------------------------------------------------------- report --

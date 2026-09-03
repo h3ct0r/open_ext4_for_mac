@@ -103,7 +103,7 @@ if ! command -v mke2fs >/dev/null; then
     exit 1
 fi
 
-dd if=/dev/zero of="$work/probe.img" bs=1m count=16 2>/dev/null
+dd if=/dev/zero of="$work/probe.img" bs=1M count=16 2>/dev/null
 mke2fs -q -t ext4 -L PROBE -F "$work/probe.img" 2>/dev/null
 dev=$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount "$work/probe.img" \
       | head -1 | awk '{print $1}')

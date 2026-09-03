@@ -18,7 +18,7 @@ echo ""
 
 new_vol() {  # new_vol <img> <gen> <bsize>
   rm -f "$1"
-  dd if=/dev/zero of="$1" bs=1m count=64 2>/dev/null
+  dd if=/dev/zero of="$1" bs=1M count=64 2>/dev/null
   "$DUMP" "$1" format "$2" "$3" BOUNDS >/dev/null 2>&1
 }
 
@@ -380,7 +380,7 @@ IMG="$WORK/oob-free.img"
 rm -f "$IMG"; python3 -c "open('$IMG','wb').truncate((32*32768+5000)*4096)"
 "$DUMP" "$IMG" format 4 >/dev/null 2>&1
 "$DUMP" "$IMG" create /victim 0644 >/dev/null 2>&1
-dd if=/dev/zero of="$WORK/payload" bs=1m count=4 2>/dev/null
+dd if=/dev/zero of="$WORK/payload" bs=1M count=4 2>/dev/null
 "$DUMP" "$IMG" put /victim "$WORK/payload" >/dev/null 2>&1
 python3 - "$IMG" <<'EOF'
 import sys, struct
@@ -759,7 +759,7 @@ echo ""
 echo "a corrupt extent header"
 
 EXTIMG="$WORK/extent_hdr.img"
-rm -f "$EXTIMG"; dd if=/dev/zero of="$EXTIMG" bs=1m count=64 2>/dev/null
+rm -f "$EXTIMG"; dd if=/dev/zero of="$EXTIMG" bs=1M count=64 2>/dev/null
 "$DUMP" "$EXTIMG" format 4 >/dev/null 2>&1
 "$DUMP" "$EXTIMG" create /victim >/dev/null 2>&1
 "$DUMP" "$EXTIMG" write /victim hello-world >/dev/null 2>&1
@@ -814,7 +814,7 @@ if ! command -v mke2fs >/dev/null; then
   echo "  (mke2fs not found; skipping the 128-byte-inode xattr cell)"
 else
   UBIMG="$WORK/ub_xattr_block.img"
-  rm -f "$UBIMG"; dd if=/dev/zero of="$UBIMG" bs=1m count=3 2>/dev/null
+  rm -f "$UBIMG"; dd if=/dev/zero of="$UBIMG" bs=1M count=3 2>/dev/null
   # -I 128: no extra inode space at all, so every attribute goes to a block.
   mke2fs -q -F -b 1024 -N 128 -I 128 -O ^metadata_csum,^64bit,extent,dir_index \
       "$UBIMG" 2>/dev/null
@@ -858,7 +858,7 @@ EOF
   # mount, since 0023 landed, on every volume. Nothing noticed because UBSan
   # only prints when it is not made fatal, and no suite read the printing.
   RWIMG="$WORK/ub_rw_mount.img"
-  rm -f "$RWIMG"; dd if=/dev/zero of="$RWIMG" bs=1m count=4 2>/dev/null
+  rm -f "$RWIMG"; dd if=/dev/zero of="$RWIMG" bs=1M count=4 2>/dev/null
   mke2fs -q -F -b 1024 -N 128 -I 256 -O metadata_csum,64bit,extent,dir_index \
       -J size=1 "$RWIMG" 2>/dev/null
   rwout=$(run_deadline 20 "$DUMP" "$RWIMG" mkdir /ubdir 2>&1); rwrc=$?
@@ -889,7 +889,7 @@ EOF
   # This cell is the whole claim: refused at the probe, and the volume
   # untouched by an attempted write. It needs no sanitizer to mean something.
   MBIMG="$WORK/meta_bg.img"
-  rm -f "$MBIMG"; dd if=/dev/zero of="$MBIMG" bs=1m count=5 2>/dev/null
+  rm -f "$MBIMG"; dd if=/dev/zero of="$MBIMG" bs=1M count=5 2>/dev/null
   if mke2fs -q -F -t ext4 -b 1024 -g 1024 -N 512 -I 256 \
        -O metadata_csum,64bit,extent,dir_index,meta_bg,^resize_inode \
        -J size=1 "$MBIMG" 2>/dev/null; then

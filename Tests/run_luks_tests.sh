@@ -18,18 +18,18 @@
 # Runs unattended. Writes a report to build/luks-report.txt.
 set -uo pipefail
 
-export PATH="/opt/homebrew/opt/e2fsprogs/sbin:/opt/homebrew/opt/e2fsprogs/bin:$PATH"
-
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$ROOT/Tests/lib.sh"
+
 DUMP="$ROOT/build/bin/ext4dump"
 WORK="$ROOT/build/luks"
 REPORT="$ROOT/build/luks-report.txt"
 # Bump the tag when the package list changes, or a stale image from an earlier
 # run is reused and the new checks quietly skip.
-DOCKER_IMAGE="ext4luks:cryptsetup-attr"
+ORACLE_IMAGE="$DOCKER_LUKS_IMAGE"
 
-PASS=0; FAIL=0
 note() { echo "$*" | tee -a "$REPORT"; }
+# Its own ok/bad: lib.sh's print, these tee into the report as well.
 ok()   { PASS=$((PASS+1)); note "  ok    $1"; }
 # `bad` must end in a success status; see the note in the other suites.
 bad()  { FAIL=$((FAIL+1)); note "  FAIL  $1"; [ $# -gt 1 ] && note "        $2"; return 0; }
@@ -38,25 +38,24 @@ expect_eq() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected [$2] got
 [ -x "$DUMP" ] || { echo "build first: make tools"; exit 1; }
 command -v e2fsck >/dev/null || { echo "e2fsck not found; brew install e2fsprogs"; exit 1; }
 
-if ! docker info >/dev/null 2>&1; then
-  echo "docker is not running; cryptsetup is the only way to make a LUKS fixture"
+if ! have_linux; then
+  echo "$(no_linux_reason); cryptsetup is the only way to make a LUKS fixture"
   echo "SKIPPED"
   exit 77
 fi
+oracle_needs cryptsetup mkfs.ext4 mount umount || { echo "SKIPPED"; exit 77; }
 
 rm -rf "$WORK"; mkdir -p "$WORK"
 : > "$REPORT"
 
-if ! docker image inspect "$DOCKER_IMAGE" >/dev/null 2>&1; then
-  echo "building $DOCKER_IMAGE (one-off, needs network)"
-  docker build -q -t "$DOCKER_IMAGE" - >/dev/null <<'DOCKERFILE'
+ensure_oracle_image "$ORACLE_IMAGE" <<'DOCKERFILE'
 FROM debian:stable-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cryptsetup-bin e2fsprogs attr && rm -rf /var/lib/apt/lists/*
 DOCKERFILE
-fi
 
-in_linux() { docker run --rm --privileged -v "$WORK:/w" "$DOCKER_IMAGE" bash -c "$1"; }
+# Every fragment runs against the one work directory; name it once.
+oracle() { in_linux "$WORK" "$1"; }
 
 PASSPHRASE="correct horse battery staple"
 printf '%s' "$PASSPHRASE"  > "$WORK/pass.txt"
@@ -68,30 +67,31 @@ note ""
 note "building fixtures with real cryptsetup"
 note ""
 
-in_linux '
+oracle '
 set -e
 mk() {  # mk <name> <luksFormat args...>
   local name="$1"; shift
-  dd if=/dev/zero of=/w/$name.img bs=1M count=48 status=none
-  cryptsetup luksFormat --batch-mode --key-file /w/pass.txt "$@" /w/$name.img
+  dd if=/dev/zero of=$name.img bs=1M count=48 status=none
+  cryptsetup luksFormat --batch-mode --key-file pass.txt "$@" $name.img
 }
 
 # The ordinary case: LUKS1, aes-xts-plain64, sha256.
 mk luks1 --type luks1
-cryptsetup luksOpen --key-file /w/pass.txt /w/luks1.img v1
+cryptsetup luksOpen --key-file pass.txt luks1.img v1
 mkfs.ext4 -q -L LUKSVOL /dev/mapper/v1
+umount /mnt/v 2>/dev/null || true
 mkdir -p /mnt/v && mount /dev/mapper/v1 /mnt/v
 echo -n "written by linux inside luks" > /mnt/v/hello.txt
 mkdir -p /mnt/v/sub
 head -c 300000 /dev/urandom > /mnt/v/sub/blob.bin
-sha256sum /mnt/v/sub/blob.bin | cut -d" " -f1 > /w/blob.sha
+sha256sum /mnt/v/sub/blob.bin | cut -d" " -f1 > blob.sha
 sync; umount /mnt/v; cryptsetup luksClose v1
 # A second passphrase in another key slot: unlocking must try them all.
-cryptsetup luksAddKey --batch-mode --key-file /w/pass.txt /w/luks1.img /w/pass2.txt
+cryptsetup luksAddKey --batch-mode --key-file pass.txt luks1.img pass2.txt
 
 # sha512 in the header, to prove the hash is read rather than assumed.
 mk luks1_sha512 --type luks1 --hash sha512
-cryptsetup luksOpen --key-file /w/pass.txt /w/luks1_sha512.img v2
+cryptsetup luksOpen --key-file pass.txt luks1_sha512.img v2
 mkfs.ext4 -q -L SHA512VOL /dev/mapper/v2 && cryptsetup luksClose v2
 
 # A cipher we do not implement. Must be refused by name, never guessed at.
@@ -99,30 +99,32 @@ mk luks1_cbc --type luks1 --cipher aes-cbc-essiv:sha256
 
 # LUKS2, the modern default: 4096-byte encryption sectors and argon2id.
 mk luks2 --type luks2 --sector-size 4096
-cryptsetup luksOpen --key-file /w/pass.txt /w/luks2.img v3
+cryptsetup luksOpen --key-file pass.txt luks2.img v3
 mkfs.ext4 -q -L LUKS2VOL /dev/mapper/v3
+umount /mnt/w 2>/dev/null || true
 mkdir -p /mnt/w && mount /dev/mapper/v3 /mnt/w
 echo -n "luks2 payload" > /mnt/w/two.txt
 # Deliberately larger than one encryption sector, and larger than one
 # filesystem block: the tweak has to advance correctly across both.
 head -c 400000 /dev/urandom > /mnt/w/wide.bin
-sha256sum /mnt/w/wide.bin | cut -d" " -f1 > /w/wide.sha
+sha256sum /mnt/w/wide.bin | cut -d" " -f1 > wide.sha
 sync; umount /mnt/w; cryptsetup luksClose v3
 
 # The same format with 512-byte sectors, where the tweak advances one unit per
 # sector instead of eight. Both conventions have to be right.
 mk luks2_512 --type luks2 --sector-size 512
-cryptsetup luksOpen --key-file /w/pass.txt /w/luks2_512.img v4
+cryptsetup luksOpen --key-file pass.txt luks2_512.img v4
 mkfs.ext4 -q -L LUKS2SMALL /dev/mapper/v4
+umount /mnt/x 2>/dev/null || true
 mkdir -p /mnt/x && mount /dev/mapper/v4 /mnt/x
 head -c 400000 /dev/urandom > /mnt/x/wide.bin
-sha256sum /mnt/x/wide.bin | cut -d" " -f1 > /w/wide512.sha
+sha256sum /mnt/x/wide.bin | cut -d" " -f1 > wide512.sha
 sync; umount /mnt/x; cryptsetup luksClose v4
 
 # pbkdf2 instead of argon2id, to prove the KDF is read from the header rather
 # than assumed.
 mk luks2_pbkdf2 --type luks2 --pbkdf pbkdf2 --pbkdf-force-iterations 1000
-cryptsetup luksOpen --key-file /w/pass.txt /w/luks2_pbkdf2.img v5
+cryptsetup luksOpen --key-file pass.txt luks2_pbkdf2.img v5
 mkfs.ext4 -q -L LUKS2PBKDF /dev/mapper/v5 && cryptsetup luksClose v5
 echo BUILT
 ' 2>&1 | tail -2 | sed 's/^/  /'
@@ -148,7 +150,7 @@ note ""
 note "unlocking"
 note ""
 
-before=$(shasum -a 256 "$WORK/luks1.img" | cut -d' ' -f1)
+before=$(sha256 "$WORK/luks1.img")
 out=$(EXT4DUMP_LUKS_KEYFILE="$WORK/wrong.txt" "$DUMP" "$WORK/luks1.img" ls / 2>&1)
 if grep -q "no key slot accepted" <<<"$out"; then
   ok "a wrong passphrase is refused, and says so"
@@ -156,7 +158,7 @@ else
   bad "a wrong passphrase is refused, and says so" "got: $(head -1 <<<"$out")"
 fi
 expect_eq "and the container is left untouched" "$before" \
-  "$(shasum -a 256 "$WORK/luks1.img" | cut -d' ' -f1)"
+  "$(sha256 "$WORK/luks1.img")"
 
 expect_eq "the right passphrase opens it" "USABLE" \
   "$(EXT4DUMP_LUKS_KEYFILE="$WORK/pass.txt" "$DUMP" "$WORK/luks1.img" probe 2>/dev/null | sed -n 's/^verdict: *//p')"
@@ -193,7 +195,7 @@ expect_eq "file content matches" "written by linux inside luks" \
 
 EXT4DUMP_LUKS_KEYFILE="$WORK/pass.txt" "$DUMP" "$WORK/luks1.img" cat /sub/blob.bin > "$WORK/blob.out" 2>/dev/null
 expect_eq "a 300 KB file is byte-identical across many sectors" \
-  "$(cat "$WORK/blob.sha")" "$(shasum -a 256 "$WORK/blob.out" | cut -d' ' -f1)"
+  "$(cat "$WORK/blob.sha")" "$(sha256 "$WORK/blob.out")"
 
 # The oracle cannot see inside a container, so hand it the plaintext.
 EXT4DUMP_LUKS_KEYFILE="$WORK/pass.txt" "$DUMP" "$WORK/luks1.img" decrypt "$WORK/plain.img" >/dev/null 2>&1
@@ -219,16 +221,20 @@ EXT4DUMP_LUKS_KEYFILE=$K "$DUMP" "$WORK/rw.img" mkdir /from-macos       >/dev/nu
 EXT4DUMP_LUKS_KEYFILE=$K "$DUMP" "$WORK/rw.img" create /from-macos/note.txt >/dev/null 2>&1
 EXT4DUMP_LUKS_KEYFILE=$K "$DUMP" "$WORK/rw.img" write /from-macos/note.txt "written through AES-XTS on macOS" >/dev/null 2>&1
 EXT4DUMP_LUKS_KEYFILE=$K "$DUMP" "$WORK/rw.img" create /big.bin         >/dev/null 2>&1
-EXT4DUMP_LUKS_KEYFILE=$K "$DUMP" "$WORK/rw.img" write /big.bin "$(python3 -c "import sys; sys.stdout.write('Q'*250000)")" >/dev/null 2>&1
+# Through a file, not an argument: Linux refuses a single argv string over
+# 128 KiB and macOS does not, and 250 KB is the point of this one.
+python3 -c "import sys; sys.stdout.write('Q'*250000)" > "$WORK/big-payload.bin"
+EXT4DUMP_LUKS_KEYFILE=$K "$DUMP" "$WORK/rw.img" put /big.bin "$WORK/big-payload.bin" 250000 >/dev/null 2>&1
 # An unaligned, partial-sector overwrite: the bytes we do not touch have to
 # re-encrypt to exactly what they were.
 EXT4DUMP_LUKS_KEYFILE=$K "$DUMP" "$WORK/rw.img" symlink /big.bin /link  >/dev/null 2>&1
 EXT4DUMP_LUKS_KEYFILE=$K "$DUMP" "$WORK/rw.img" setxattr /from-macos/note.txt user.origin macos >/dev/null 2>&1
 
-in_linux '
+oracle '
 set -e
-cryptsetup luksOpen --key-file /w/pass.txt /w/rw.img rw || { echo "OPEN-FAILED"; exit 0; }
+cryptsetup luksOpen --key-file pass.txt rw.img rw || { echo "OPEN-FAILED"; exit 0; }
 e2fsck -fn /dev/mapper/rw >/dev/null 2>&1 && echo "FSCK-CLEAN" || echo "FSCK-DIRTY"
+umount /mnt/rw 2>/dev/null || true
 mkdir -p /mnt/rw && mount /dev/mapper/rw /mnt/rw || { echo "MOUNT-FAILED"; exit 0; }
 echo "NOTE:$(cat /mnt/rw/from-macos/note.txt)"
 echo "BIGSHA:$(sha256sum /mnt/rw/big.bin | cut -d" " -f1)"
@@ -279,11 +285,11 @@ expect_eq "and the payload reads" "luks2 payload" \
 # reading past the first sector catches it.
 EXT4DUMP_LUKS_KEYFILE=$K "$DUMP" "$WORK/luks2.img" cat /wide.bin > "$WORK/wide.out" 2>/dev/null
 expect_eq "a 4096-sector volume is right past sector 0, not just at it" \
-  "$(cat "$WORK/wide.sha")" "$(shasum -a 256 "$WORK/wide.out" | cut -d' ' -f1)"
+  "$(cat "$WORK/wide.sha")" "$(sha256 "$WORK/wide.out")"
 
 EXT4DUMP_LUKS_KEYFILE=$K "$DUMP" "$WORK/luks2_512.img" cat /wide.bin > "$WORK/wide512.out" 2>/dev/null
 expect_eq "and so is a 512-sector volume, where the tweak advances differently" \
-  "$(cat "$WORK/wide512.sha")" "$(shasum -a 256 "$WORK/wide512.out" | cut -d' ' -f1)"
+  "$(cat "$WORK/wide512.sha")" "$(sha256 "$WORK/wide512.out")"
 
 expect_eq "a LUKS2 header using pbkdf2 is honoured, not assumed to be argon2" "LUKS2PBKDF" \
   "$(EXT4DUMP_LUKS_KEYFILE=$K "$DUMP" "$WORK/luks2_pbkdf2.img" probe 2>/dev/null | sed -n 's/^label: *//p')"
@@ -299,9 +305,10 @@ fi
 cp "$WORK/luks2.img" "$WORK/rw2.img"
 EXT4DUMP_LUKS_KEYFILE=$K "$DUMP" "$WORK/rw2.img" create /from-macos.txt >/dev/null 2>&1
 EXT4DUMP_LUKS_KEYFILE=$K "$DUMP" "$WORK/rw2.img" write /from-macos.txt "luks2 write from macOS" >/dev/null 2>&1
-in_linux '
-cryptsetup luksOpen --key-file /w/pass.txt /w/rw2.img rw2 || { echo "OPEN-FAILED"; exit 0; }
+oracle '
+cryptsetup luksOpen --key-file pass.txt rw2.img rw2 || { echo "OPEN-FAILED"; exit 0; }
 e2fsck -fn /dev/mapper/rw2 >/dev/null 2>&1 && echo "FSCK-CLEAN" || echo "FSCK-DIRTY"
+umount /mnt/rw2 2>/dev/null || true
 mkdir -p /mnt/rw2 && mount /dev/mapper/rw2 /mnt/rw2 && echo "NOTE:$(cat /mnt/rw2/from-macos.txt)"
 umount /mnt/rw2; cryptsetup luksClose rw2
 ' > "$WORK/linux2.out" 2>/dev/null

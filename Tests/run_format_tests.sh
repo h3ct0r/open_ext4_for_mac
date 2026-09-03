@@ -39,7 +39,7 @@ expect_eq() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected [$2] got
 command -v mke2fs >/dev/null || { echo "mke2fs not found; brew install e2fsprogs"; exit 1; }
 
 blank() {  # blank <path> <megabytes>
-  rm -f "$1"; dd if=/dev/zero of="$1" bs=1m count="$2" 2>/dev/null
+  rm -f "$1"; dd if=/dev/zero of="$1" bs=1M count="$2" 2>/dev/null
 }
 
 note "########## FORMAT ##########"

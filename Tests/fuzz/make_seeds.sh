@@ -51,7 +51,7 @@ want() {  # want <name> -> 0 if it must be built
 }
 
 blank() {  # blank <path> <MiB>
-  rm -f "$1"; dd if=/dev/zero of="$1" bs=1m count="$2" 2>/dev/null
+  rm -f "$1"; dd if=/dev/zero of="$1" bs=1M count="$2" 2>/dev/null
 }
 
 # ---------------------------------------------------------------- content --

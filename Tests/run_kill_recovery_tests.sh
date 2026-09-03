@@ -198,7 +198,7 @@ prepare() {   # leaves the volume formatted, and DEV set
     fi
   else
     rm -f "$WORK/k.img"
-    dd if=/dev/zero of="$WORK/k.img" bs=1m count="$IMAGE_MB" 2>/dev/null
+    dd if=/dev/zero of="$WORK/k.img" bs=1M count="$IMAGE_MB" 2>/dev/null
     "$ROOT/build/bin/ext4dump" "$WORK/k.img" format 4 >/dev/null 2>&1
     DEV=$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount "$WORK/k.img" \
           2>/dev/null | head -1 | awk '{print $1}')

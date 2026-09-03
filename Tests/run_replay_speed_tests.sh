@@ -29,13 +29,13 @@
 # Runs unattended. Writes a report to build/replay-speed-report.txt.
 set -uo pipefail
 
-export PATH="/opt/homebrew/opt/e2fsprogs/sbin:/opt/homebrew/opt/e2fsprogs/bin:$PATH"
-
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$ROOT/Tests/lib.sh"
+
 DUMP="$ROOT/build/bin/ext4dump"
 WORK="$ROOT/build/replay-speed"
 REPORT="$ROOT/build/replay-speed-report.txt"
-DOCKER_IMAGE="ext4luks:cryptsetup-attr"
+ORACLE_IMAGE="$DOCKER_LUKS_IMAGE"
 
 # The media model: a fixed per-command cost plus a transfer rate, the two
 # numbers that define a USB stick. 500 us per command is a mid-range stick on
@@ -45,8 +45,8 @@ BW_MBS=40
 # DiskArbitration's patience, roughly. The whole point of the suite.
 DA_BUDGET_S=20
 
-PASS=0; FAIL=0
 note() { echo "$*" | tee -a "$REPORT"; }
+# Its own ok/bad: lib.sh's print, these tee into the report as well.
 ok()   { PASS=$((PASS+1)); note "  ok    $1"; }
 # `bad` must end in a success status; see the note in the other suites.
 bad()  { FAIL=$((FAIL+1)); note "  FAIL  $1"; [ $# -gt 1 ] && note "        $2"; return 0; }
@@ -55,11 +55,12 @@ bad()  { FAIL=$((FAIL+1)); note "  FAIL  $1"; [ $# -gt 1 ] && note "        $2";
 command -v e2fsck >/dev/null || { echo "e2fsck not found; brew install e2fsprogs"; exit 1; }
 command -v debugfs >/dev/null || { echo "debugfs not found; brew install e2fsprogs"; exit 1; }
 
-if ! docker info >/dev/null 2>&1; then
-  echo "docker is not running; cryptsetup is the only way to make a LUKS fixture"
+if ! have_linux; then
+  echo "$(no_linux_reason); cryptsetup is the only way to make a LUKS fixture"
   echo "SKIPPED"
   exit 77
 fi
+oracle_needs cryptsetup mkfs.ext4 || { echo "SKIPPED"; exit 77; }
 
 rm -rf "$WORK"; mkdir -p "$WORK"
 : > "$REPORT"
@@ -73,21 +74,19 @@ PASSPHRASE="correct horse battery staple"
 printf '%s' "$PASSPHRASE" > "$WORK/pass.txt"
 export EXT4DUMP_LUKS_KEYFILE="$WORK/pass.txt"
 
-in_linux() { docker run --rm --privileged -v "$WORK:/w" "$DOCKER_IMAGE" bash -c "$1"; }
+# Every fragment runs against the one work directory; name it once.
+oracle() { in_linux "$WORK" "$1"; }
 
 note "########## journal replay speed ##########"
 note ""
 note "media model: ${LATENCY_US}us per command + ${BW_MBS} MB/s; budget ${DA_BUDGET_S}s"
 note ""
 
-if ! docker image inspect "$DOCKER_IMAGE" >/dev/null 2>&1; then
-  echo "building $DOCKER_IMAGE (one-off, needs network)"
-  docker build -q -t "$DOCKER_IMAGE" - >/dev/null <<'DOCKERFILE'
+ensure_oracle_image "$ORACLE_IMAGE" <<'DOCKERFILE'
 FROM debian:stable-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cryptsetup-bin e2fsprogs attr && rm -rf /var/lib/apt/lists/*
 DOCKERFILE
-fi
 
 # =================================================================== fixture ==
 # LUKS2 with 4096-byte sectors, the modern default. pbkdf2 with the iteration
@@ -95,13 +94,13 @@ fi
 # key derivation. The journal is 128 MiB because that is what mkfs.ext4 makes
 # for a stick-sized volume when a GNOME user formats one.
 note "building the container (cryptsetup, one-off)"
-in_linux '
+oracle '
 set -e
-dd if=/dev/zero of=/w/bench.img bs=1M count=384 status=none
-cryptsetup luksFormat --batch-mode --key-file /w/pass.txt \
+dd if=/dev/zero of=bench.img bs=1M count=384 status=none
+cryptsetup luksFormat --batch-mode --key-file pass.txt \
   --type luks2 --sector-size 4096 --pbkdf pbkdf2 --pbkdf-force-iterations 1000 \
-  /w/bench.img
-cryptsetup luksOpen --key-file /w/pass.txt /w/bench.img rsbench
+  bench.img
+cryptsetup luksOpen --key-file pass.txt bench.img rsbench
 mkfs.ext4 -q -b 4096 -J size=128 -L REPLAYBENCH /dev/mapper/rsbench
 cryptsetup luksClose rsbench
 echo BUILT
@@ -128,13 +127,33 @@ awk 'BEGIN{
 
 # Kill the driver mid-load, then confirm the journal really is deep: a kill
 # that lands too early leaves a shallow log and a benchmark that measures
-# nothing. The load is sized to run well past every kill point, and the kill
-# point grows if a machine is fast enough to outrun it.
+# nothing.
+#
+# The kill point is chosen to hit a target DEPTH, not to be a fixed number of
+# seconds. It used to be twenty seconds and whatever depth that produced, which
+# quietly made the fixture a measurement of the machine instead of the medium:
+# this Mac queues ~1750 transactions in twenty seconds and a Linux runner
+# queues ~4700, because fdatasync returns without asking the drive to commit
+# and F_FULLFSYNC does not. Same driver, same code path, and the budget cell
+# below then read "recovery fits" on one machine and "recovery blows it" on the
+# other -- correctly in both cases, for a journal 2.7x deeper. Depth is the
+# input this cell is about, so pin the input.
+#
+# The window is wide on purpose. What is being asked is whether a plausible
+# dirty journal on a stick replays inside DiskArbitration's patience, and
+# "plausible" is a range, not a number. (The DEEPEST journal a 128 MiB log can
+# hold is a different and harder question -- it belongs with the operating
+# envelope, not here.)
+TARGET_TRANS=1750
+TRANS_MIN=1200
+TRANS_MAX=2600
+
 dirty_ok=""
-for kill_after in 20 40 80; do
+kill_after=20
+for attempt in 1 2 3 4; do
   cp "$WORK/bench.img" "$WORK/dirty.img"
   # The batch size is pinned, not inherited. This cell needs a log deep in
-  # TRANSACTIONS -- it asserts at least 500 of them -- and how many a given
+  # TRANSACTIONS -- the window above is counted in them -- and how many a given
   # load produces is exactly what the batch size decides: raising the
   # shipping default divided them by four, so the fixture spent its whole
   # retry budget failing to build and reported it as a driver failure. What
@@ -149,14 +168,19 @@ for kill_after in 20 40 80; do
     wait "$load_pid" 2>/dev/null
   else
     wait "$load_pid" 2>/dev/null
-    note "  load finished before the ${kill_after}s kill; retrying with a later one"
+    # It ran to the end, so its last commit left the journal clean. Kill
+    # earlier, not later -- the sequence used to grow here, which meant the one
+    # case that needed a shorter run got three progressively longer ones.
+    kill_after=$(( kill_after / 2 )); [ "$kill_after" -lt 2 ] && kill_after=2
+    note "  load finished before the kill; retrying with a ${kill_after}s kill"
     continue
   fi
 
   "$DUMP" "$WORK/dirty.img" decrypt "$WORK/dirty-plain.img" >/dev/null 2>&1
   if ! dumpe2fs -h "$WORK/dirty-plain.img" 2>/dev/null \
        | grep -q 'needs_recovery'; then
-    note "  kill left a clean journal at ${kill_after}s; retrying"
+    kill_after=$(( kill_after / 2 )); [ "$kill_after" -lt 2 ] && kill_after=2
+    note "  kill left a clean journal; retrying with a ${kill_after}s kill"
     continue
   fi
   trans=$(debugfs -R 'logdump -S' "$WORK/dirty-plain.img" 2>/dev/null \
@@ -164,8 +188,21 @@ for kill_after in 20 40 80; do
   revokes=$(debugfs -R 'logdump -S' "$WORK/dirty-plain.img" 2>/dev/null \
             | grep -ci 'revoke')
   note "  killed at ${kill_after}s: $trans transactions waiting for replay, $revokes revoke blocks"
-  if [ "${trans:-0}" -ge 500 ] && [ "${revokes:-0}" -ge 1 ]; then dirty_ok=yes; break; fi
-  note "  journal too shallow ($trans transactions, $revokes revoke blocks); retrying with a later kill"
+  if [ "${trans:-0}" -ge "$TRANS_MIN" ] && [ "${trans:-0}" -le "$TRANS_MAX" ] \
+     && [ "${revokes:-0}" -ge 1 ]; then
+    dirty_ok=yes; break
+  fi
+  # Aim the next attempt: transactions accumulate roughly linearly in the time
+  # the load is allowed to run, so scale the kill point by how far off this one
+  # landed. Clamped, because a zero or a runaway would cost the whole suite.
+  if [ "${trans:-0}" -gt 0 ]; then
+    kill_after=$(( kill_after * TARGET_TRANS / trans ))
+    [ "$kill_after" -lt 2 ]   && kill_after=2
+    [ "$kill_after" -gt 120 ] && kill_after=120
+  else
+    kill_after=$(( kill_after * 2 ))
+  fi
+  note "  depth outside [$TRANS_MIN, $TRANS_MAX]; retrying with a ${kill_after}s kill"
 done
 [ -n "$dirty_ok" ] || { bad "could not construct a deep dirty journal"; note ""; note "RESULT: FAIL"; exit 1; }
 
@@ -331,7 +368,7 @@ note "sustained work on the default journal"
 # e2fsck cannot read.
 ring_key="$EXT4DUMP_LUKS_KEYFILE"; unset EXT4DUMP_LUKS_KEYFILE
 RING_IMG="$WORK/ring.img"
-rm -f "$RING_IMG"; dd if=/dev/zero of="$RING_IMG" bs=1m count=64 2>/dev/null
+rm -f "$RING_IMG"; dd if=/dev/zero of="$RING_IMG" bs=1M count=64 2>/dev/null
 "$DUMP" "$RING_IMG" format 4 >/dev/null 2>&1
 python3 - "$WORK/ring.ops" <<'PY'
 import sys

@@ -7,8 +7,10 @@
 # when they are next touched for another reason -- rewriting the safety net
 # for tidiness is how safety nets get holes.
 #
-# Provides: PASS/FAIL counters, ok/bad, finish, the e2fsprogs PATH, and the
-# Docker image names.
+# Provides: PASS/FAIL counters, ok/bad, finish, the e2fsprogs PATH, the
+# portable spellings of the four idioms that differ between BSD and GNU
+# userland, and the Linux oracle -- in_linux/have_linux and the two helpers
+# that make sure it has an image and the tools it needs.
 
 export PATH="/opt/homebrew/opt/e2fsprogs/sbin:/opt/homebrew/opt/e2fsprogs/bin:$PATH"
 
@@ -67,6 +69,21 @@ md5of() {
   fi
 }
 
+# Copy a filesystem image.
+#
+# The fixtures are 64-256 MB each and a crash sweep makes two hundred copies of
+# one before it checks any of them, so a plain cp is 50 GB on the disk and
+# minutes on the clock. Both systems have a way out and they are different
+# ways: APFS clones the file, copy-on-write, instant and free until something
+# writes to it; GNU cp punches holes wherever the source reads as zeros, which
+# is nearly all of a freshly made ext4. Neither changes a byte of what a reader
+# sees, and a runner's disk is not big enough for the honest version.
+imgcopy() {  # imgcopy <src> <dst>
+  cp -c "$1" "$2" 2>/dev/null \
+    || cp --sparse=always "$1" "$2" 2>/dev/null \
+    || cp "$1" "$2"
+}
+
 # In-place sed. BSD requires an argument to -i and GNU refuses one, so there
 # is no spelling that works on both and the difference has to be branched.
 sedi() {
@@ -86,8 +103,14 @@ sedi() {
 # reach the kernel you are already running on would be absurd. EXT4_ORACLE=local
 # picks the second.
 #
-# Both forms take a shell fragment and run it with /w as the working directory
-# holding the images, so a suite reads the same either way.
+# The fragment runs with the work directory as its working directory in both
+# forms, so it addresses its images by relative name -- `mount -o loop a.img`,
+# never `/w/a.img`. That is what lets one fragment mean the same thing in a
+# container and on the runner itself.
+#
+# A suite that needs more of Linux than debian:stable-slim carries -- cryptsetup,
+# attr -- sets ORACLE_IMAGE before calling. In local form the image name is
+# irrelevant: the packages are the runner's.
 in_linux() {  # in_linux <work-dir> <script>
   local work="$1"; shift
   if [ "${EXT4_ORACLE:-docker}" = "local" ]; then
@@ -95,11 +118,42 @@ in_linux() {  # in_linux <work-dir> <script>
       ( cd "$work" && bash -c "$*" )
     else
       sudo bash -c "cd '$work' && $*"
+      local rc=$?
+      # Whatever the fragment created belongs to root, and the suite that
+      # called it does not run as root -- it goes on to write those images
+      # with ext4dump. Hand them back. (Not needed in the container form: the
+      # bind mount keeps the host's ownership.)
+      sudo chown -R "$(id -u):$(id -g)" "$work" 2>/dev/null || true
+      return $rc
     fi
   else
     docker run --rm --privileged -v "$work:/w" -w /w \
-      "$DOCKER_LINUX_IMAGE" bash -c "$*"
+      "${ORACLE_IMAGE:-$DOCKER_LINUX_IMAGE}" bash -c "$*"
   fi
+}
+
+# Build the oracle image if the container form needs one that is not there yet.
+# A no-op in local form, where the packages came from apt and there is no image.
+# Reads the Dockerfile from stdin; bump the tag when the package list changes,
+# or a stale image from an earlier run is reused and the new checks skip.
+ensure_oracle_image() {  # ensure_oracle_image <tag>  <<'DOCKERFILE'
+  [ "${EXT4_ORACLE:-docker}" = "local" ] && return 0
+  docker image inspect "$1" >/dev/null 2>&1 && return 0
+  echo "building $1 (one-off, needs network)"
+  docker build -q -t "$1" - >/dev/null
+}
+
+# The oracle's tools have to actually be present. The container form carries
+# them in the image; the local form got them from the runner's apt, and a
+# missing one has to say so here rather than fail inside a fragment, where a
+# `command not found` on stderr looks like an empty answer from the kernel.
+oracle_needs() {  # oracle_needs <cmd>...
+  [ "${EXT4_ORACLE:-docker}" = "local" ] || return 0
+  local c missing=""
+  for c in "$@"; do command -v "$c" >/dev/null 2>&1 || missing="$missing $c"; done
+  [ -z "$missing" ] && return 0
+  echo "EXT4_ORACLE=local, but the oracle needs these and they are not here:$missing"
+  return 1
 }
 
 # Is there a Linux oracle available at all?
@@ -108,6 +162,16 @@ have_linux() {
     [ "$(uname -s)" = "Linux" ]
   else
     docker info >/dev/null 2>&1
+  fi
+}
+
+# What to print when there is not one. Two different sentences, because the
+# two situations have two different fixes.
+no_linux_reason() {
+  if [ "${EXT4_ORACLE:-docker}" = "local" ]; then
+    echo "EXT4_ORACLE=local but this is not Linux ($(uname -s))"
+  else
+    echo "docker is not running; there is no Linux kernel to ask"
   fi
 }
 

@@ -37,7 +37,7 @@ echo ""
 IMG="$WORK/p.img"
 new_vol() {
   rm -f "$IMG"
-  dd if=/dev/zero of="$IMG" bs=1m count=64 2>/dev/null
+  dd if=/dev/zero of="$IMG" bs=1M count=64 2>/dev/null
   "$DUMP" "$IMG" format 4 4096 PREALLOC >/dev/null 2>&1
 }
 
@@ -201,7 +201,7 @@ python3 -c "open('$FRESH','wb').write(b'N'*(8*1024*1024))"
 leaks=0; dirty=0; partials=0
 for CUT in 20 40 60 80 100; do
   img="$WORK/tear_$CUT.img"
-  rm -f "$img"; dd if=/dev/zero of="$img" bs=1m count=120 2>/dev/null
+  rm -f "$img"; dd if=/dev/zero of="$img" bs=1M count=120 2>/dev/null
   "$DUMP" "$img" format 4 >/dev/null 2>&1
   "$DUMP" "$img" create /secret >/dev/null 2>&1
   "$DUMP" "$img" put /secret "$SECRET" >/dev/null 2>&1

@@ -7,7 +7,8 @@
 # Anything that needs a decision belongs in the script, where it can be read,
 # tested and reverted like code.
 #
-# What CI cannot run, and why, is written down in docs/ENVELOPE.md: the
+# What CI cannot run, and why (docs/ENVELOPE.md will carry this in prose; it is
+# Part C and not written yet): the
 # mounted stages need a signed FSKit extension that a human approved in System
 # Settings, and the pull suite needs hands on a USB stick. Those stay local
 # under `make validate`. CI's job is to make everything else un-forgettable.
@@ -113,6 +114,80 @@ jobs:
           path: |
             build/*-report.txt
             .fuzz/findings/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # The second opinion. Everything above is this project judging itself: our
+  # reader against our writer, our checksums against our checksums. This job is
+  # the one that asks somebody else -- the Linux kernel's own ext4, which is
+  # the implementation every one of these volumes will eventually meet.
+  #
+  # It runs the five suites that need a kernel, and it runs them natively:
+  # EXT4_ORACLE=local, so in_linux() calls sudo rather than docker. On a
+  # developer's Mac the same five reach a kernel through a privileged
+  # container; here the runner IS the kernel, which is both faster and one
+  # fewer layer between the claim and the thing judging it.
+  #
+  # This is also the only place the tools are built with gcc and without
+  # -target, so a size-of-long or byte-order mistake in the shim has somewhere
+  # to show up.
+  linux-oracle:
+    name: the kernel's opinion (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # cryptsetup for the LUKS fixtures, attr for the xattr and chattr checks
+      # in the differential suite, libssl-dev because Core/crypto reaches
+      # OpenSSL on Linux where it reaches CommonCrypto on macOS. e2fsprogs and
+      # python3 are already on the image; ask for them anyway, so that the day
+      # they are not is a clear apt failure and not a suite skipping.
+      - name: install the oracle's tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            e2fsprogs cryptsetup-bin attr libssl-dev python3
+          echo "--- versions ---"
+          gcc --version | head -1
+          mke2fs -V 2>&1 | head -1
+          cryptsetup --version
+
+      # Loop devices and device-mapper are what "the kernel is the oracle"
+      # actually means here. If a future runner image stops providing them,
+      # this fails in three lines instead of inside a mount in a sweep.
+      - name: the runner can loop-mount and map devices
+        run: |
+          sudo modprobe loop || true
+          sudo modprobe dm_crypt || true
+          truncate -s 16M /tmp/probe.img
+          mkfs.ext4 -q /tmp/probe.img
+          mkdir -p /tmp/probe.mnt
+          sudo mount -o loop /tmp/probe.img /tmp/probe.mnt
+          sudo umount /tmp/probe.mnt
+          echo "loop mounts work"
+
+      - name: cache fixtures
+        uses: actions/cache@v4
+        with:
+          path: Tests/fixtures
+          key: fixtures-${{ runner.os }}-${{ hashFiles('Tests/make_fixtures.sh') }}
+
+      # A skipped stage here means the runner is missing something the step
+      # above was supposed to install, so REQUIRE_ALL turns one red.
+      - name: oracle set
+        run: REQUIRE_ALL=1 bash scripts/ci_linux.sh
+
+      - name: artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-oracle-logs
+          path: |
+            build/ci-linux/**
+            build/*-report.txt
           if-no-files-found: ignore
           retention-days: 14
 

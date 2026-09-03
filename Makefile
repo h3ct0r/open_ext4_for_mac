@@ -5,6 +5,9 @@
 # project, only the Command Line Tools. Xcode is needed only if you prefer its
 # signing workflow; `make sign` uses codesign directly.
 
+# macOS is the product; Linux is the oracle. See the TARGET_FLAG block below.
+HOST_OS       := $(shell uname -s)
+
 DEPLOY_TARGET ?= 15.4
 ARCHS         ?= arm64
 BUILD         ?= build
@@ -98,10 +101,35 @@ BUILD_ID := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(she
 # Changing it does not invalidate objects, so clear build/obj when switching.
 CFLAGS := $(OPT) -fno-common -Wall $(INCLUDES) $(LWEXT4_DEFS) -DEXT4B_BUILD_ID=\"$(BUILD_ID)\" $(EXTRA_CFLAGS)
 # lwext4 is third-party embedded C; its warnings are not actionable for us.
-LWEXT4_CFLAGS := $(CFLAGS) -Wno-everything
+# -Wno-everything is clang's spelling and gcc does not have it: gcc accepts the
+# option and then complains about it inside every later diagnostic, which is
+# noisier than not passing it at all. -w means the same thing to both.
+ifeq ($(HOST_OS),Linux)
+  NO_WARN := -w
+else
+  NO_WARN := -Wno-everything
+endif
+LWEXT4_CFLAGS := $(CFLAGS) $(NO_WARN)
 SHIM_CFLAGS   := $(CFLAGS) -Wextra -Wno-unused-parameter
 
-TARGET_FLAG := -target arm64-apple-macos$(DEPLOY_TARGET)
+# Which system this build runs on. macOS is the product. Linux is the oracle:
+# the CI job that takes what this driver wrote, mounts it with the real ext4
+# and reports whether the kernel agrees. Only tools/ is built there -- there is
+# no FSKit to link against and no extension to sign, and `make app` on Linux
+# says that rather than failing somewhere in swiftc.
+#
+# Two things differ, and they are the only two. There is no -target: the
+# oracle runs on whatever the runner is, x86_64 today and arm64 whenever
+# GitHub makes that the default, and naming an architecture here would be
+# choosing one for no reason. And the core needs -lcrypto, because
+# Core/crypto/crypto_portable.h reaches OpenSSL where macOS has CommonCrypto.
+ifeq ($(HOST_OS),Linux)
+  TARGET_FLAG :=
+  CORE_LDLIBS := -lcrypto
+else
+  TARGET_FLAG := -target arm64-apple-macos$(DEPLOY_TARGET)
+  CORE_LDLIBS :=
+endif
 
 ifneq ($(filter $(CONFIG),fuzz cov),)
   # Homebrew clang has no default macOS SDK: without this it finds no
@@ -155,7 +183,7 @@ ARGON2_CFLAGS := $(CFLAGS) -Wno-everything -I$(ARGON2_DIR)
 CORE_LIB      := $(BUILD)/lib/$(CONFIG)/libext4core.a
 CORE_TEST_LIB := $(BUILD)/lib/$(CONFIG)/libext4core-test.a
 
-.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-fuzz test-fuzz-regressions test-reorder test-crypto test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline print-fuzz-flags fuzz-build fuzz fuzz-rw fuzz-repro fuzz-minimize fuzz-merge fuzz-check fuzz-cov fuzz-cov-gate
+.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-fuzz test-fuzz-regressions test-reorder test-crypto test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline ci-linux print-fuzz-flags fuzz-build fuzz fuzz-rw fuzz-repro fuzz-minimize fuzz-merge fuzz-check fuzz-cov fuzz-cov-gate
 
 all: app
 
@@ -360,7 +388,7 @@ $(BUILD)/bin/datafile: tools/datafile.c $(BUILD)/.tools-config
 
 $(BUILD)/bin/cryptotest: tools/cryptotest.c $(CORE_TEST_LIB) $(BUILD)/.tools-config
 	@mkdir -p $(dir $@)
-	$(CC) $(TARGET_FLAG) $(CFLAGS) $< $(CORE_TEST_LIB) -o $@
+	$(CC) $(TARGET_FLAG) $(CFLAGS) $< $(CORE_TEST_LIB) $(CORE_LDLIBS) -o $@
 
 test-crypto: $(BUILD)/bin/cryptotest
 	@$(BUILD)/bin/cryptotest
@@ -370,7 +398,7 @@ test-crypto: $(BUILD)/bin/cryptotest
 # actually defines them.
 $(BUILD)/bin/ext4dump: tools/ext4dump.c $(CORE_TEST_LIB) $(BUILD)/.build-id $(BUILD)/.tools-config
 	@mkdir -p $(dir $@)
-	$(CC) $(TARGET_FLAG) $(CFLAGS) -DEXT4B_TEST_HOOKS=1 $< $(CORE_TEST_LIB) -o $@
+	$(CC) $(TARGET_FLAG) $(CFLAGS) -DEXT4B_TEST_HOOKS=1 $< $(CORE_TEST_LIB) $(CORE_LDLIBS) -o $@
 
 test: tools
 	@bash Tests/run_tests.sh
@@ -538,6 +566,12 @@ validate-asan:
 ci-offline:
 	@bash scripts/ci_offline.sh
 
+# The other half, and it only runs where the oracle is. On macOS the same five
+# suites reach a Linux kernel through Docker one at a time; this is the set as
+# CI runs it, with the kernel underfoot instead of in a container.
+ci-linux:
+	@bash scripts/ci_linux.sh
+
 # Same suites under AddressSanitizer + UBSan. Slower, but this is how the
 # NULL dereference in lwext4's xattr removal was found.
 test-asan:
@@ -645,7 +679,7 @@ $(FUZZ_BIN): $(FUZZ_SRCS) $(CORE_TEST_LIB)
 	$(CC) $(TARGET_FLAG) $(CFLAGS) -DEXT4B_TEST_HOOKS=1 \
 	    -DEXT4_FUZZ_WEIGHTS_PATH='"$(CURDIR)/tools/fuzz/mutweights.json"' \
 	    -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined \
-	    $(FUZZ_SRCS) $(CORE_TEST_LIB) -o $@
+	    $(FUZZ_SRCS) $(CORE_TEST_LIB) $(CORE_LDLIBS) -o $@
 	@echo "built $@"
 
 # The seed corpus is generated, never committed: it is mke2fs output, and
@@ -711,7 +745,7 @@ $(COV_BIN): $(FUZZ_SRCS) $(CORE_TEST_LIB)
 	$(CC) $(TARGET_FLAG) $(CFLAGS) -DEXT4B_TEST_HOOKS=1 \
 	    -DEXT4_FUZZ_WEIGHTS_PATH='"$(CURDIR)/tools/fuzz/mutweights.json"' \
 	    -fsanitize=fuzzer -fprofile-instr-generate -fcoverage-mapping \
-	    $(FUZZ_SRCS) $(CORE_TEST_LIB) -o $@
+	    $(FUZZ_SRCS) $(CORE_TEST_LIB) $(CORE_LDLIBS) -o $@
 	@echo "built $@"
 
 fuzz-cov:

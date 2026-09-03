@@ -30,9 +30,9 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
 fi
 
 
-export PATH="/opt/homebrew/opt/e2fsprogs/sbin:/opt/homebrew/opt/e2fsprogs/bin:$PATH"
-
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$ROOT/Tests/lib.sh"
+
 DUMP="$ROOT/build/bin/ext4dump"
 FIX="$ROOT/Tests/fixtures"
 WORK="$ROOT/build/diff"
@@ -40,23 +40,20 @@ REPORT="$ROOT/build/diff-report.txt"
 
 # debian:stable-slim ships without setfattr/getfattr or chattr/lsattr, so those
 # checks would quietly pass over a missing binary. Build a small image once
-# that has them. Bump IMAGE_TAG when the package list changes, or an existing
+# that has them. Bump the tag when the package list changes, or an existing
 # image from an older run will be reused and the new checks will skip.
-DOCKER_IMAGE="ext4diff:attr-chattr"
-if ! docker image inspect "$DOCKER_IMAGE" >/dev/null 2>&1; then
-  echo "building $DOCKER_IMAGE (one-off, needs network)"
-  docker build -q -t "$DOCKER_IMAGE" - >/dev/null <<'DOCKERFILE'
+ORACLE_IMAGE="ext4diff:attr-chattr"
+ensure_oracle_image "$ORACLE_IMAGE" <<'DOCKERFILE'
 FROM debian:stable-slim
 RUN apt-get update && apt-get install -y --no-install-recommends attr e2fsprogs \
     && rm -rf /var/lib/apt/lists/*
 DOCKERFILE
-fi
 
 rm -rf "$WORK"; mkdir -p "$WORK"
 : > "$REPORT"
 
-PASS=0; FAIL=0
 note() { echo "$*" | tee -a "$REPORT"; }
+# Its own ok/bad: lib.sh's print, these tee into the report as well.
 ok()   { PASS=$((PASS+1)); note "  ok    $1"; }
 # `bad` must end in a success status. Without it the trailing test is the
 # function's exit code, and it is false whenever there is no detail argument --
@@ -67,11 +64,13 @@ expect_eq() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected [$2] got
 
 [ -x "$DUMP" ] || { echo "build first: make tools"; exit 1; }
 [ -f "$FIX/ext4_4k.img" ] || bash "$ROOT/Tests/make_fixtures.sh"
-docker info >/dev/null 2>&1 || { echo "docker is not running; cannot reach a Linux kernel"; exit 1; }
+have_linux || { echo "$(no_linux_reason); cannot reach a Linux kernel"; exit 1; }
+oracle_needs mount umount setfattr getfattr chattr lsattr || exit 1
 
-in_linux() {  # in_linux <script>
-  docker run --rm --privileged -v "$WORK:/work" "$DOCKER_IMAGE" bash -c "$1" 2>&1
-}
+# Every fragment in this suite runs against the same work directory, so name it
+# once. 2>&1 because the interesting failures -- a mount the kernel refused, a
+# missing setfattr -- arrive on stderr and the caller reads one stream.
+oracle() { in_linux "$WORK" "$1" 2>&1; }
 
 # =========================================================== mac -> linux ==
 note "mac writes, Linux reads"
@@ -95,10 +94,18 @@ python3 -c "import sys; sys.stdout.write('L'*90000)" > "$WORK/big.txt"
 "$DUMP" "$IMG" create /frommac/big.bin >/dev/null 2>&1
 "$DUMP" "$IMG" write /frommac/big.bin "$(cat "$WORK/big.txt")" >/dev/null 2>&1
 
-in_linux '
+oracle '
   dmesg -C 2>/dev/null || true
+  umount /mnt/t 2>/dev/null || true
   mkdir -p /mnt/t
-  mount -o loop /work/m2l.img /mnt/t || { echo "MOUNT-FAILED"; exit 1; }
+  # An explicit loop device, not `mount -o loop`, so the kernel-log check below
+  # knows which device is ours. The ring buffer belongs to the whole machine:
+  # on a container host or a busy runner it carries mounts we did not make, and
+  # reading all of it turned an EXT4-fs warning about somebody elses volume
+  # into a complaint about a filesystem we wrote. (No apostrophes in here: the
+  # whole fragment is one single-quoted argument.)
+  dev=$(losetup --find --show m2l.img) || { echo "LOSETUP-FAILED"; exit 1; }
+  mount "$dev" /mnt/t || { losetup -d "$dev"; echo "MOUNT-FAILED"; exit 1; }
   {
     echo "content=$(cat /mnt/t/frommac/plain.txt)"
     echo "mode=$(stat -c %a /mnt/t/frommac/plain.txt)"
@@ -110,9 +117,14 @@ in_linux '
     echo "bigsize=$(stat -c %s /mnt/t/frommac/big.bin)"
     echo "bigsum=$(sha256sum /mnt/t/frommac/big.bin | cut -d" " -f1)"
     echo "dirents=$(ls -1 /mnt/t/frommac | wc -l)"
-  } > /work/m2l.result
+  } > m2l.result
   umount /mnt/t
-  dmesg | grep -iE "EXT4|JBD2" > /work/m2l.dmesg || true
+  # Lines that name a block device count only if they name ours. Lines that
+  # name none -- JBD2 mostly -- are ours by elimination: the ring was cleared
+  # immediately before the mount above.
+  dmesg | grep -iE "EXT4|JBD2" \
+        | grep -E "\($(basename "$dev")\):|^\[[^]]*\] JBD2:" > m2l.dmesg || true
+  losetup -d "$dev" 2>/dev/null || true
 ' >/dev/null
 
 if [ ! -f "$WORK/m2l.result" ]; then
@@ -133,7 +145,7 @@ else
   expect_eq "Linux sees the multi-block size"   "90000"              "${R[bigsize]:-}"
   expect_eq "Linux counts every directory entry" "5"                 "${R[dirents]:-}"
 
-  want=$(shasum -a 256 "$WORK/big.txt" | cut -d' ' -f1)
+  want=$(sha256 "$WORK/big.txt")
   expect_eq "multi-block content is byte-identical in Linux" "$want" "${R[bigsum]:-}"
 fi
 
@@ -152,9 +164,10 @@ note ""
 IMG2="$WORK/l2m.img"
 cp "$FIX/ext4_4k.img" "$IMG2"
 
-in_linux '
+oracle '
+  umount /mnt/t 2>/dev/null || true
   mkdir -p /mnt/t
-  mount -o loop /work/l2m.img /mnt/t || { echo "MOUNT-FAILED"; exit 1; }
+  mount -o loop l2m.img /mnt/t || { echo "MOUNT-FAILED"; exit 1; }
   mkdir -p /mnt/t/fromlinux/deep
   echo -n "content from Linux" > /mnt/t/fromlinux/plain.txt
   chmod 604 /mnt/t/fromlinux/plain.txt
@@ -165,7 +178,7 @@ in_linux '
   # A directory big enough to be HTree-indexed by the kernel.
   mkdir -p /mnt/t/fromlinux/many
   for i in $(seq 1 300); do echo x > /mnt/t/fromlinux/many/f_$i.txt; done
-  sha256sum /mnt/t/fromlinux/big.bin | cut -d" " -f1 > /work/l2m.bigsum
+  sha256sum /mnt/t/fromlinux/big.bin | cut -d" " -f1 > l2m.bigsum
   sync
   umount /mnt/t
 ' >/dev/null
@@ -185,7 +198,7 @@ expect_eq "we resolve Linux's symlink"   "/fromlinux/plain.txt" \
 
 "$DUMP" "$IMG2" cat /fromlinux/big.bin > "$WORK/l2m_big.bin" 2>/dev/null
 expect_eq "multi-block content matches Linux" "$(cat "$WORK/l2m.bigsum" 2>/dev/null)" \
-          "$(shasum -a 256 "$WORK/l2m_big.bin" | cut -d' ' -f1)"
+          "$(sha256 "$WORK/l2m_big.bin")"
 
 "$DUMP" "$IMG2" xattr /fromlinux/plain.txt 2>/dev/null | grep -q "user.origin" \
   && ok "we see the xattr Linux set" || bad "we see the xattr Linux set"
@@ -207,16 +220,17 @@ note ""
 IMGF="$WORK/flags.img"
 cp "$FIX/ext4_4k.img" "$IMGF"
 
-in_linux '
+oracle '
+  umount /mnt/t 2>/dev/null || true
   mkdir -p /mnt/t
-  mount -o loop /work/flags.img /mnt/t || { echo "MOUNT-FAILED"; exit 1; }
+  mount -o loop flags.img /mnt/t || { echo "MOUNT-FAILED"; exit 1; }
   mkdir -p /mnt/t/protected
   echo -n "do not touch" > /mnt/t/protected/frozen.txt
   echo -n "line1" > /mnt/t/protected/journal.log
   command -v chattr >/dev/null || { echo "NO-CHATTR"; umount /mnt/t; exit 1; }
   chattr +i /mnt/t/protected/frozen.txt
   chattr +a /mnt/t/protected/journal.log
-  lsattr /mnt/t/protected/ > /work/flags.before
+  lsattr /mnt/t/protected/ > flags.before
   sync
   umount /mnt/t
 ' >/dev/null
@@ -241,12 +255,13 @@ fi
 
 # Back to Linux: the flags must still be exactly what it set, and the append we
 # made must be there.
-in_linux '
+oracle '
+  umount /mnt/t 2>/dev/null || true
   mkdir -p /mnt/t
-  mount -o loop /work/flags.img /mnt/t || { echo "MOUNT-FAILED"; exit 1; }
-  lsattr /mnt/t/protected/ > /work/flags.after
-  cat /mnt/t/protected/journal.log > /work/flags.log
-  cat /mnt/t/protected/frozen.txt > /work/flags.frozen
+  mount -o loop flags.img /mnt/t || { echo "MOUNT-FAILED"; exit 1; }
+  lsattr /mnt/t/protected/ > flags.after
+  cat /mnt/t/protected/journal.log > flags.log
+  cat /mnt/t/protected/frozen.txt > flags.frozen
   umount /mnt/t
 ' >/dev/null
 
@@ -271,8 +286,9 @@ cp "$FIX/ext4_4k.img" "$IMG3"
 "$DUMP" "$IMG3" create /shared/a.txt        >/dev/null 2>&1
 "$DUMP" "$IMG3" write /shared/a.txt "mac1"  >/dev/null 2>&1
 
-in_linux '
-  mkdir -p /mnt/t && mount -o loop /work/mixed.img /mnt/t
+oracle '
+  umount /mnt/t 2>/dev/null || true
+  mkdir -p /mnt/t && mount -o loop mixed.img /mnt/t
   echo -n "linux1" > /mnt/t/shared/b.txt
   echo -n "mac1+linux" > /mnt/t/shared/a.txt
   mkdir /mnt/t/shared/ldir
@@ -285,13 +301,14 @@ expect_eq "Linux's new file is visible to us"         "linux1"     "$("$DUMP" "$
 "$DUMP" "$IMG3" write /shared/c.txt "mac2" >/dev/null 2>&1
 "$DUMP" "$IMG3" rm /shared/b.txt           >/dev/null 2>&1
 
-in_linux '
-  mkdir -p /mnt/t && mount -o loop /work/mixed.img /mnt/t
+oracle '
+  umount /mnt/t 2>/dev/null || true
+  mkdir -p /mnt/t && mount -o loop mixed.img /mnt/t
   {
     echo "c=$(cat /mnt/t/shared/c.txt)"
     echo "bgone=$([ -e /mnt/t/shared/b.txt ] && echo no || echo yes)"
     echo "ldir=$([ -d /mnt/t/shared/ldir ] && echo yes || echo no)"
-  } > /work/mixed.result
+  } > mixed.result
   umount /mnt/t' >/dev/null
 
 if [ -f "$WORK/mixed.result" ]; then

@@ -61,7 +61,7 @@ echo ""
 
 # The device starts with a FAT signature planted on it, so the run also
 # proves the foreign-signature wipe on the real path, not just offline.
-dd if=/dev/zero of="$IMG" bs=1m count=64 2>/dev/null
+dd if=/dev/zero of="$IMG" bs=1M count=64 2>/dev/null
 printf '\xeb\x3c\x90MSDOS5.0' | dd of="$IMG" conv=notrunc 2>/dev/null
 printf '\x55\xaa' | dd of="$IMG" bs=1 seek=510 conv=notrunc 2>/dev/null
 

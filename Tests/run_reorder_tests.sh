@@ -46,14 +46,13 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
 fi
 
 
-export PATH="/opt/homebrew/opt/e2fsprogs/sbin:/opt/homebrew/opt/e2fsprogs/bin:$PATH"
-
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$ROOT/Tests/lib.sh"
+
 DUMP="$ROOT/build/bin/ext4dump"
 FIX="$ROOT/Tests/fixtures"
 WORK="$ROOT/build/reorder"
 REPORT="$ROOT/build/reorder-report.txt"
-DOCKER_IMAGE="debian:stable-slim"
 
 QUICK=0
 [ "${1:-}" = "--quick" ] && QUICK=1
@@ -61,8 +60,11 @@ QUICK=0
 CACHE_BYTES="${EXT4_REORDER_CACHE:-4194304}"
 STARTED=$(date +%s)
 
-PASS=0; FAIL=0; CUTS=0
+CUTS=0
 note() { echo "$*" | tee -a "$REPORT"; }
+# Its own ok/bad, not lib.sh's: this sweep has hundreds of assertions, they go
+# to the report as well as the terminal, and a per-cut-point line would bury
+# the verdict.
 ok()   { PASS=$((PASS+1)); }
   # Must not return nonzero. `cmd && bad "x" || ok "x"` otherwise runs
   # BOTH arms when cmd succeeds, because the trailing test in bad is
@@ -74,13 +76,15 @@ bad()  { FAIL=$((FAIL+1)); note "  FAIL  $*"; return 0; }
 
 [ -x "$DUMP" ] || { echo "build first: make tools"; exit 1; }
 [ -f "$FIX/ext4_4k.img" ] && [ -f "$FIX/ext4_64m.img" ] || bash "$ROOT/Tests/make_fixtures.sh"
-docker info >/dev/null 2>&1 || { echo "docker is not running; cannot replay journals"; echo "SKIPPED"; exit 77; }
+have_linux || { echo "$(no_linux_reason); cannot replay journals"; echo "SKIPPED"; exit 77; }
+oracle_needs mount umount e2fsck || { echo "SKIPPED"; exit 77; }
 
 rm -rf "$WORK"; mkdir -p "$WORK"
 : > "$REPORT"
 
-# APFS clones a file for free; these are up to 256 MB each and there are many.
-clone() { cp -c "$1" "$2" 2>/dev/null || cp "$1" "$2"; }
+# These are up to 256 MB each and there are hundreds. lib.sh's imgcopy is the
+# cheap copy on both systems: an APFS clone here, a sparse copy on Linux.
+clone() { imgcopy "$1" "$2"; }
 
 note "########## RECOVERY ON A DRIVE THAT REORDERS ##########"
 note ""
@@ -103,7 +107,7 @@ geometry_image() {
 build_ours() {
   local img="$1" mb="$2"
   rm -f "$img"
-  dd if=/dev/zero of="$img" bs=1m count="$mb" 2>/dev/null
+  dd if=/dev/zero of="$img" bs=1M count="$mb" 2>/dev/null
   env EXT4DUMP_JOURNAL_BLOCKS=1024 \
       EXT4DUMP_UUID=5ee0a11ab1e5000000000000000000d1 \
       "$DUMP" "$img" format 4 4096 OURS >/dev/null 2>&1
@@ -262,11 +266,12 @@ done
 # ------------------------------------------------------------------ replay --
 note ""
 note "replaying journals with the Linux kernel"
-docker run --rm --privileged -v "$WORK:/work" "$DOCKER_IMAGE" bash -c '
-  mkdir -p /mnt/t
-  for img in $(find /work -name "cut_*.img" | sort); do
-    if mount -o loop "$img" /mnt/t 2>/dev/null; then
-      umount /mnt/t
+in_linux "$WORK" '
+  m=$(mktemp -d)
+  trap '"'"'umount "$m" 2>/dev/null; rmdir "$m" 2>/dev/null'"'"' EXIT
+  for img in $(find . -name "cut_*.img" | sort); do
+    if mount -o loop "$img" "$m" 2>/dev/null; then
+      umount "$m"
     else
       echo "MOUNT-REFUSED $img"
     fi

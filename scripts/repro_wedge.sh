@@ -43,7 +43,7 @@ ext_cpu() {
 
 mount_fresh() {
     rm -f "$WORK/base.img"
-    dd if=/dev/zero of="$WORK/base.img" bs=1m count=64 2>/dev/null
+    dd if=/dev/zero of="$WORK/base.img" bs=1M count=64 2>/dev/null
     mke2fs -q -t ext4 -L WEDGE -F "$WORK/base.img" || return 1
     DEV=$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount \
           "$WORK/base.img" | head -1 | awk '{print $1}')

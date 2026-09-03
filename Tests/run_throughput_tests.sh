@@ -54,7 +54,7 @@ if [ -n "$DEVICE" ]; then
   [ -n "$MP" ] || { echo "$DEVICE did not mount as ext4"; exit 1; }
 else
   note "target: a $((SIZE_MB * 2))MB disk image"
-  dd if=/dev/zero of="$WORK/bench.img" bs=1m count=$((SIZE_MB * 2)) 2>/dev/null
+  dd if=/dev/zero of="$WORK/bench.img" bs=1M count=$((SIZE_MB * 2)) 2>/dev/null
   "$DUMP" "$WORK/bench.img" format 4 >/dev/null 2>&1
   DEV=$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount "$WORK/bench.img" \
         2>/dev/null | head -1 | awk '{print $1}')
@@ -92,7 +92,7 @@ note ""
 
 # --- bulk write --------------------------------------------------------------
 if [ -z "$DEVICE" ]; then
-  t=$(timed dd if=/dev/zero of="$MP/big.bin" bs=1m count="$SIZE_MB")
+  t=$(timed dd if=/dev/zero of="$MP/big.bin" bs=1M count="$SIZE_MB")
   if expect_size "$MP/big.bin" "$SIZE_MB"; then
     note "  write  ${SIZE_MB}MB sequential   ${t}s   $(rate "$SIZE_MB" "$t") MB/s"
   fi
@@ -106,7 +106,7 @@ fi
 if [ -f "$MP/big.bin" ]; then
   umount "$MNT" 2>/dev/null && mount -F -t ext4 "${DEV#/dev/}" "$MNT" 2>/dev/null   # cold-ish
   if expect_size "$MP/big.bin" "$SIZE_MB"; then
-    t=$(timed dd if="$MP/big.bin" of=/dev/null bs=1m)
+    t=$(timed dd if="$MP/big.bin" of=/dev/null bs=1M)
     note "  read   ${SIZE_MB}MB sequential   ${t}s   $(rate "$SIZE_MB" "$t") MB/s"
   fi
 fi

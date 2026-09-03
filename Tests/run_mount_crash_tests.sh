@@ -135,7 +135,7 @@ CRASH_DIR="$HOME/Library/Logs/DiagnosticReports"
 freeze_and_snapshot() {  # freeze_and_snapshot <output image>
   local out="$1"
   pkill -STOP -f "$EXT_PATTERN"
-  dd if="/dev/r${DEV#/dev/}" of="$out" bs=1m 2>/dev/null
+  dd if="/dev/r${DEV#/dev/}" of="$out" bs=1M 2>/dev/null
   pkill -CONT -f "$EXT_PATTERN"
 }
 
@@ -193,7 +193,7 @@ needs_recovery() {  # needs_recovery <image>
 note "########## MOUNT CRASH CONSISTENCY ##########"
 note ""
 note "building a ${IMAGE_MB}MB ext4 volume"
-dd if=/dev/zero of="$WORK/base.img" bs=1m count="$IMAGE_MB" 2>/dev/null
+dd if=/dev/zero of="$WORK/base.img" bs=1M count="$IMAGE_MB" 2>/dev/null
 mke2fs -q -t ext4 -L MOUNTCRASH -F "$WORK/base.img" || { note "mke2fs failed"; exit 1; }
 
 # ================================================== stage 0: concurrency ==
@@ -664,7 +664,7 @@ durability_case rmdir    'mkdir "$MNT/dur/emptydir"' \
 #
 # The hash is computed on this side and checked inside Linux, so the bytes are
 # read back by a driver that shares none of our code.
-dd if=/dev/urandom of="$WORK/dur-payload" bs=1m count=4 2>/dev/null
+dd if=/dev/urandom of="$WORK/dur-payload" bs=1M count=4 2>/dev/null
 DUR_SHA=$(shasum -a 256 "$WORK/dur-payload" | cut -d' ' -f1)
 durability_case filedata ""                          \
   'cp "$WORK/dur-payload" "$MNT/dur/data.bin"'       \

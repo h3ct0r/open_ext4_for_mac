@@ -1682,9 +1682,9 @@ int main(int argc, char **argv)
     uint64_t dev_bytes = (uint64_t)st.st_size;
     if (dev_bytes == 0 && (S_ISBLK(st.st_mode) || S_ISCHR(st.st_mode))) {
         uint32_t sector = 0;
-        uint64_t sectors = 0;
         bool got = false;
 #ifdef __APPLE__
+        uint64_t sectors = 0;
         if (ioctl(fd, DKIOCGETBLOCKSIZE, &sector) == 0 &&
             ioctl(fd, DKIOCGETBLOCKCOUNT, &sectors) == 0) {
             dev_bytes = sectors * (uint64_t)sector;
@@ -1968,8 +1968,8 @@ int main(int argc, char **argv)
                    ((a.flags & EXT4B_INODE_IMMUTABLE) &&
                     (a.flags & EXT4B_INODE_APPEND_ONLY)) ? " + " : "",
                    (a.flags & EXT4B_INODE_APPEND_ONLY) ? "append-only" : "");
-        printf("mtime:      %lld.%09u\n", a.mtime, a.mtime_ns);
-        printf("crtime:     %lld.%09u\n", a.crtime, a.crtime_ns);
+        printf("mtime:      %lld.%09u\n", (long long)a.mtime, a.mtime_ns);
+        printf("crtime:     %lld.%09u\n", (long long)a.crtime, a.crtime_ns);
 
     } else if (strcmp(cmd, "cat") == 0) {
         if (argc < 4) { fprintf(stderr, "cat needs a path\n"); rc = 2; goto unmount; }

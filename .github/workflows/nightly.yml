@@ -9,7 +9,8 @@
 # What it cannot do is the mounted half. Stages 9 to 13 need a signed FSKit
 # extension that a person approved in System Settings, and the pull suite
 # needs hands on a USB stick. Those stay on the developer's Mac under
-# `make validate` and `make soak`, and docs/ENVELOPE.md says so. This is the
+# `make validate` and `make soak`. (docs/ENVELOPE.md will say so in prose; it
+# is Part C and is not written yet.) This is the
 # offline set, over and over, with the fuzzer between rounds.
 name: nightly
 

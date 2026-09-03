@@ -56,7 +56,7 @@ command -v mke2fs >/dev/null || { echo "mke2fs not found; brew install e2fsprogs
 # something we produced.
 new_volume() {  # new_volume <path>
   rm -f "$1"
-  dd if=/dev/zero of="$1" bs=1m count=16 2>/dev/null
+  dd if=/dev/zero of="$1" bs=1M count=16 2>/dev/null
   mke2fs -q -t ext4 -F -L ORPHAN "$1" 2>/dev/null
 }
 

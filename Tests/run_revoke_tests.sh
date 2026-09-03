@@ -119,7 +119,7 @@ PY
 
 # --- our own format: checksummed journal, where the tail reservation lives ---
 IMG="$WORK/ours.img"
-dd if=/dev/zero of="$IMG" bs=1m count=64 2>/dev/null
+dd if=/dev/zero of="$IMG" bs=1M count=64 2>/dev/null
 "$DUMP" "$IMG" format 4 4096 REVOKE >/dev/null 2>&1
 "$DUMP" "$IMG" script "$WL" >/dev/null 2>&1
 feat=$(dumpe2fs -h "$IMG" 2>/dev/null | sed -n 's/^Journal features: *//p')
@@ -129,7 +129,7 @@ scan "$IMG" "our format (checksummed journal)"
 # --- mke2fs without journal checksums: count has no tail folded in, so this
 #     doubles as the control that the scanner itself is sound ---
 IMG2="$WORK/plain.img"
-dd if=/dev/zero of="$IMG2" bs=1m count=64 2>/dev/null
+dd if=/dev/zero of="$IMG2" bs=1M count=64 2>/dev/null
 mke2fs -q -t ext4 -b 4096 -L REVOKE2 "$IMG2"
 "$DUMP" "$IMG2" script "$WL" >/dev/null 2>&1
 scan "$IMG2" "mke2fs format (no journal checksums)"
@@ -153,7 +153,7 @@ WL2="$WORK/workload-data.txt"
   done
 } > "$WL2"
 IMG3="$WORK/datafree.img"
-dd if=/dev/zero of="$IMG3" bs=1m count=64 2>/dev/null
+dd if=/dev/zero of="$IMG3" bs=1M count=64 2>/dev/null
 "$DUMP" "$IMG3" format 4 4096 REVOKE3 >/dev/null 2>&1
 "$DUMP" "$IMG3" script "$WL2" >/dev/null 2>&1
 scan "$IMG3" "our format, data-block frees"
