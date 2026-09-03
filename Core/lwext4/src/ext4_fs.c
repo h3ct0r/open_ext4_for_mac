@@ -1445,7 +1445,24 @@ static int ext4_fs_get_inode_dblk_idx_internal(struct ext4_inode_ref *inode_ref,
 		current_block = current_fsblk;
 		*fblock = current_block;
 
-		ext4_assert(*fblock || support_unwritten);
+		/*
+		 * Block 0 is ext4's hole marker, and the callers that pass
+		 * support_unwritten = false are the directory walks: they need
+		 * a real block, not a hole.
+		 *
+		 * On the medium that condition is a directory whose i_size
+		 * claims more blocks than its extent tree maps -- four bytes
+		 * of damage on a real volume -- and asserting on it aborted
+		 * the driver from a plain readdir. CONFIG_DEBUG_ASSERT ships,
+		 * so on the installed extension that is an `ls` taking the
+		 * mount down.
+		 *
+		 * It is a property of the bytes, not an invariant of the code,
+		 * so it is an error return. The callers all propagate it: the
+		 * directory iterator stops, and the caller sees EIO.
+		 */
+		if (!*fblock && !support_unwritten)
+			return EIO;
 		return EOK;
 	}
 #endif
