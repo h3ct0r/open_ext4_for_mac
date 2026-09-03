@@ -253,10 +253,52 @@ enum Ext4Unlock {
                                      in: LUKSKeyStore.directoryFromOutside()) != nil
     }
 
-    /// Forget a container's key, wherever it is.
-    static func forget(uuid: String) {
-        try? LUKSKeychain.remove(uuid: uuid)
-        LUKSKeyStore.forget(uuid: uuid, in: LUKSKeyStore.directoryFromOutside())
+    /// What forgetting one container's key actually did, in both places.
+    struct ForgetResult {
+        var keychain: LUKSKeychain.Removal?
+        var keychainError: String?
+        var filesRemoved: [String] = []
+
+        /// Did anything actually go away?
+        var removedSomething: Bool {
+            keychain == .deleted || !filesRemoved.isEmpty
+        }
+        /// Is anything still there that we tried to remove?
+        var stillThere: Bool { keychain == .stillPresent }
+    }
+
+    /// Forget a container's key, wherever it is, and report what happened.
+    ///
+    /// Both places, always: which one holds the key depends on how this binary
+    /// was signed, and forgetting half of it is worse than useless.
+    ///
+    /// No `try?` here any more. It used to swallow every keychain error and
+    /// the caller printed "forgot the key for <uuid>" regardless -- so a build
+    /// that could not see the item, which is any build signed differently from
+    /// the one that stored it, reported success over a key that was still
+    /// there. That is the worst possible failure for this particular verb.
+    static func forget(uuid: String,
+                       in directory: URL = LUKSKeyStore.directoryFromOutside(),
+                       includeKeychain: Bool = true) -> ForgetResult {
+        var result = ForgetResult()
+        if includeKeychain {
+            do {
+                result.keychain = try LUKSKeychain.remove(uuid: uuid)
+            } catch {
+                result.keychainError = error.localizedDescription
+            }
+        }
+
+        for suffix in ["key", "pass", "header"] {
+            let url = directory.appendingPathComponent("\(uuid).\(suffix)")
+            if FileManager.default.fileExists(atPath: url.path) {
+                try? FileManager.default.removeItem(at: url)
+                if !FileManager.default.fileExists(atPath: url.path) {
+                    result.filesRemoved.append("\(uuid).\(suffix)")
+                }
+            }
+        }
+        return result
     }
 
     // MARK: - Commands
@@ -314,15 +356,128 @@ enum Ext4Unlock {
         }
     }
 
-    /// Drop a stored key. Takes a UUID, or a device to read one from.
+    /// Drop a stored key. Takes a UUID, a device to read one from, or --all.
     static func forget(_ argument: String) -> Int32 {
+        if argument == "--all" { return forgetAll(confirmed: false) }
         let uuid = argument.hasPrefix("/dev/") ? containerUUID(devicePath: argument) : argument
         guard let uuid else { return 1 }
-        // Both places, always: which one holds the key depends on how this
-        // binary was signed, and forgetting half of it is worse than useless.
-        forget(uuid: uuid)
-        print("forgot the key for \(uuid)")
+        return report(uuid: uuid, forget(uuid: uuid))
+    }
+
+    /// Say what happened, in the words of what happened.
+    private static func report(uuid: String, _ r: ForgetResult) -> Int32 {
+        if let error = r.keychainError {
+            complain("the keychain refused to forget \(uuid): \(error)")
+            return 1
+        }
+        switch r.keychain {
+        case .deleted:
+            print("forgot the keychain key for \(uuid)")
+        case .stillPresent:
+            complain("the keychain key for \(uuid) is STILL THERE after deleting it")
+            return 1
+        case .notVisible, nil:
+            // Deliberately not "forgot": this build can see no such item, and
+            // the keychain cannot tell "there was never one" from "there is
+            // one and you are not the code that stored it". Saying which of
+            // those it is would be inventing the answer.
+            if r.filesRemoved.isEmpty {
+                print("no key for \(uuid) is visible to this build")
+                print("")
+                print("If one was stored by the installed app, forget it with that:")
+                print("    /Applications/Ext4Mac.app/Contents/MacOS/Ext4Mac forget \(uuid)")
+                return 1
+            }
+        }
+        for file in r.filesRemoved { print("removed \(file)") }
         return 0
+    }
+
+    /// Forget everything this build can see: every key in the keychain and
+    /// every file in the extension's container.
+    ///
+    /// Exists because they accumulate. A test that unlocks a fixture container
+    /// leaves a key behind, and after a few weeks of suites there are dozens
+    /// of them -- each one a master key for a volume that no longer exists,
+    /// sitting in the login keychain because nothing ever swept up.
+    static func forgetAll(confirmed: Bool,
+                          in directory: URL = LUKSKeyStore.directoryFromOutside(),
+                          includeKeychain: Bool = true) -> Int32 {
+        var uuids = Set<String>()
+        if includeKeychain {
+            do {
+                uuids.formUnion(try LUKSKeychain.storedUUIDs())
+            } catch {
+                complain("could not list keychain items: \(error.localizedDescription)")
+                return 1
+            }
+        }
+        for file in (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [] {
+            guard file.hasSuffix(".key") || file.hasSuffix(".pass") || file.hasSuffix(".header")
+            else { continue }
+            uuids.insert((file as NSString).deletingPathExtension)
+        }
+
+        if uuids.isEmpty {
+            print("nothing stored; nothing to forget")
+            return 0
+        }
+
+        // Say what will go, and do nothing until somebody says yes.
+        //
+        // This verb deletes every key this build can see, and the two halves
+        // fail independently: a build that cannot touch the keychain can still
+        // delete every file in the container, which is what happened the first
+        // time this was run -- nine key files gone while every keychain item
+        // stayed, and the summary said "forgot 0 of 9". Deleting first and
+        // reporting afterwards is the wrong order for a verb like this.
+        //
+        // No isatty. A confirmation that depends on where stdout points is a
+        // confirmation that behaves differently under a script than under a
+        // person, and this is exactly the verb where those must agree.
+        if !confirmed {
+            print("would forget \(uuids.count) key(s):")
+            for uuid in uuids.sorted() { print("  \(uuid)") }
+            print("")
+            print("This deletes key material. A volume whose key is forgotten needs its")
+            print("passphrase again, and there is nothing to undo it with.")
+            print("")
+            print("    Ext4Mac forget --all --yes")
+            return 2
+        }
+
+        var failures = 0
+        var deleted = 0
+        for uuid in uuids.sorted() {
+            let r = forget(uuid: uuid, in: directory, includeKeychain: includeKeychain)
+            // The two halves fail independently, so report both. "NOT
+            // forgotten" over a run that deleted three files is a lie in the
+            // safe-sounding direction, which is the worse one.
+            let files = r.filesRemoved.isEmpty
+                      ? "" : " (removed \(r.filesRemoved.joined(separator: ", ")))"
+            if r.keychainError != nil || r.stillThere {
+                complain("  \(uuid): keychain NOT forgotten"
+                         + (r.keychainError.map { " (\($0))" } ?? "")
+                         + files)
+                failures += 1
+            } else if r.removedSomething {
+                print("  \(uuid): forgotten\(files)")
+                deleted += 1
+            } else {
+                print("  \(uuid): nothing visible to remove")
+            }
+        }
+        print("")
+        print("forgot \(deleted) of \(uuids.count)")
+
+        // Ask again rather than trusting the loop: this verb exists because
+        // the old one reported success without checking.
+        let left = includeKeychain ? ((try? LUKSKeychain.storedUUIDs()) ?? []) : []
+        if !left.isEmpty {
+            complain("\(left.count) keychain item(s) remain: \(left.joined(separator: ", "))")
+            return 1
+        }
+        return failures == 0 ? 0 : 1
     }
 
     /// Which volumes we hold keys for. Never prints key material.

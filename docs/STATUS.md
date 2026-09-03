@@ -822,12 +822,19 @@ The container directory also accepts a `<UUID>.pass` file holding a passphrase,
 which needs no app and no entitlement at all. That is what an unattended
 machine can use, and what the test suite uses.
 
-**The extension never creates keychain items — it only reads them.** When it
-does derive a key from a passphrase file it caches it in the container, not the
-keychain, even though it is entitled to write there. Ownership has to sit in
-one place and it belongs with the app, because that is what a person reaches
-for when they want a volume to stop being unlocked. A key cached somewhere the
-app cannot delete is a key nothing can forget.
+**The extension does create keychain items.** This paragraph used to say the
+opposite — that it only ever reads them, and caches derived keys in the
+container instead — and that was written when it was true. It stopped being
+true and the paragraph did not: `Ext4LUKSKeys.cache` stores to the keychain
+first and falls back to a `<UUID>.key` file only when the keychain write
+fails, which is the better arrangement (a plaintext master key on disk is
+worse than a keychain item written by the wrong process) and the reverse of
+what was documented here.
+
+The concern the old paragraph was defending is still real: a key cached
+somewhere the app cannot delete is a key nothing can forget. What answers it
+now is that `forget` clears both places and says which one it actually
+cleared, rather than a rule about who is allowed to write.
 
 #### Two refusals, deliberately different
 

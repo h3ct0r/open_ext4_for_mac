@@ -350,7 +350,13 @@ final class Ext4MenuBar: NSObject, NSApplicationDelegate {
     @objc private func forgetChosen(_ sender: NSMenuItem) {
         guard let bsd = sender.representedObject as? String,
               let uuid = volumes[bsd]?.uuid else { return }
-        Ext4Unlock.forget(uuid: uuid)
+        // The result matters here too, but a menu is not a place to report
+        // three outcomes: log the one that should not happen, and leave the
+        // detailed answer to `Ext4Mac forget`, which a person can read.
+        let result = Ext4Unlock.forget(uuid: uuid)
+        if result.stillThere || result.keychainError != nil {
+            NSLog("Ext4Mac: the key for %@ was not forgotten", uuid)
+        }
         asked.remove(uuid)
         rebuildMenu()
     }

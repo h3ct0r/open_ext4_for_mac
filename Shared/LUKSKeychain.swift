@@ -103,7 +103,12 @@ public enum LUKSKeychain {
         guard !masterKey.isEmpty, masterKey.count <= maxKeyLength else {
             throw Failure.malformed
         }
-        try? remove(uuid: uuid)
+        // Replace, not add: SecItemAdd refuses a duplicate. The outcome is
+        // genuinely uninteresting here -- if there was no item, good; if there
+        // was, it is about to be overwritten by the add below, and if the add
+        // fails it throws. Named so the discard is deliberate rather than a
+        // dropped result.
+        _ = try? remove(uuid: uuid)
 
         var item = base(uuid: uuid)
         item[kSecValueData as String] = Data(masterKey)
@@ -116,12 +121,45 @@ public enum LUKSKeychain {
         guard status == errSecSuccess else { throw Failure.keychain(status) }
     }
 
-    /// Forget the key for a container. Not finding one is not an error.
-    public static func remove(uuid: String) throws {
+    /// What actually happened when a key was asked to go away.
+    ///
+    /// Three outcomes, because they mean three different things to whoever
+    /// asked and the old code reported all of them as success. `remove` used
+    /// to treat errSecItemNotFound as "done", and `Ext4Unlock.forget` called
+    /// it through `try?` and then printed "forgot the key for <uuid>"
+    /// unconditionally -- so a build that could not see the item at all, which
+    /// is every build signed differently from the one that stored it, said the
+    /// key was gone while it sat there.
+    public enum Removal: String, Equatable, Sendable {
+        /// It was there before and it is not there now. The only one that
+        /// means what "forgot the key" says.
+        case deleted
+        /// Nothing matched. Either there was never a key here, or there is one
+        /// and this code identity cannot see it -- the keychain does not offer
+        /// a way to tell those apart, and they need different things done
+        /// about them, so this is never reported as success.
+        case notVisible
+        /// It was deleted and it is still there. Should not happen; if it
+        /// does, saying so is the entire point of asking twice.
+        case stillPresent
+    }
+
+    /// Forget the key for a container, and check.
+    ///
+    /// Query, delete, query again. The second query is the whole change: a
+    /// delete that returns errSecSuccess and leaves the item readable is a
+    /// thing that can happen -- an item can be duplicated across keychains, or
+    /// live in one this query does not reach -- and "I asked" is not the same
+    /// claim as "it is gone".
+    @discardableResult
+    public static func remove(uuid: String) throws -> Removal {
+        let existedBefore = hasKey(uuid: uuid)
         let status = SecItemDelete(base(uuid: uuid) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw Failure.keychain(status)
         }
+        if hasKey(uuid: uuid) { return .stillPresent }
+        return existedBefore ? .deleted : .notVisible
     }
 
     /// The UUIDs we hold keys for. Never returns key material.

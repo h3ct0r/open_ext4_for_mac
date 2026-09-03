@@ -49,6 +49,9 @@ struct Ext4MacApp {
             exit(Ext4Unlock.unlock(devicePath: device))
         case "forget":
             guard let which = arguments.first else { usage(1) }
+            if which == "--all" {
+                exit(Ext4Unlock.forgetAll(confirmed: arguments.contains("--yes")))
+            }
             exit(Ext4Unlock.forget(which))
         case "list":
             exit(Ext4Unlock.list())
@@ -189,8 +192,72 @@ struct Ext4MacApp {
         check("and it holds what was put in it", secret.count == 28,
               "count is \(secret.count)")
 
+        // Forgetting a key has to be checkable, because the verb that does it
+        // used to report success without looking. A round trip on a UUID no
+        // volume will ever have: store, see it, forget it, see it gone, and
+        // then forget it again and get a different answer -- because "there
+        // was nothing here" and "there was something and it is gone" are
+        // different facts and only one of them is what the user asked for.
+        //
+        // Cleans up after itself even when it fails. This runs against the
+        // real keychain; leaving a key behind is exactly the thing being
+        // fixed.
+        let probeUUID = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+        defer { _ = try? LUKSKeychain.remove(uuid: probeUUID) }
+        do {
+            let key = [UInt8](repeating: 0xA5, count: 64)
+            try LUKSKeychain.store(masterKey: key, uuid: probeUUID, label: "Ext4Mac selftest")
+            check("a key can be stored and read back", LUKSKeychain.hasKey(uuid: probeUUID))
+
+            let first = try LUKSKeychain.remove(uuid: probeUUID)
+            check("forgetting one that is there reports it deleted",
+                  first == .deleted, "reported \(first.rawValue)")
+            check("and it really is gone", !LUKSKeychain.hasKey(uuid: probeUUID))
+
+            let second = try LUKSKeychain.remove(uuid: probeUUID)
+            check("forgetting one that is not there does not claim to have deleted it",
+                  second == .notVisible, "reported \(second.rawValue)")
+        } catch {
+            // An unsigned build has its own view of the keychain and may not
+            // be allowed to write to it at all. That is a fact about this
+            // binary, not a failure of the code under test, and saying so is
+            // more useful than a red cell nobody can act on.
+            print("  ----  the keychain round trip did not run: \(error.localizedDescription)")
+            print("        (an unsigned build may not be permitted to store items)")
+        }
+
         // The same last line every suite in this project prints, so the CI
         // summary counts these assertions instead of showing a dash.
+        // `forget --all` deletes every key this build can see, in two places
+        // that fail independently. The first time it ran it took nine key
+        // files out of the extension's container while every keychain item
+        // stayed put, and then printed "forgot 0 of 9" -- it had deleted
+        // before it reported, and reported only the half that failed. The gate
+        // is the fix, and a gate that has never been shown to hold is not one.
+        let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("ext4mac-selftest-\(getpid())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        do {
+            try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+            for uuid in ["aaaa-1", "bbbb-2"] {
+                try Data([0xDE, 0xAD]).write(to: tmp.appendingPathComponent("\(uuid).key"))
+            }
+            let listed = Ext4Unlock.forgetAll(confirmed: false, in: tmp, includeKeychain: false)
+            let survivors = (try? FileManager.default.contentsOfDirectory(atPath: tmp.path)) ?? []
+            check("forget --all without --yes deletes nothing",
+                  listed == 2 && survivors.count == 2,
+                  "rc \(listed), \(survivors.count) file(s) left")
+
+            let done = Ext4Unlock.forgetAll(confirmed: true, in: tmp, includeKeychain: false)
+            let after = (try? FileManager.default.contentsOfDirectory(atPath: tmp.path)) ?? []
+            check("and with --yes the key files are gone",
+                  done == 0 && after.isEmpty,
+                  "rc \(done), \(after.count) file(s) left")
+        } catch {
+            check("the forget --all gate could be exercised", false,
+                  error.localizedDescription)
+        }
+
         print("")
         print("passed: \(passedCount)   failed: \(failed)")
         return failed == 0 ? 0 : 1
@@ -203,6 +270,8 @@ struct Ext4MacApp {
         Ext4Mac                     is the extension installed and enabled?
         Ext4Mac unlock /dev/diskN   unlock an encrypted (LUKS) volume
         Ext4Mac forget <uuid|disk>  forget a volume's key again
+        Ext4Mac forget --all        list every key this build can see;
+                                    add --yes to actually forget them
         Ext4Mac version             which build the installed bundles are
         Ext4Mac list                which volumes are unlocked
         Ext4Mac last-error <uuid|disk>
