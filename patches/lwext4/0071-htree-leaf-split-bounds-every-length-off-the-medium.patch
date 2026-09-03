@@ -1,0 +1,99 @@
+Subject: the htree leaf splitter bounds every length off the medium
+
+ext4_dir_dx_split_data walks a directory leaf block copying its entries
+into a block-sized scratch buffer before a split. Every length it used --
+the per-entry record length it advances by, and the 8+name_len it copies --
+came off the medium and none was bounded. The linear insert path had the
+same three defects and patch 0067 fixed them there; this is the htree-leaf
+sibling, and its consequence is worse, because here the unbounded copy is a
+heap WRITE:
+
+  * an entry length of zero loops forever, holding the mount;
+  * a record length larger than the block copies past the block-sized
+    entry_buffer;
+  * more valid entries than the block can hold pushes idx past max_ecnt in
+    the parallel sort[] array.
+
+Reached from a create on a read-write mount, on an indexed directory whose
+leaf needs splitting. Each check bails to the caller with EIO, which fails
+the create and hands the volume to e2fsck -- a leaf that does not add up is
+corruption on the medium, not an invariant of the code.
+
+--- a/src/ext4_dir_idx.c
++++ b/src/ext4_dir_idx.c
+@@ -956,13 +956,54 @@
+ 	struct ext4_hash_info hinfo_tmp;
+ 	memcpy(&hinfo_tmp, hinfo, sizeof(struct ext4_hash_info));
+ 
+-	/* Load all valid entries to the buffer */
++	/* Load all valid entries to the buffer.
++	 *
++	 * Every length in this loop comes off the medium and none had been
++	 * bounded. entry_buffer and sort are each sized for a block; on a
++	 * corrupt leaf this walk could copy more than a block into entry_buffer
++	 * (rec_len derived from a name_len larger than the block), push idx past
++	 * max_ecnt in sort[], read a name past the block end, or -- with a zero
++	 * entry length -- spin forever holding the mount. This is the htree-leaf
++	 * sibling of the linear insert path bounded elsewhere: the same three
++	 * defects, a worse consequence, because here they are heap WRITES from a
++	 * create on a read-write mount. A leaf that does not add up is corruption
++	 * on the medium, so bail to the caller, which fails the create and hands
++	 * the volume to e2fsck. */
++	uint8_t *de_limit = old_data_block->data + block_size;
+ 	struct ext4_dir_en *de = (void *)old_data_block->data;
+ 	uint8_t *entry_buffer_ptr = entry_buffer;
+-	while ((void *)de < (void *)(old_data_block->data + block_size)) {
++	while ((uint8_t *)de + sizeof(struct ext4_fake_dir_entry) <= de_limit) {
++		size_t elen = ext4_dir_en_get_entry_len(de);
++		/* Zero would loop; an entry that runs past the block is not in
++		 * the block. */
++		if (elen < sizeof(struct ext4_fake_dir_entry) ||
++		    (uint8_t *)de + elen > de_limit) {
++			ext4_free(sort);
++			ext4_free(entry_buffer);
++			return EIO;
++		}
++
+ 		/* Read only valid entries */
+ 		if (ext4_dir_en_get_inode(de) && de->name_len) {
+ 			uint16_t len = ext4_dir_en_get_name_len(sb, de);
++
++			uint32_t rec_len = 8 + len;
++			if ((rec_len % 4) != 0)
++				rec_len += 4 - (rec_len % 4);
++
++			/* The name has to be in the block, the copy has to fit
++			 * the block-sized buffer, and idx has to stay inside
++			 * sort[]. rec_len cannot exceed elen for a well-formed
++			 * entry, and elen is already bounded above. */
++			if ((uint8_t *)de->name + len > de_limit ||
++			    rec_len > elen ||
++			    entry_buffer_ptr + rec_len > entry_buffer + block_size ||
++			    idx >= max_ecnt) {
++				ext4_free(sort);
++				ext4_free(entry_buffer);
++				return EIO;
++			}
++
+ 			rc = ext4_dir_dx_hash_string(&hinfo_tmp, len,
+ 						     (char *)de->name);
+ 			if (rc != EOK) {
+@@ -971,10 +1012,6 @@
+ 				return rc;
+ 			}
+ 
+-			uint32_t rec_len = 8 + len;
+-			if ((rec_len % 4) != 0)
+-				rec_len += 4 - (rec_len % 4);
+-
+ 			memcpy(entry_buffer_ptr, de, rec_len);
+ 
+ 			sort[idx].dentry = entry_buffer_ptr;
+@@ -986,7 +1023,6 @@
+ 			idx++;
+ 		}
+ 
+-		size_t elen = ext4_dir_en_get_entry_len(de);
+ 		de = (void *)((uint8_t *)de + elen);
+ 	}
+ 

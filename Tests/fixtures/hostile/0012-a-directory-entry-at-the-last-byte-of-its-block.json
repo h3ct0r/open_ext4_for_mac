@@ -1,0 +1,24 @@
+{
+  "id": "0012",
+  "slug": "a-directory-entry-at-the-last-byte-of-its-block",
+  "found_by": "code review (altitude): ext4_dir_find_in_block bounded its walk by the searched name length, not by the entry header",
+  "base": "mke2fs -b 1024 -O ^dir_index,^metadata_csum,^64bit -I 128 on 2 MiB, a directory /d with three files",
+  "edits": [
+    {
+      "what": "the last real entry in /d's block, rec_len shrunk to its true length",
+      "note": "so the walk continues into the crafted tail"
+    },
+    {
+      "what": "a filler entry (inode 0) advancing the cursor to offset 1023",
+      "note": "one byte before the 1024-byte block end"
+    },
+    {
+      "what": "byte 1023 set to 0x01",
+      "note": "so ext4_dir_en_get_inode reads nonzero and the old code dereferences the header"
+    }
+  ],
+  "symptom": "Looking up a 1-byte name walked to a directory entry one byte short of the block end; the old guard `de + name_len > addr_limit` used the SEARCHED name's length, so the entry passed it and ext4_dir_find_in_block then read the inode, name_len, name and rec_len past the block buffer: AddressSanitizer heap-buffer-overflow READ of size 4 at ext4_dir.c:718, reached from ext4_dir_find_entry on an ordinary lookup.",
+  "fixed_by": "patch 0071/0072 -- the walk bounds the fixed 8-byte header, then the entry's own name_len, before either is read",
+  "reproduce": "build/bin/ext4dump <img> cat /d/z   # ASan clean with the patch, heap-buffer-overflow without it",
+  "note_on_detection": "A read overflow, so it faults only under AddressSanitizer -- the hostile suite catches it when run against the debug/ASan tools (make test-asan), exactly as fixtures 0001 and 0004 do. Under an optimised build the stray read is silent."
+}

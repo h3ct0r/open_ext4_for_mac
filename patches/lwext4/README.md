@@ -134,3 +134,13 @@ protect data.
 operation and why it runs under sanitizers: in an ordinary optimised build the
 bug is invisible, because the freshly-allocated block happens to be zeroed and
 the stale checksum still matches.
+
+0071–0073 are three of one kind, found by review rather than by the fuzzer:
+a guard that was added at one call site while a sibling site kept the same
+bug. 0071 is the htree-leaf twin of 0067's linear-insert bound; 0072 bounds
+the linear lookup the way 0065 bounded the xattr walk; 0073 finishes the
+clamp 0068 started, covering the three descriptor-derived writes below the
+one it fixed. Each is an out-of-bounds access off the medium — 0071 and 0073
+are writes reachable from a create and from mount respectively — so they are
+the same class as the fuzzer's finds and are pinned by hostile fixtures the
+same way.
