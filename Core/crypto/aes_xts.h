@@ -36,6 +36,18 @@ aes_xts_key *aes_xts_key_create(const uint8_t *key, size_t key_len);
 /// Zeroes the key material before freeing it.
 void aes_xts_key_destroy(aes_xts_key *k);
 
+/*
+ * Whether the schedule sits in memory the kernel has been told not to page
+ * out. A key schedule lives for as long as the volume is mounted, and
+ * anonymous memory that lives that long can end up in a swap file that
+ * outlives the machine being switched off; mlock is the only answer a
+ * userspace process has. False is not a failure to open anything -- the lock
+ * is best-effort, because a container that refuses to mount when the kernel
+ * declines to lock a page is worse for its owner than a key that might reach
+ * swap -- but it is a fact a test is entitled to check.
+ */
+bool aes_xts_key_is_locked(const aes_xts_key *k);
+
 /// Encrypt or decrypt one sector in place.
 ///
 /// `tweak` is the value dm-crypt calls the IV. For `plain64` it is the sector

@@ -884,6 +884,14 @@ else
   SWIFTFLAGS += -O
 endif
 
+# The Swift half of EXTRA_CFLAGS: an injection point for one-off builds, and
+# the way a red-first run turns a defence off to show the test noticing.
+#
+#   make app EXTRA_SWIFTFLAGS=-DLUKS_NO_MLOCK
+#
+# `Ext4Mac selftest` must fail with that and pass without it.
+SWIFTFLAGS += $(EXTRA_SWIFTFLAGS)
+
 typecheck: core
 	swiftc -typecheck $(SWIFT_SRCS) $(SWIFTFLAGS)
 
@@ -933,7 +941,7 @@ APP_SRCS := $(wildcard App/*.swift) $(SHARED_SRCS)
 $(BUILD)/$(APP_NAME).app/Contents/MacOS/$(APP_NAME): $(APP_SRCS) $(CORE_LIB)
 	@mkdir -p $(dir $@)
 	swiftc $(APP_SRCS) -target arm64-apple-macos$(DEPLOY_TARGET) -O -parse-as-library \
-	    -I $(SHIM_DIR) $(CORE_LIB) -o $@
+	    -I $(SHIM_DIR) $(EXTRA_SWIFTFLAGS) $(CORE_LIB) -o $@
 
 # --- signing -----------------------------------------------------------------
 # Requires a Developer ID Application certificate and a provisioning profile

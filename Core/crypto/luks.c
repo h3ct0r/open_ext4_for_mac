@@ -5,6 +5,7 @@
 
 #include "crypto_portable.h"
 #include "luks.h"
+#include "secure_mem.h"
 
 #include "aes_xts.h"
 #include "af_split.h"
@@ -560,13 +561,35 @@ static luks_status try_slot(void *ctx, ext4b_read_fn read_fn,
     const size_t key_bytes = info->key_bytes;
     const size_t material_len = (size_t)slot->stripes * key_bytes;
 
-    uint8_t *material = malloc(material_len);
+    /* The anti-forensic split of the master key: up to 8192 stripes of it, so
+     * up to half a megabyte, held for as long as the derivation runs. Locked,
+     * because a PBKDF2 or argon2id pass is exactly when the kernel goes
+     * looking for pages to evict, and an evicted page is written to a disk.
+     * See secure_mem.h; the lock is best-effort and failing it does not stop
+     * anyone opening their volume. */
+    size_t material_alloc = 0;
+    bool   material_locked = false;
+    uint8_t *material = ext4b_secure_alloc(material_len, &material_alloc,
+                                           &material_locked);
     if (!material)
         return LUKS_IO;
 
     luks_status status = LUKS_BAD_PASSPHRASE;
     aes_xts_key *slot_key = NULL;
-    uint8_t derived[LUKS_MAX_MASTER_KEY];
+
+    /* Off the stack, for the same reason as the material above: this is the
+     * key the passphrase stretches into, and a locked page cannot be written
+     * to swap. A stack array cannot be locked usefully -- mlock works in whole
+     * pages, and the page holding this one also holds unrelated frames, so
+     * unlocking it on the way out would unlock somebody else's data too. */
+    size_t derived_alloc = 0;
+    bool   derived_locked = false;
+    uint8_t *derived = ext4b_secure_alloc(LUKS_MAX_MASTER_KEY, &derived_alloc,
+                                          &derived_locked);
+    if (!derived) {
+        ext4b_secure_free(material, material_alloc, material_locked);
+        return LUKS_IO;
+    }
 
     /* The passphrase stretches into a key of exactly the master key's size,
      * which is then used to decrypt the slot's key material. */
@@ -610,9 +633,8 @@ out:
         /* The whole buffer, not just key_bytes: on failure the caller must be
          * left nothing, and the LUKS2 path already wipes the full width. */
         memset_s(master_key, LUKS_MAX_MASTER_KEY, 0, LUKS_MAX_MASTER_KEY);
-    memset_s(derived, sizeof(derived), 0, sizeof(derived));
-    memset_s(material, material_len, 0, material_len);
-    free(material);
+    ext4b_secure_free(derived, derived_alloc, derived_locked);
+    ext4b_secure_free(material, material_alloc, material_locked);
     aes_xts_key_destroy(slot_key);
     return status;
 }
@@ -807,13 +829,26 @@ static luks_status try_luks2_slot(void *ctx, ext4b_read_fn read_fn,
     if (hash == CRYPTO_HASH_NONE)
         return LUKS_UNSUPPORTED;
 
-    uint8_t  slot_key[LUKS_MAX_MASTER_KEY];
-    uint8_t *material = malloc(material_len);
+    size_t   material_alloc = 0;
+    bool     material_locked = false;
+    uint8_t *material = ext4b_secure_alloc(material_len, &material_alloc,
+                                           &material_locked);
     aes_xts_key *xts  = NULL;
     luks_status status = LUKS_BAD_PASSPHRASE;
 
     if (!material)
         return LUKS_IO;
+
+    /* The key argon2id derives from the passphrase. Locked and off the stack;
+     * see the note in try_slot. */
+    size_t   slot_alloc = 0;
+    bool     slot_locked = false;
+    uint8_t *slot_key = ext4b_secure_alloc(LUKS_MAX_MASTER_KEY, &slot_alloc,
+                                           &slot_locked);
+    if (!slot_key) {
+        ext4b_secure_free(material, material_alloc, material_locked);
+        return LUKS_IO;
+    }
 
     if (derive_slot_key(js, t, n, json_object_get(js, t, n, ks, "kdf"),
                         pass, pass_len, slot_key, (size_t)area_key_size) != 0) {
@@ -849,9 +884,8 @@ static luks_status try_luks2_slot(void *ctx, ext4b_read_fn read_fn,
 out:
     if (status != LUKS_OK)
         memset_s(master_key, LUKS_MAX_MASTER_KEY, 0, LUKS_MAX_MASTER_KEY);
-    memset_s(slot_key, sizeof(slot_key), 0, sizeof(slot_key));
-    memset_s(material, material_len, 0, material_len);
-    free(material);
+    ext4b_secure_free(slot_key, slot_alloc, slot_locked);
+    ext4b_secure_free(material, material_alloc, material_locked);
     aes_xts_key_destroy(xts);
     return status;
 }

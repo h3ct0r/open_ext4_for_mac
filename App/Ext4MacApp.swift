@@ -106,6 +106,18 @@ struct Ext4MacApp {
             }
             exit(0)
 
+        // Checks this build can make about itself, with no disk, no volume
+        // and nothing installed. Today that is one thing, and it is one thing
+        // worth being able to ask: is key material actually locked into
+        // memory on this machine, or did the kernel decline and nobody
+        // noticed? mlock is best-effort by design, so "it is supposed to be"
+        // and "it is" are different statements.
+        //
+        // Documented rather than hidden. A diagnostic somebody has to be told
+        // about is a diagnostic nobody runs.
+        case "selftest":
+            exit(selftest())
+
         case "version", "--version", "-v":
             // Which source the installed bundles were built from. The point is
             // to answer "is the thing on disk today's code?" without inference:
@@ -145,6 +157,45 @@ struct Ext4MacApp {
         }
     }
 
+    /// Returns 0 if everything this build can check about itself holds.
+    static func selftest() -> Int32 {
+        var failed = 0
+        var passedCount = 0
+        func check(_ what: String, _ passed: Bool, _ detail: String = "") {
+            if passed {
+                passedCount += 1
+                print("  ok    \(what)")
+            } else {
+                failed += 1
+                print("  FAIL  \(what)")
+                if !detail.isEmpty { print("        \(detail)") }
+            }
+        }
+
+        print("Ext4Mac selftest")
+        print("")
+
+        // A passphrase lives in one of these for as long as argon2id takes to
+        // derive from it -- a second or two of deliberately heavy memory
+        // traffic, which is exactly when something gets evicted to swap. A
+        // swap file is on a disk and survives the machine being switched off,
+        // and the wipe in deinit does nothing whatsoever for a copy the kernel
+        // made while we were not looking.
+        let secret = SecureBytes(utf8: "correct horse battery staple")
+        check("key material is locked into memory, not swappable",
+              secret.isLocked,
+              "mlock did not take -- built with LUKS_NO_MLOCK, or "
+              + "RLIMIT_MEMLOCK is too small to lock one page")
+        check("and it holds what was put in it", secret.count == 28,
+              "count is \(secret.count)")
+
+        // The same last line every suite in this project prints, so the CI
+        // summary counts these assertions instead of showing a dash.
+        print("")
+        print("passed: \(passedCount)   failed: \(failed)")
+        return failed == 0 ? 0 : 1
+    }
+
     static func usage(_ code: Int32) -> Never {
         let text = """
         open_ext4_for_mac — ext2/ext3/ext4 for macOS via FSKit
@@ -158,6 +209,7 @@ struct Ext4MacApp {
                                     why the extension refused or degraded a
                                     volume, and what to do about it
         Ext4Mac events [n]          the last n volume events (default 10)
+        Ext4Mac selftest            what this build can check about itself
         Ext4Mac mount /dev/diskN    mount a volume whose key is stored
         Ext4Mac menu                watch for encrypted volumes and ask
         Ext4Mac login-item [on|off] start at login, so the extension stays

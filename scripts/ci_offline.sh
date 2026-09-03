@@ -102,6 +102,12 @@ stage app            make app
 # above into a cache hit that proves nothing.
 stage events         bash Tests/run_events_tests.sh
 
+# What this build can check about itself. Today: whether key material is
+# actually locked into memory on this machine, which mlock only promises
+# best-effort -- so "it is supposed to be" and "it is" are different claims and
+# only one of them is worth shipping on.
+stage selftest       ./build/Ext4Mac.app/Contents/MacOS/Ext4Mac selftest
+
 # Suites added by later phases. Each is listed the day it exists, so that
 # forgetting to register one shows up as a shorter summary rather than as
 # nothing at all:

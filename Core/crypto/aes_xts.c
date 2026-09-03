@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include "secure_mem.h"
 
 #define AES_BLOCK 16
 
@@ -40,7 +41,17 @@ struct aes_xts_key {
     ext4b_ecb data_enc;     /* key1, ECB, encrypting            */
     ext4b_ecb data_dec;     /* key1, ECB, decrypting            */
     ext4b_ecb tweak_enc;    /* key2, ECB, encrypting            */
+
+    /*
+     * Whether mlock() succeeded on this allocation, and how much was locked.
+     *
+     * The flag lives inside the locked region on purpose: there is nothing to
+     * keep it in sync with, because it describes the very pages it sits in.
+     */
+    bool    locked;
+    size_t  alloc_len;
 };
+
 
 /*
  * Advance the tweak: multiply by the primitive element of GF(2^128).
@@ -100,9 +111,16 @@ aes_xts_key *aes_xts_key_create(const uint8_t *key, size_t key_len)
     if (!key || (key_len != 32 && key_len != 64))
         return NULL;
 
-    aes_xts_key *k = calloc(1, sizeof(*k));
+    /* A schedule lives for as long as the volume is mounted, which is hours
+     * of ordinary anonymous memory that the kernel may write to swap. See
+     * secure_mem.h. */
+    size_t rounded = 0;
+    bool   locked  = false;
+    aes_xts_key *k = ext4b_secure_alloc(sizeof(*k), &rounded, &locked);
     if (!k)
         return NULL;
+    k->locked    = locked;
+    k->alloc_len = rounded;
 
     k->half_len = key_len / 2;
     memcpy(k->data_key,  key,                k->half_len);
@@ -118,6 +136,18 @@ aes_xts_key *aes_xts_key_create(const uint8_t *key, size_t key_len)
     return k;
 }
 
+/*
+ * Is this schedule in memory that cannot be paged out?
+ *
+ * Exists so a test can assert it rather than trust it. mlock has no query, so
+ * this reports what the call returned at allocation time, which is the only
+ * fact there is to report.
+ */
+bool aes_xts_key_is_locked(const aes_xts_key *k)
+{
+    return k && k->locked;
+}
+
 void aes_xts_key_destroy(aes_xts_key *k)
 {
     if (!k)
@@ -127,9 +157,11 @@ void aes_xts_key_destroy(aes_xts_key *k)
     ext4b_ecb_free(k->tweak_enc);
     /* memset_s rather than memset: the compiler is entitled to delete a plain
      * memset of memory that is about to be freed, which is exactly the case
-     * where it matters. */
-    memset_s(k, sizeof(*k), 0, sizeof(*k));
-    free(k);
+     * where it matters. Read the two fields before the wipe, obviously -- the
+     * wipe is what makes them unreadable. */
+    bool   locked = k->locked;
+    size_t len    = k->alloc_len ? k->alloc_len : sizeof(*k);
+    ext4b_secure_free(k, len, locked);
 }
 
 void aes_xts_plain64_tweak(uint64_t sector, uint8_t out[AES_BLOCK])

@@ -236,6 +236,12 @@ stage "5d. fragmentation" bash Tests/run_fragmentation_tests.sh
 # refused mount is a mounted-path cell and is not here yet.
 stage "5e. user-visible events" bash Tests/run_events_tests.sh
 
+# What this build can check about itself with no disk in the machine: whether
+# key material is actually locked into memory here. mlock only promises
+# best-effort, so "it is supposed to be" and "it is" are different claims.
+# 5e above builds the app if it is not there, which is what this runs.
+stage "5f. this build checks itself" "$ROOT/build/Ext4Mac.app/Contents/MacOS/Ext4Mac" selftest
+
 if docker info >/dev/null 2>&1; then
   stage "6. LUKS containers" bash Tests/run_luks_tests.sh
   stage "7. crash consistency" bash Tests/run_crash_tests.sh

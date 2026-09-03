@@ -291,6 +291,36 @@ int main(void)
             bad("a value larger than the output buffer is refused", NULL);
     }
 
+    /* ------------------------------------------------------- key hygiene -- */
+    /*
+     * A volume's key schedule lives for as long as the volume is mounted --
+     * hours -- in ordinary anonymous memory, which the kernel is free to write
+     * to a swap file on a disk that outlives the machine being switched off.
+     * The memset_s when the volume is ejected does nothing at all for a copy
+     * the kernel made while nobody was looking. mlock is the only answer a
+     * userspace process has.
+     *
+     * The cell is red under -DLUKS_NO_MLOCK=1, which is the whole point: an
+     * assertion about a defence has to be able to notice the defence missing.
+     */
+    printf("\nkey material in memory\n");
+    {
+        uint8_t key[64];
+        for (size_t i = 0; i < sizeof key; i++) key[i] = (uint8_t)i;
+        aes_xts_key *k = aes_xts_key_create(key, sizeof key);
+        if (!k) {
+            bad("a key schedule is created", NULL);
+        } else {
+            if (aes_xts_key_is_locked(k))
+                ok("the key schedule is locked into memory, not swappable");
+            else
+                bad("the key schedule is locked into memory, not swappable",
+                    "mlock did not take -- built with LUKS_NO_MLOCK, or "
+                    "RLIMIT_MEMLOCK is too small to lock one page");
+            aes_xts_key_destroy(k);
+        }
+    }
+
     printf("\n─────────────────────────────────\n");
     printf("passed: %d   failed: %d\n", passed, failed);
     return failed == 0 ? 0 : 1;
