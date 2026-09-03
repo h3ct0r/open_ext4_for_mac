@@ -201,6 +201,10 @@ stage "2b. bounds & semantics" bash Tests/run_bounds_tests.sh
 # has Homebrew LLVM. The seed is the round number under soak.
 stage "2c. mutation campaign" bash Tests/run_fuzz_tests.sh
 
+# And every image that was once a finding, run again. A fuzzer finds a bug
+# once; this is what stops it coming back.
+stage "2d. hostile image regressions" bash Tests/run_fuzz_regressions_tests.sh
+
 # Only the format suite's Linux round-trip needs Docker, and it skips that
 # section by itself; the geometry sweep needs nothing but e2fsck.
 stage "3. format" bash Tests/run_format_tests.sh

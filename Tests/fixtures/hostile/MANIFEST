@@ -1,0 +1,27 @@
+# Hostile images: one per finding, kept so it can never come back.
+#
+# Every row here was once a crash, a hang, a sanitizer report or a write from
+# a read-only verb. The image is committed gzipped (a mostly-zero 4 MiB
+# volume compresses to a few kilobytes) beside a JSON recipe saying which
+# bytes were changed and why -- because "3 megabytes of bytes" is not a
+# description of a bug, and a fixture nobody can explain is a fixture nobody
+# will dare to change.
+#
+# Columns, whitespace-separated, one row per fixture:
+#
+#   file     the .img.gz, relative to this directory
+#   mode     ro    only read verbs are run
+#            rw    read verbs, then a write script and a structural check
+#   verbs    comma-separated ext4dump verbs; a verb may carry its argument
+#            with '+' standing in for the space (cat+/victim)
+#   fix      the patch or commit that made it stop failing, or '-' if the
+#            fixture is a known-open finding deliberately kept red
+#   note     free text to the end of the line
+#
+# Every row asserts the same three things: exit code below 128 (no crash, no
+# watchdog kill), no sanitizer line in the output, and the image byte-identical
+# afterwards. A read verb that changes the medium is a finding whatever it
+# returns.
+#
+# file                                mode  verbs                                    fix     note
+0001-corrupt-extent-header.img.gz     ro    probe,ls+/,cat+/victim,extents+/victim,check  0048  eh_entries 0x4000 and eh_max 0xFFFF in the root header, which lives in the inode and so passed through no block validator

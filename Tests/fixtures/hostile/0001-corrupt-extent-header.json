@@ -1,0 +1,17 @@
+{
+  "id": "0001",
+  "slug": "corrupt-extent-header",
+  "found_by": "the pre-release audit; kept here as the bootstrap proof of the red-first-patch mechanism",
+  "base": "ext4dump format 4 on a 4 MiB file, one file /victim with 11 bytes",
+  "edits": [
+    {
+      "what": "inode 12's root extent header, inside i_block[] at offset 40",
+      "field": "eh_entries, eh_max",
+      "from": "1, 4",
+      "to": "0x4000, 0xFFFF"
+    }
+  ],
+  "symptom": "eh_max is the stride to the checksum tail (12 + 12 * eh_max, which for 0xFFFF lands 786 KB past a 4 KiB block) and eh_entries bounds the binary search every lookup runs. Reading /victim was a heap-buffer-overflow in ext4_ext_binsearch.",
+  "fixed_by": "patches/lwext4/0048-an-extent-header-is-bounded-before-it-is-believed.patch",
+  "reproduce": "build/bin/ext4dump <img> cat /victim"
+}
