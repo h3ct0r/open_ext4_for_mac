@@ -1,5 +1,7 @@
 # open_ext4_for_mac
 
+[![ci](https://github.com/h3ct0r/open_ext4_for_mac/actions/workflows/ci.yml/badge.svg)](https://github.com/h3ct0r/open_ext4_for_mac/actions/workflows/ci.yml)
+
 A native, open-source **ext2/ext3/ext4** read-write filesystem driver for macOS,
 built on Apple's **FSKit**.
 
