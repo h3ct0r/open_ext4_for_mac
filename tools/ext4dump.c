@@ -755,6 +755,89 @@ static void walk_dir(walk_ctx *w, uint32_t ino, const char *path)
         fprintf(stderr, "  !! readdir(%s) failed: %s\n", path, ext4b_strerror(r));
 }
 
+/* ------------------------------------------------------------ xattrwalk -- */
+/*
+ * Attributes of EVERY inode reachable from a directory, not one named file.
+ *
+ * `xattr <path>` needs a path, and a path needs the tree to be walkable to
+ * that point. The in-process fuzzer does not: it lists attributes on every
+ * inode a directory hands it, which is how it reached a heap-buffer-overflow
+ * in ext4_xattr_is_ibody_valid on an image where the named file could not be
+ * resolved at all. A finding the release tool cannot reproduce is a finding
+ * nobody else can confirm, so the tool grew the same walk.
+ *
+ * Both halves, because they are different parsers: listing walks the entry
+ * headers, and getxattr is what reads a value offset.
+ */
+typedef struct {
+    ext4b_device *dev;
+    uint32_t      inode;
+    unsigned long inodes;
+    unsigned long attrs;
+    char          names[32][256];
+    size_t        nnames;
+} xwalk_ctx;
+
+static bool xwalk_name(void *ctx, const char *name, size_t name_len)
+{
+    xwalk_ctx *x = (xwalk_ctx *)ctx;
+    if (x->nnames >= 32)
+        return false;
+    if (name_len > 255)
+        name_len = 255;
+    memcpy(x->names[x->nnames], name, name_len);
+    x->names[x->nnames][name_len] = '\0';
+    x->nnames++;
+    x->attrs++;
+    return true;
+}
+
+static void xwalk_inode(xwalk_ctx *x, uint32_t ino)
+{
+    static uint8_t value[65536];
+    x->inodes++;
+    x->nnames = 0;
+    if (ext4b_listxattr(x->dev, ino, xwalk_name, x) != 0)
+        return;
+    for (size_t i = 0; i < x->nnames; i++) {
+        size_t vlen = 0;
+        (void)ext4b_getxattr(x->dev, ino, x->names[i], value, sizeof value, &vlen);
+    }
+}
+
+static bool xwalk_dirent(void *ctx, const char *name, size_t name_len,
+                         uint32_t ino, ext4b_item_type type,
+                         uint64_t next_cookie);
+
+static void xwalk_dir(xwalk_ctx *x, uint32_t ino, unsigned depth)
+{
+    if (depth > 32)
+        return;
+    xwalk_inode(x, ino);
+    uint32_t saved = x->inode;
+    x->inode = depth;
+    (void)ext4b_readdir(x->dev, ino, 0, xwalk_dirent, x);
+    x->inode = saved;
+}
+
+static bool xwalk_dirent(void *ctx, const char *name, size_t name_len,
+                         uint32_t ino, ext4b_item_type type,
+                         uint64_t next_cookie)
+{
+    (void)next_cookie;
+    xwalk_ctx *x = (xwalk_ctx *)ctx;
+    if ((name_len == 1 && name[0] == '.') ||
+        (name_len == 2 && name[0] == '.' && name[1] == '.'))
+        return true;
+    if (x->inodes > 4096)
+        return false;
+    if (type == EXT4B_TYPE_DIR)
+        xwalk_dir(x, ino, (unsigned)x->inode + 1);
+    else
+        xwalk_inode(x, ino);
+    return true;
+}
+
 /* ----------------------------------------------------------------- main -- */
 
 static int cmd_cat(ext4b_device *dev, const char *path);
@@ -1337,6 +1420,10 @@ int main(int argc, char **argv)
         "                     extents per file and bytes per extent, which\n"
         "                     is what e2fsck's %% non-contiguous cannot say\n"
             "  xattr <path>       list extended attributes\n"
+            "  xattrwalk [path]   list and read back the attributes of every\n"
+            "                     inode under path -- the walk a mounted\n"
+            "                     volume does, which a named-file verb\n"
+            "                     cannot reach on a damaged tree\n"
             "  df                 free/available space as the OS is told it\n"
             "  groups [bad]       per-group free counts the allocator uses\n"
             "                     ('bad' lists only the groups that differ)\n"
@@ -1795,6 +1882,16 @@ int main(int argc, char **argv)
         r = ext4b_listxattr(dev, ino, on_xattr, NULL);
         if (r != 0)
             fprintf(stderr, "listxattr: %s\n", ext4b_strerror(r));
+
+    } else if (strcmp(cmd, "xattrwalk") == 0) {
+        const char *path = (argc > 3) ? argv[3] : "/";
+        uint32_t ino = resolve(dev, path, NULL);
+        if (!ino) { rc = 1; goto unmount; }
+        xwalk_ctx x;
+        memset(&x, 0, sizeof x);
+        x.dev = dev;
+        xwalk_dir(&x, ino, 0);
+        printf("%lu inode(s), %lu attribute(s)\n", x.inodes, x.attrs);
 
     } else if (strcmp(cmd, "getxattr") == 0) {
         /* Reads one attribute by name, and -- the reason this exists -- prints

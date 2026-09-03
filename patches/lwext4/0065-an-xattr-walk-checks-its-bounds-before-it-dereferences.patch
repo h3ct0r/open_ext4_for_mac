@@ -1,0 +1,109 @@
+Subject: an xattr walk checks its bounds before it dereferences, not after
+
+ext4_xattr_is_ibody_valid() read three things before it had established
+that any of them were inside the inode buffer:
+
+  * the header's magic number. EXT4_XATTR_IHDR places the header at
+    inode + 128 + i_extra_isize, and i_extra_isize comes off the medium,
+    so a corrupt value puts the header past the end of the inode.
+  * min_offs, computed as end - base, which underflows into an enormous
+    size_t when base is already past end.
+  * the first entry's four bytes, through EXT4_XATTR_IS_LAST_ENTRY, in
+    the loop's own condition -- before any bound was checked.
+
+The loop's guard against walking off the end lived inside its body, after
+the entry's fields had already been read, so it protected the entry after
+next and not the one in hand.
+
+    ERROR: AddressSanitizer: heap-buffer-overflow
+      ext4_xattr_is_ibody_valid ext4_xattr.c:591
+      ext4_xattr_list <- ext4b_listxattr
+
+Found by fuzzing, in a thirty-second campaign. Delta-minimized to ONE
+byte: offset 0x828 of the seed, which is block 2 byte 40 -- group
+descriptor 1's bg_inode_table_lo. 0x27 becomes 0x00, the group's inode
+table moves 39 blocks earlier into the metadata region, and the inode
+read from there is whatever the bitmaps happen to contain.
+
+Both walks now check bounds before dereferencing: four bytes to ask
+whether an entry is the terminator, the whole struct before reading its
+fields. The block walk's first entry is always in range -- it sits 32
+bytes into a block -- but its loop had the same shape and now has the
+same guard.
+
+Fixture Tests/fixtures/hostile/0004-inode-table-moved-under-an-xattr-walk.img.gz.
+
+--- a/src/ext4_xattr.c
++++ b/src/ext4_xattr.c
+@@ -528,8 +528,20 @@
+ 	 * Check if those entries are maliciously corrupted to inflict harm
+ 	 * upon us.
+ 	 */
+-	for (; !EXT4_XATTR_IS_LAST_ENTRY(entry);
+-	     entry = EXT4_XATTR_NEXT(entry)) {
++	for (;; entry = EXT4_XATTR_NEXT(entry)) {
++		/* The same bounds-before-dereference as the ibody walk. The
++		 * first entry here is always in range -- it sits 32 bytes into
++		 * a block -- but the loop advances by a length taken from the
++		 * medium, and the check that used to guard that was inside the
++		 * body, after the fields had already been read. */
++		if ((char *)entry + sizeof(uint32_t) > (char *)end)
++			return false;
++		if (EXT4_XATTR_IS_LAST_ENTRY(entry))
++			break;
++		if ((char *)entry + sizeof(struct ext4_xattr_entry) >
++		    (char *)end)
++			return false;
++
+ 		if (!to_le32(entry->e_value_size) &&
+ 		    to_le16(entry->e_value_offs))
+ 			return false;
+@@ -583,6 +595,24 @@
+ 	entry = EXT4_XATTR_IFIRST(iheader);
+ 	base = iheader;
+ 	end = (char *)inode_ref->inode + inode_size;
++
++	/*
++	 * Where the header lands is decided by i_extra_isize, which comes off
++	 * the medium: EXT4_XATTR_IHDR adds it to the inode pointer, so a
++	 * corrupt value puts the header -- and with it the first entry --
++	 * past the end of the inode buffer. Everything below dereferences
++	 * both, starting with the magic number, and min_offs (end - base)
++	 * underflows into an enormous size_t on the way.
++	 *
++	 * Found by fuzzing: one byte changed in a group descriptor moved a
++	 * group's inode table 39 blocks earlier, into the metadata region, and
++	 * listing one file's attributes read off the end of the inode table
++	 * block.
++	 */
++	if ((char *)iheader < (char *)inode_ref->inode ||
++	    (char *)entry + sizeof(uint32_t) > (char *)end)
++		return false;
++
+ 	min_offs = (char *)end - (char *)base;
+ 
+ 	/*
+@@ -595,8 +625,21 @@
+ 	 * Check if those entries are maliciously corrupted to inflict harm
+ 	 * upon us.
+ 	 */
+-	for (; !EXT4_XATTR_IS_LAST_ENTRY(entry);
+-	     entry = EXT4_XATTR_NEXT(entry)) {
++	for (;; entry = EXT4_XATTR_NEXT(entry)) {
++		/*
++		 * Bounds before the dereference, not after. The terminator is
++		 * four zero bytes, so four is what has to be readable to ask
++		 * whether this is the last entry; a real entry needs the whole
++		 * struct before its fields can be read.
++		 */
++		if ((char *)entry + sizeof(uint32_t) > (char *)end)
++			return false;
++		if (EXT4_XATTR_IS_LAST_ENTRY(entry))
++			break;
++		if ((char *)entry + sizeof(struct ext4_xattr_entry) >
++		    (char *)end)
++			return false;
++
+ 		if (!to_le32(entry->e_value_size) &&
+ 		    to_le16(entry->e_value_offs))
+ 			return false;
