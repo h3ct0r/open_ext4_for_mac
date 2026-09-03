@@ -1280,6 +1280,54 @@ int ext4b_mount(ext4b_device *dev, bool read_only)
             else
                 bridge_logf(1, "journal replayed in %llu ms",
                             (unsigned long long)(mono_ms() - t0));
+
+            /*
+             * And re-validate the superblock, because recovery can have
+             * replaced it.
+             *
+             * jbd2 replays whatever the log says, by block number, and block
+             * 1 of a 1 KiB volume is the superblock. Patch 0023 gave that
+             * branch a writer; nothing gave it a reader that asks whether
+             * what landed is still a filesystem. A log staging garbage for
+             * block 1 -- which is four debugfs commands to produce -- left
+             * the driver holding a superblock whose s_log_block_size was
+             * 955747801, and the very next thing it did was shift by it:
+             *
+             *   ext4_super.h:95: runtime error: shift exponent 955747801 is
+             *   too large for 32-bit type 'int'
+             *
+             * ext4b_probe reads the superblock from the medium and applies
+             * every gate above, so calling it again is exactly the question
+             * that needs asking. A volume that recovery has made unreadable
+             * is not one to keep mounting: unwind and refuse, and say which
+             * of the two states the user is in, because "it mounted before
+             * the crash and not after" is otherwise unattributable.
+             */
+            ext4b_probe_info after;
+            int pr = ext4b_probe(dev, &after);
+            if (pr != EOK || after.verdict == EXT4B_PROBE_NOT_EXT ||
+                after.verdict == EXT4B_PROBE_UNSUPPORTED) {
+                bridge_logf(3, "journal replay left an unusable superblock "
+                               "(%s); refusing the mount. The log replayed "
+                               "over the superblock, which means the volume "
+                               "needs e2fsck, not a retry",
+                            pr != EOK ? "unreadable"
+                                      : (after.unsupported[0] ? after.unsupported
+                                                              : "not ext"));
+                ext4_umount(BRIDGE_MOUNT_POINT);
+                ext4_device_unregister(BRIDGE_DEV_NAME);
+                dev->mounted = false;
+                return EIO;
+            }
+            if (after.verdict == EXT4B_PROBE_READ_ONLY) {
+                bridge_logf(3, "journal replay left a volume that can only be "
+                               "read (%s); refusing the read-write mount",
+                            after.unsupported);
+                ext4_umount(BRIDGE_MOUNT_POINT);
+                ext4_device_unregister(BRIDGE_DEV_NAME);
+                dev->mounted = false;
+                return EROFS;
+            }
         }
 
         /*

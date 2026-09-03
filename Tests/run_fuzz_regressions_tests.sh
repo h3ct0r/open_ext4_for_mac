@@ -114,7 +114,12 @@ while read -r file mode verbs fix note; do
 
   # rw rows additionally take the write path and then look at what it left.
   if [ "$mode" = "rw" ] && [ "$failed" -eq 0 ]; then
-    run_deadline 60 "$DUMP" "$img" script - >/dev/null 2>&1 <<'SCRIPT'
+    # The script's OUTPUT matters as much as its exit code, and discarding it
+    # is how the first version of this suite reported a pass on a fixture
+    # whose whole finding was a "runtime error:" line printed during journal
+    # replay. UBSan without -fno-sanitize-recover prints and carries on, so
+    # the exit code says nothing.
+    run_deadline 60 "$DUMP" "$img" script - > "$WORK/rw-out.txt" 2>&1 <<'SCRIPT'
 mkdir /hostile
 create /hostile/a
 write /hostile/a some-bytes
@@ -123,6 +128,10 @@ SCRIPT
     rc=$?
     if [ "$rc" -ge 128 ]; then
       bad "$file: the write path does not crash or hang" "rc=$rc (fix: $fix)"
+      failed=1
+    elif grep -qE 'AddressSanitizer|LeakSanitizer|runtime error:' "$WORK/rw-out.txt"; then
+      bad "$file: the write path is free of sanitizer reports" \
+          "$(grep -m1 -E 'AddressSanitizer|runtime error:' "$WORK/rw-out.txt")"
       failed=1
     else
       out=$(run_deadline 30 "$DUMP" "$img" check 2>&1); rc=$?

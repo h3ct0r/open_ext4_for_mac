@@ -1,0 +1,15 @@
+{
+  "id": "0005",
+  "slug": "a-journal-that-replays-the-superblock",
+  "found_by": "the in-process fuzzer, read-write mode, on the seed built to carry an unreplayed journal",
+  "base": "an early version of Tests/fuzz/make_seeds.sh seed s06, whose recipe staged /dev/urandom for journal blocks 1, 2 and 3",
+  "edits": [
+    {
+      "what": "a committed journal transaction staging arbitrary bytes for block 1, which on a 1 KiB volume is the superblock"
+    }
+  ],
+  "symptom": "jbd_recover replays the log by block number, reloads the superblock afterwards (patch 0023, correctly, so the flag edits that follow do not run on a stale copy), and then believes what it loaded. s_log_block_size came back as 955747801 and the next thing the code did was shift by it: ext4_super.h:95, 'shift exponent 955747801 is too large for 32-bit type int'. The flag edits below would then have written that superblock back over the medium with RECOVER cleared.",
+  "note": "The seed recipe was the bug's discoverer and its cause. s06 now stages inode-table blocks with their own current contents, so replay is a no-op that still has to be performed; this image keeps the hostile version.",
+  "fixed_by": "patches/lwext4/0066-a-journal-that-replays-a-superblock-is-not-to-be-believed.patch, plus a re-probe after replay in ext4b_mount (Core/shim/ext4_bridge.c)",
+  "reproduce": "build/bin/ext4dump <img> mkdir /x   (any write verb forces a read-write mount, which replays)"
+}

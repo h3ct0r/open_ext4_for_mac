@@ -1,0 +1,134 @@
+Subject: a journal that replays a superblock is not to be believed
+
+jbd2 replays whatever the log holds, by block number, and block 1 of a
+1 KiB volume is the superblock. Patch 0023 gave that branch a writer;
+nothing gave it a reader that asks whether what landed is still a
+filesystem.
+
+The reload after replay -- added by 0023, and correct, because the flag
+edits and orphan cleanup that follow must not run on a stale superblock
+-- loads whatever is on the medium. A log staging arbitrary bytes for
+block 1 is four debugfs commands to produce, and it is also what a torn
+write into a journal can leave. The very next thing the code does is
+shift by s_log_block_size:
+
+    Core/lwext4/include/ext4_super.h:95:14: runtime error: shift exponent
+    955747801 is too large for 32-bit type 'int'
+
+and the flag edits below would then write that superblock back out over
+the medium, so a volume that recovery could not fix would come back with
+RECOVER cleared and no record that anything went wrong.
+
+Two changes, at two levels:
+
+* jbd_recover checks the superblock it just reloaded -- magic, and a
+  block-size shift ext4 can actually produce -- and fails with EIO when
+  it does not. Recovery cannot repair this and must not paper over it:
+  EXT4_FINCOM_RECOVER stays set, and e2fsck gets the volume.
+
+* ext4_sb_get_block_size clamps the shift. It is an inline accessor with
+  no way to report an error, and every caller in the tree shifts by
+  whatever it returns, so undefined behaviour there is reachable from
+  anywhere a superblock has been read. The callers that matter check the
+  superblock themselves; this is so that the ones that do not cannot
+  invoke UB while they are getting there.
+
+Found by fuzzing, in the read-write pass, on the seed built to carry an
+unreplayed journal -- the seed recipe itself was staging /dev/urandom for
+blocks 1, 2 and 3. That recipe is fixed (the seed now stages inode-table
+blocks with their own contents, so replay is a no-op that still has to be
+performed) and the hostile version is kept as a fixture.
+
+Fixture Tests/fixtures/hostile/0005-a-journal-that-replays-the-superblock.img.gz.
+
+--- a/include/ext4_super.h
++++ b/include/ext4_super.h
+@@ -92,7 +92,19 @@
+  * @return  block size in bytes*/
+ static inline uint32_t ext4_sb_get_block_size(struct ext4_sblock *s)
+ {
+-	return 1024 << to_le32(s->log_block_size);
++	uint32_t log = to_le32(s->log_block_size);
++
++	/* ext4 tops out at 64 KiB blocks, so anything above 6 is corruption --
++	 * and shifting by it is undefined, not merely wrong. This is not a
++	 * theoretical guard: a journal that replayed arbitrary bytes over the
++	 * superblock left 955747801 here, and every caller of this function
++	 * then shifted by it. Clamped rather than refused because this is an
++	 * inline accessor with no way to report; the callers that matter check
++	 * the superblock themselves. */
++	if (log > 6)
++		log = 6;
++
++	return 1024u << log;
+ }
+ 
+ /**@brief   Block group descriptor size.
+--- a/src/ext4_journal.c
++++ b/src/ext4_journal.c
+@@ -1972,22 +1972,50 @@
+ 		 * vanished at exactly this seam and stranded its inode. */
+ 		(void)ext4_sb_read(jbd_fs->inode_ref.fs->bdev,
+ 				   &jbd_fs->inode_ref.fs->sb);
+-		/* If we successfully replay the journal,
+-		 * clear EXT4_FINCOM_RECOVER flag on the
+-		 * ext4 superblock, and set the start of
+-		 * journal to 0.*/
+-		uint32_t features_incompatible =
+-			ext4_get32(&jbd_fs->inode_ref.fs->sb,
++
++		/* And ask whether what came back is still a filesystem.
++		 *
++		 * The log replays whatever it holds, by block number. A log
++		 * that stages arbitrary bytes for block 1 of a 1 KiB volume --
++		 * four debugfs commands to produce, and what a torn write to a
++		 * journal can leave -- replaces the superblock with them, and
++		 * this reload then loads them. Everything after this point
++		 * believes the result: the first thing that happens is a shift
++		 * by s_log_block_size, which for the value one such log left
++		 * (955747801) is undefined behaviour, and the flag edits below
++		 * would write the garbage back out over the medium.
++		 *
++		 * Recovery cannot repair this and must not paper over it. Fail,
++		 * leave EXT4_FINCOM_RECOVER set, and let e2fsck have it. */
++		if (ext4_get16(&jbd_fs->inode_ref.fs->sb, magic) !=
++			EXT4_SUPERBLOCK_MAGIC ||
++		    ext4_get32(&jbd_fs->inode_ref.fs->sb, log_block_size) > 6) {
++			ext4_dbg(DEBUG_JBD, DBG_ERROR
++				 "replay left an unusable superblock: magic "
++				 "0x%04" PRIx16 ", log_block_size %" PRIu32
++				 "\n",
++				 ext4_get16(&jbd_fs->inode_ref.fs->sb, magic),
++				 ext4_get32(&jbd_fs->inode_ref.fs->sb,
++					    log_block_size));
++			r = EIO;
++		} else {
++			/* If we successfully replay the journal,
++			 * clear EXT4_FINCOM_RECOVER flag on the
++			 * ext4 superblock, and set the start of
++			 * journal to 0.*/
++			uint32_t features_incompatible =
++				ext4_get32(&jbd_fs->inode_ref.fs->sb,
++					   features_incompatible);
++			jbd_set32(&jbd_fs->sb, start, 0);
++			jbd_set32(&jbd_fs->sb, sequence, info.last_trans_id);
++			features_incompatible &= ~EXT4_FINCOM_RECOVER;
++			ext4_set32(&jbd_fs->inode_ref.fs->sb,
++				   features_incompatible,
+ 				   features_incompatible);
+-		jbd_set32(&jbd_fs->sb, start, 0);
+-		jbd_set32(&jbd_fs->sb, sequence, info.last_trans_id);
+-		features_incompatible &= ~EXT4_FINCOM_RECOVER;
+-		ext4_set32(&jbd_fs->inode_ref.fs->sb,
+-			   features_incompatible,
+-			   features_incompatible);
+-		jbd_fs->dirty = true;
+-		r = ext4_sb_write(jbd_fs->bdev,
+-				  &jbd_fs->inode_ref.fs->sb);
++			jbd_fs->dirty = true;
++			r = ext4_sb_write(jbd_fs->bdev,
++					  &jbd_fs->inode_ref.fs->sb);
++		}
+ 	}
+ 
+ 	/* The shape of what just happened, for the host to log. The numbers
