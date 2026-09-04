@@ -246,6 +246,11 @@ stage "5e. user-visible events" bash Tests/run_events_tests.sh
 # 5e above builds the app if it is not there, which is what this runs.
 stage "5f. this build checks itself" "$ROOT/build/Ext4Mac.app/Contents/MacOS/Ext4Mac" selftest
 
+# The dry-run uninstall names every artifact an install creates; the release
+# check reads the version out of the built bundles.
+stage "5g. uninstall names everything" bash Tests/run_uninstall_tests.sh
+stage "5h. the build is the version it says" bash scripts/check_release.sh
+
 if docker info >/dev/null 2>&1; then
   stage "6. LUKS containers" bash Tests/run_luks_tests.sh
   stage "7. crash consistency" bash Tests/run_crash_tests.sh

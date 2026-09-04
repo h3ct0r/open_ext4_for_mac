@@ -20,10 +20,13 @@
 	<array>
 		<string>MacOSX</string>
 	</array>
+	<!-- Placeholders. The build stamps both from the VERSION file and the
+	     commit count (see the plutil recipes in the Makefile); a bundle that
+	     still says 0.0.0 was copied out of the source tree, not built. -->
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>0.0.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>0</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>15.4</string>
 	<key>LSUIElement</key>

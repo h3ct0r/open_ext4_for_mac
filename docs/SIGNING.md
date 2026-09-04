@@ -251,6 +251,34 @@ Note that the Mac App Store is not an option for this project: it vendors
 lwext4, so the combined work is GPL, and the App Store terms are incompatible
 with the GPL.
 
+## Releasing from CI
+
+`make release VERSION=x.y.z` is the local half: it checks the changelog,
+builds and signs here, then commits and tags. `git push --tags` starts
+`.github/workflows/release.yml`, which runs `scripts/ci_release.sh` on a
+macOS runner: imports the certificate into a temporary keychain, signs,
+notarizes, staples, verifies with `spctl`, and publishes the DMG as a GitHub
+Release with the changelog section as its notes. The keychain is deleted in
+an `always()` step. A `workflow_dispatch` with `dry_run` stops after the
+signed, checked DMG -- the way to prove the signing path on a branch without
+notarizing or publishing anything.
+
+The repository secrets it reads, and how each is made:
+
+| secret | what | how |
+|---|---|---|
+| `DEVELOPER_ID_P12` | the Developer ID Application identity | Keychain Access -> the certificate -> Export as .p12 with a password; then `base64 -i cert.p12 \| pbcopy` |
+| `DEVELOPER_ID_P12_PASSWORD` | that password | as chosen at export |
+| `EXT_PROVISIONING_PROFILE` | `Extension/Ext4FS.provisionprofile` | `base64 -i Extension/Ext4FS.provisionprofile \| pbcopy` |
+| `APP_PROVISIONING_PROFILE` | `App/Ext4Mac.provisionprofile` | `base64 -i App/Ext4Mac.provisionprofile \| pbcopy` |
+| `NOTARY_KEY` | an App Store Connect API key (.p8) with the Developer role | App Store Connect -> Users and Access -> Integrations -> App Store Connect API -> generate; `base64 -i AuthKey_XXXX.p8 \| pbcopy` |
+| `NOTARY_KEY_ID` | its Key ID | shown beside the key |
+| `NOTARY_ISSUER` | the Issuer ID | shown at the top of that page |
+
+`GITHUB_TOKEN` is the workflow's own. Set the seven under Settings ->
+Secrets and variables -> Actions. Nothing is written to the login keychain on
+the runner, and a failed run leaves only its logs.
+
 ## Can a free Apple account be used?
 
 **No.** Verified against Apple's

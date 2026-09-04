@@ -1,0 +1,79 @@
+# The remote half of a release. `make release VERSION=x.y.z` on the developer's
+# Mac wrote VERSION, checked the changelog, built and signed locally, committed
+# and tagged; `git push --tags` starts this, which signs on a runner with the
+# certificate held as a repository secret, notarizes, staples, verifies with
+# spctl, and publishes the DMG as a GitHub Release with the changelog section
+# as its notes.
+#
+# The YAML holds no logic: scripts/ci_release.sh does the work and runs the
+# same way locally. Secrets are listed in docs/SIGNING.md with how to create
+# each. The temporary keychain the certificate is imported into is deleted in
+# an always() step, so a failed run leaves nothing behind.
+#
+# workflow_dispatch with dry_run proves the signing path on a branch -- signed
+# and checked DMG as an artifact, nothing notarized, nothing published.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: sign and check only; do not notarize or publish
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: sign, notarize, publish (macOS 26)
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: trust the checkout and pick the SDK
+        run: |
+          git config --global --add safe.directory "*"
+          sudo xcode-select -s /Applications/Xcode_26.5.app/Contents/Developer
+          echo "SDK: $(xcrun --show-sdk-version)"
+
+      - name: install e2fsprogs
+        env:
+          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
+        run: brew install e2fsprogs
+
+      - name: sign, check, and unless dry-run notarize and publish
+        env:
+          DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '1' || '' }}
+          DEVELOPER_ID_P12: ${{ secrets.DEVELOPER_ID_P12 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          EXT_PROVISIONING_PROFILE: ${{ secrets.EXT_PROVISIONING_PROFILE }}
+          APP_PROVISIONING_PROFILE: ${{ secrets.APP_PROVISIONING_PROFILE }}
+          NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/ci_release.sh
+
+      - name: the signed DMG, as an artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dmg
+          path: build/Ext4Mac-*.dmg
+          if-no-files-found: ignore
+          retention-days: 30
+
+      # Whatever happened above, the certificate does not stay on the runner.
+      - name: delete the temporary keychain
+        if: always()
+        run: |
+          security delete-keychain "${RUNNER_TEMP}/ext4-release.keychain-db" 2>/dev/null || true
+          rm -f Extension/Ext4FS.provisionprofile App/Ext4Mac.provisionprofile

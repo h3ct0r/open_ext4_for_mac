@@ -119,6 +119,9 @@ else
 fi
 
 # The hostile fixture count is a claim the document makes about the suite.
+# It has already earned its keep: on its first CI run it reported 14 rows
+# against a document saying 17, and the difference was a fixtures cache
+# restoring a stale hostile/ directory over the checkout on every run.
 hostile=$(grep -cE '^[0-9]{4}-' "$ROOT/Tests/fixtures/hostile/MANIFEST")
 if grep -qE "\b$hostile hostile" "$DOC"; then
   ok "the hostile-fixture count is current ($hostile)"

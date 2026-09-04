@@ -128,6 +128,15 @@ struct Ext4MacApp {
             // log line that read exactly like the new build and was not.
             let appID = Bundle.main.object(forInfoDictionaryKey: "Ext4BuildID")
                         as? String ?? "unknown"
+            let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString")
+                          as? String ?? "0.0.0"
+            let buildNo = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion")
+                          as? String ?? "0"
+            // Three numbers, three questions. The version is what a release is
+            // called; the build number is how many commits it is on; the build
+            // id is which commit, and whether the tree was dirty. 0.0.0 means
+            // the bundle was copied out of the source tree and never built.
+            print("version:   \(version) (build \(buildNo))")
             print("app:       \(appID)")
             print("bundle:    \(Bundle.main.bundleURL.path)")
 

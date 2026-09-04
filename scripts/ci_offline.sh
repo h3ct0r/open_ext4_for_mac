@@ -119,6 +119,11 @@ stage events         bash Tests/run_events_tests.sh
 # only one of them is worth shipping on.
 stage selftest       ./build/Ext4Mac.app/Contents/MacOS/Ext4Mac selftest
 
+# Does the built app carry the version the tree says, and does the uninstall
+# name everything the install creates. Neither touches the machine.
+stage release        bash scripts/check_release.sh
+stage uninstall      bash Tests/run_uninstall_tests.sh
+
 # Suites added by later phases. Each is listed the day it exists, so that
 # forgetting to register one shows up as a shorter summary rather than as
 # nothing at all:

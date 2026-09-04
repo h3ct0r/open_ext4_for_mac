@@ -9,6 +9,15 @@
 HOST_OS       := $(shell uname -s)
 
 DEPLOY_TARGET ?= 15.4
+
+# See the distribution section for why these are here and not in a plist.
+VERSION      := $(strip $(shell cat VERSION 2>/dev/null || echo 0.0.0))
+BUILD_NUMBER := $(strip $(shell git rev-list --count HEAD 2>/dev/null || echo 0))
+# Declared and deliberately unused. The build hardcodes arm64 where it names an
+# architecture at all, and this project is Apple Silicon only -- no Intel or
+# universal build is produced or tested, and README says so. ARCHS stays as a
+# name for the day that changes, so the decision is visible here rather than
+# rediscovered in three -target flags.
 ARCHS         ?= arm64
 BUILD         ?= build
 CONFIG        ?= release
@@ -207,7 +216,7 @@ ARGON2_CFLAGS := $(CFLAGS) $(NO_WARN) -I$(ARGON2_DIR)
 CORE_LIB      := $(BUILD)/lib/$(CONFIG)/libext4core.a
 CORE_TEST_LIB := $(BUILD)/lib/$(CONFIG)/libext4core-test.a
 
-.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-fuzz test-fuzz-regressions test-reorder test-crypto test-events test-envelope test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline ci-linux print-fuzz-flags fuzz-build fuzz fuzz-rw fuzz-repro fuzz-minimize fuzz-merge fuzz-check fuzz-cov fuzz-cov-gate
+.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-fuzz test-fuzz-regressions test-reorder test-crypto test-events test-envelope test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline ci-linux release changelog-draft check-release uninstall test-uninstall print-fuzz-flags fuzz-build fuzz fuzz-rw fuzz-repro fuzz-minimize fuzz-merge fuzz-check fuzz-cov fuzz-cov-gate
 
 all: app
 
@@ -949,6 +958,8 @@ $(APPEX): $(SWIFT_SRCS) $(CORE_LIB) Extension/Info.plist $(BUILD)/.build-id
 	    -o "$(APPEX)/Contents/MacOS/$(EXT_NAME)"
 	@cp Extension/Info.plist "$(APPEX)/Contents/Info.plist"
 	@plutil -replace Ext4BuildID -string "$(BUILD_ID)" "$(APPEX)/Contents/Info.plist"
+	@plutil -replace CFBundleShortVersionString -string "$(VERSION)" "$(APPEX)/Contents/Info.plist"
+	@plutil -replace CFBundleVersion -string "$(BUILD_NUMBER)" "$(APPEX)/Contents/Info.plist"
 	@echo "built $(APPEX)"
 
 # The container app exists only to host the extension: macOS discovers FSKit
@@ -969,6 +980,8 @@ $(BUILD)/$(APP_NAME).app/Contents/Info.plist: App/Info.plist $(BUILD)/.build-id
 	@mkdir -p $(dir $@)
 	@cp $< $@
 	@plutil -replace Ext4BuildID -string "$(BUILD_ID)" $@
+	@plutil -replace CFBundleShortVersionString -string "$(VERSION)" $@
+	@plutil -replace CFBundleVersion -string "$(BUILD_NUMBER)" $@
 
 # The app links the core so it can read a LUKS header and run the key
 # derivation itself: a gigabyte of argon2id belongs in an ordinary application,
@@ -1011,9 +1024,13 @@ sign: app entitlements check-ship-surface
 	@SIGN_KEYCHAIN="$(SIGN_KEYCHAIN)" bash scripts/sign.sh "$(BUILD)/$(APP_NAME).app" "$(SIGN_ID)"
 
 # ------------------------------------------------------------- distribution --
-# The version drives the DMG's filename. One place, read from the app's plist
-# so it cannot drift from what the bundle reports.
-VERSION := $(shell plutil -extract CFBundleShortVersionString raw App/Info.plist 2>/dev/null || echo 0.0.0)
+# The version is the VERSION file and nothing else. It used to be read back
+# out of App/Info.plist, which was hardcoded 0.1.0 in two plists that nothing
+# updated -- so the DMG was named after a number no release process had ever
+# set. Now the file is the source, both plists are stamped from it at build
+# (see the two plutil recipes above), and `make release VERSION=x.y.z` is the
+# only thing that writes it. The build number is the commit count, which is
+# monotonic on master and costs nothing to compute.
 DMG     := $(BUILD)/$(APP_NAME)-$(VERSION).dmg
 
 # Build the distributable disk image from the signed app. Notarize it before
@@ -1035,6 +1052,72 @@ notarize:
 	xcrun stapler staple "$(DMG)"
 	@echo "stapled $(DMG); verifying it passes Gatekeeper:"
 	@spctl -a -vvv -t open --context context:primary-signature "$(DMG)" 2>&1 | head -3 || true
+
+# The local half of a release. The remote half -- signing on a runner,
+# notarizing, publishing -- is .github/workflows/release.yml, triggered by the
+# tag this pushes. Everything here refuses before the tag exists, so a failed
+# release leaves nothing to clean up but a working tree.
+#
+#   make release VERSION=0.2.0
+#
+# Requires: a clean tree, no v0.2.0 tag, and a "## [0.2.0]" section in
+# CHANGELOG.md -- written by hand, from `make changelog-draft`. Then: VERSION
+# is written, committed as "Release 0.2.0", tagged v0.2.0, and the signed DMG
+# is built and checked locally so the tag is never pushed on a build that
+# cannot produce one. Pushing the tag is left to you: `git push --tags`.
+release:
+	@test -n "$(RELEASE_VERSION)" || { echo "usage: make release VERSION=x.y.z"; exit 2; }
+	@echo "$(RELEASE_VERSION)" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$$' || { echo "not a version: $(RELEASE_VERSION)"; exit 2; }
+	@test -z "$$(git status --porcelain)" || { echo "the working tree is not clean"; git status --short; exit 1; }
+	@! git rev-parse -q --verify "refs/tags/v$(RELEASE_VERSION)" >/dev/null || { echo "tag v$(RELEASE_VERSION) already exists"; exit 1; }
+	@grep -q "^## \[$(RELEASE_VERSION)\]" CHANGELOG.md || { echo "CHANGELOG.md has no '## [$(RELEASE_VERSION)]' section; write it first (make changelog-draft)"; exit 1; }
+	@printf '%s\n' "$(RELEASE_VERSION)" > VERSION
+	@# Build, sign and check BEFORE committing or tagging: a release that
+	@# cannot produce its DMG leaves a VERSION file to revert, not a tag.
+	@$(MAKE) --no-print-directory app sign check-signing dmg \
+	  || { git checkout -q -- VERSION; echo "release aborted; nothing committed, nothing tagged"; exit 1; }
+	@bash scripts/check_release.sh \
+	  || { git checkout -q -- VERSION; echo "release aborted; nothing committed, nothing tagged"; exit 1; }
+	@git add VERSION CHANGELOG.md && git commit -q -m "Release $(RELEASE_VERSION)"
+	@git tag -a "v$(RELEASE_VERSION)" -m "Release $(RELEASE_VERSION)"
+	@echo ""
+	@echo "released $(RELEASE_VERSION) locally: $(DMG)"
+	@echo "  git push && git push --tags     # release.yml signs, notarizes and publishes"
+
+# `make release VERSION=x.y.z` -- but VERSION is also the file-derived variable
+# above, and a command-line VERSION= would override it for the whole build,
+# including the plist stamping of a tree that has not been re-versioned yet.
+# So the target reads its argument under another name, and the build keeps
+# reading the file.
+RELEASE_VERSION := $(if $(filter-out $(strip $(shell cat VERSION 2>/dev/null)),$(VERSION)),$(VERSION),)
+
+# The commits since the last tag, sorted into Keep-a-Changelog headings by
+# their first word, for editing into CHANGELOG.md. A draft, not a section: the
+# point of a hand-maintained changelog is that a person decided what mattered.
+changelog-draft:
+	@last=$$(git describe --tags --abbrev=0 2>/dev/null); \
+	  echo "## [Unreleased]  (since $${last:-the beginning})"; echo; \
+	  for h in Added Changed Fixed; do echo "### $$h"; \
+	    git log --no-merges --format='- %s' $${last:+$$last..}HEAD | grep -iE "^- ($$( \
+	      case $$h in Added) echo 'add|new|introduc|creat';; Changed) echo 'chang|mov|rename|switch|now';; Fixed) echo 'fix|bug|crash|hang|overflow|leak|wrong';; esac))" || true; \
+	    echo; done
+
+check-release:
+	@bash scripts/check_release.sh
+
+# Everything an install leaves behind, removed -- or, with DRY_RUN=1, named.
+#
+#   make uninstall DRY_RUN=1     # prints "would: ..." for every step
+#   make uninstall               # refuses: the destructive run is explicit
+#   EXT4_UNINSTALL_FOR_REAL=1 make uninstall
+#
+# One thing it cannot do: the approval toggle in System Settings > Login Items
+# & Extensions is the user's, and no command resets it.
+uninstall:
+	@DRY_RUN="$(DRY_RUN)" bash scripts/uninstall.sh
+
+test-uninstall:
+	@bash Tests/run_uninstall_tests.sh
 
 # Just the staple, for a DMG already notarized in a previous submission.
 staple:
