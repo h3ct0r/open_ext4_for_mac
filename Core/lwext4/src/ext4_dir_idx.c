@@ -647,7 +647,14 @@ static int ext4_dir_dx_get_leaf(struct ext4_hash_info *hinfo,
 		entry_space = entry_space / sizeof(struct ext4_dir_idx_entry);
 
 		if (limit != entry_space) {
-			ext4_block_set(inode_ref->fs->bdev, tmp_blk);
+			/* tmp_blk starts out as the caller's root block, which the
+			 * caller owns and will put on this same error return. Putting
+			 * it here too dropped its reference count to zero and tripped
+			 * the block cache's assertion -- a crash from a lookup in a
+			 * corrupt indexed directory, found by the CI fuzz smoke. Only
+			 * a block this walk acquired is this walk's to put back. */
+			if (tmp_blk != root_block)
+				ext4_block_set(inode_ref->fs->bdev, tmp_blk);
 			return EXT4_ERR_BAD_DX_DIR;
 		}
 
