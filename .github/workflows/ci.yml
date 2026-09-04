@@ -96,7 +96,7 @@ jobs:
       # document said 17, the runner counted 14. The key is bumped so the old
       # archives, which carry the stale directory, are never restored again.
       - name: cache fixtures
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: Tests/fixtures/*.img
           key: fixtures-v2-${{ runner.os }}-${{ hashFiles('Tests/make_fixtures.sh') }}
@@ -264,7 +264,7 @@ jobs:
       # document said 17, the runner counted 14. The key is bumped so the old
       # archives, which carry the stale directory, are never restored again.
       - name: cache fixtures
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: Tests/fixtures/*.img
           key: fixtures-v2-${{ runner.os }}-${{ hashFiles('Tests/make_fixtures.sh') }}
@@ -366,7 +366,7 @@ jobs:
       # grows. The save runs always.
       - name: restore the corpus
         id: corpus
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: .fuzz/corpus
           key: fuzz-corpus-${{ github.ref_name }}-${{ github.run_number }}
@@ -414,7 +414,7 @@ jobs:
 
       - name: save the corpus
         if: always() && env.skip != '1'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: .fuzz/corpus
           key: fuzz-corpus-${{ github.ref_name }}-${{ github.run_number }}
