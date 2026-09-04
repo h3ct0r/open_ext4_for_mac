@@ -1,0 +1,20 @@
+{
+  "id": "0019",
+  "slug": "a-block-bitmap-below-its-own-group",
+  "found_by": "the follow-up owed by commit b341c02: patch 0068 clamped the bit_max loop in ext4_fs_init_block_bitmap, and the three descriptor-derived writes below it -- the block-bitmap block, the inode-bitmap block, and every inode-table block -- were left marking (block - first_bg) with the descriptor value unclamped. Patch 0073 clamped them; this is the fixture that holds it.",
+  "base": "mke2fs -t ext4 -b 1024 -O metadata_csum,^flex_bg,^64bit,^resize_inode,dir_index,extent -N 32 on a 2 MiB volume: two block groups of 16 inodes each, no flex_bg. A dozen files created in root so that some inodes (17..) land in group 1 and a plain 'ls /' has to reference it.",
+  "edits": [
+    {
+      "what": "group 1's descriptor: EXT4_BG_BLOCK_UNINIT set, and bg_block_bitmap_lo changed from 1027 to 100",
+      "note": "100 is a real block on the medium but sits below the group's first block (1025), so bmp_blk - first_bg underflows"
+    },
+    {
+      "what": "group 1's descriptor checksum re-stamped (crc32c, metadata_csum on)",
+      "note": "so ext4_fs_get_block_group_ref accepts the descriptor rather than refusing it before the bitmap is ever materialised"
+    }
+  ],
+  "symptom": "Listing root stats each child, and a child inode in group 1 makes ext4_fs_get_inode_ref take a block-group reference on group 1. The group is BLOCK_UNINIT, so ext4_fs_init_block_bitmap materialises its block bitmap at mount. With flex_bg off the in-group test is bypassed, and the block-bitmap block is marked by (bmp_blk - first_bg) with nothing clamping it: 100 - 1025 underflows to about 4.29 billion, and ext4_bmap_bit_set writes that bit roughly half a gigabyte past the 1 KiB bitmap buffer. AddressSanitizer faults in ext4_bmap_bit_set (ext4_fs.c:393), reached from ext4_fs_get_block_group_ref during an ordinary inode lookup -- an out-of-bounds heap WRITE from mounting and reading a volume.",
+  "fixed_by": "patches/lwext4/0073-the-uninit-group-bitmap-clamps-descriptor-blocks-like-it-clamps-bit-max.patch -- the block-bitmap block, the inode-bitmap block and every inode-table block are marked only if they fall inside this group's bitmap, the same clamp bit_max already carries; a descriptor that disagrees is left for e2fsck.",
+  "reproduce": "build/bin/ext4dump <img> ls /   (or check). ASan fault without the patch, clean with it.",
+  "note_on_detection": "A write overflow whose index underflows to billions, so the target address is unmapped and the sanitizer build reports a fatal signal rather than a redzone hit -- either way make test-asan is where it is caught, like fixtures 0008 and 0004. Under an optimised build it is a wild store that may or may not fault, so a green release run says nothing about it."
+}

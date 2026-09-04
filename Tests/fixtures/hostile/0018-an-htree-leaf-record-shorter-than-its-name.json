@@ -1,0 +1,16 @@
+{
+  "id": "0018",
+  "slug": "an-htree-leaf-record-shorter-than-its-name",
+  "found_by": "the follow-up owed by commit b341c02: the altitude review saw that patch 0067 bounded the LINEAR insert path and its htree-leaf sibling, the splitter, was left unbounded. Patch 0071 fixed the splitter; this is the fixture that holds it.",
+  "base": "ext4dump format 4 1024 on a 2 MiB volume -- lwext4's own mkfs, because it makes the root directory htree-indexed at creation (dx root in block 0, one leaf in block 1) and debugfs only ever builds linear directories. metadata_csum, extent, dir_index, has_journal.",
+  "edits": [
+    {
+      "what": "root's single htree leaf (logical block 1, the one the count-1 dx root points at) overwritten with a repeating 8-byte directory-entry header",
+      "note": "every header is {inode=2, rec_len=8, name_len=255, file_type=1}: a record length of 8, the fixed header alone, but a name that claims 255 bytes -- so 8+name_len exceeds rec_len"
+    }
+  ],
+  "symptom": "A create in root takes the htree path. ext4_dir_dx_add_entry hashes the name, selects the only leaf, and ext4_dir_try_insert_entry (bounded by 0067) rejects the malformed entry with EIO because 8+name_len exceeds its rec_len -- which sends ext4_dir_dx_add_entry into ext4_dir_dx_split_data. That splitter walked the leaf copying each entry into a block-sized scratch buffer: it advanced by the on-disk record length (8) while copying 8+name_len (264 aligned) bytes, so after four entries entry_buffer_ptr was past the 1 KiB entry_buffer. AddressSanitizer heap-buffer-overflow WRITE of size 264 at ext4_dir_idx.c:978 (the memcpy), reached from ext4_dir_add_entry on a create -- an out-of-bounds heap WRITE on a read-write mount.",
+  "fixed_by": "patches/lwext4/0071-htree-leaf-split-bounds-every-length-off-the-medium.patch -- the splitter now bounds the record length it advances by, the 8+name_len copy against both the block and the buffer, and the entry index against sort[], bailing EIO to the caller, which fails the create and hands the volume to e2fsck.",
+  "reproduce": "build/bin/ext4dump <img> script -   with 'mkdir /hostile' (the regression suite's rw script). ASan-clean with the patch, heap-buffer-overflow WRITE without it.",
+  "note_on_detection": "A write overflow, but the stray bytes land only a few hundred past a heap buffer, so it faults only under AddressSanitizer -- the hostile suite catches it as an rw row under make test-asan, exactly as fixtures 0006 and 0007 do. Under an optimised build the write is silent until it corrupts an adjacent allocation."
+}

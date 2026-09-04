@@ -143,7 +143,11 @@ clamp 0068 started, covering the three descriptor-derived writes below the
 one it fixed. Each is an out-of-bounds access off the medium — 0071 and 0073
 are writes reachable from a create and from mount respectively — so they are
 the same class as the fuzzer's finds and are pinned by hostile fixtures the
-same way.
+same way: 0072 by fixture 0012, 0071 by 0018 (an indexed directory whose leaf
+splits over a record shorter than its name), and 0073 by 0019 (a BLOCK_UNINIT
+group whose descriptor points its bitmap below the group). Each was proven
+red-first under `make test-asan` — revert the patch and its fixture faults in
+the sanitizer build naming the site; re-apply it and the suite is green.
 
 0074 is the first finding from CI itself: the fuzz smoke job's first
 successful run produced a read-write mutant on which a create never
