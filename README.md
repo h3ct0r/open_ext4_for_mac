@@ -1,224 +1,172 @@
 # open_ext4_for_mac
 
 [![ci](https://github.com/h3ct0r/open_ext4_for_mac/actions/workflows/ci.yml/badge.svg)](https://github.com/h3ct0r/open_ext4_for_mac/actions/workflows/ci.yml)
+[![licence](https://img.shields.io/github/license/h3ct0r/open_ext4_for_mac)](LICENSE)
+[![platform](https://img.shields.io/badge/macOS-15.4%2B%20%C2%B7%20Apple%20Silicon-black)](#three-things-to-know)
 
-A native, open-source **ext2/ext3/ext4** read-write filesystem driver for macOS,
-built on Apple's **FSKit**.
+**Native ext2 / ext3 / ext4 for macOS, read and write, built on Apple's FSKit.**
 
-No kernel extension. No FUSE. No SIP changes. No proprietary binaries.
-Volumes mount in Finder and behave like any other native disk.
+No kernel extension, no FUSE, no SIP changes, no proprietary binaries. Plug in
+a Linux disk and it appears in Finder like any other volume — encrypted LUKS
+containers included, which macOS otherwise cannot open at all.
 
-## Status
-
-**Reads and writes, and mounts by itself.** Attach an ext2/3/4 disk and it
-appears in Finder like any native volume:
+<!-- hero: docs/images/finder-mounted.png — Finder showing an ext4 volume
+     mounted, with the menu-bar agent visible. Added with the first release. -->
 
 ```
-/dev/disk6 on /Volumes/AUTOMOUNT (ext4, local, nodev, nosuid, journaled,
-                                  noowners, noatime, fskit, mounted by h3ct0r)
+/dev/disk6 on /Volumes/AUTOMOUNT (ext4, local, journaled, fskit, mounted by h3ct0r)
 ```
 
-Through a real mount: nested `mkdir`, create and write, multi-MB files, `cp`,
-symlinks, hard links, rename, `rm`, `rmdir`, extended attributes, and a clean
-unmount that commits the metadata journal. Volumes written entirely on macOS
-are read back byte-for-byte by the real Linux kernel, with nothing in its log.
+## Install
 
-"Journaled" here means ext4's metadata journal, kept by this driver. What it
-does not mean is a device flush: FSKit gives this module no way to ask the
-drive to commit its cache, so the journal's ordering guarantee stops at the
-drive's write cache. What that costs, how it was measured, and what to do
-about it are in [docs/ENVELOPE.md](docs/ENVELOPE.md); the hardware sessions
-behind the numbers are in [docs/HARDWARE.md](docs/HARDWARE.md).
+1. Download `Ext4Mac-x.y.z.dmg` from [Releases](https://github.com/h3ct0r/open_ext4_for_mac/releases)
+   and drag **Ext4Mac** to `/Applications`. *(The first release is in
+   preparation; until it is published, [build from source](#building-from-source).)*
+2. Open Ext4Mac once. It registers the filesystem extension and asks you to
+   approve it.
+3. Approve it in **System Settings → General → Login Items & Extensions →
+   File System Extensions**. macOS grants this by hand only; no app can do it.
+4. Plug in an ext4 disk. It mounts. Encrypted ones ask for a passphrase from
+   the menu bar.
 
-It can also create and rename volumes. Formatting goes through the
-module-agnostic driver macOS ships:
+The step-by-step with screenshots, and what to do when it looks broken but
+is not, is in [docs/INSTALL.md](docs/INSTALL.md).
 
-```bash
-newfs_fskit -t ext4 -L MYDISK /dev/disk5      # ext4, or -g 2 / -g 3
-sudo make install-diskutil                    # and appear in Disk Utility
-```
-
-Validation runs unattended (allow ~20 minutes for the full chain with Docker and the mounted stages; the offline stages alone are a few minutes):
-
-```bash
-make validate
-```
-
-| Stage | Coverage |
-|---|---|
-| read suite | verified against `debugfs` |
-| write suite | `e2fsck` after **every** mutating operation |
-| bounds & semantics | overflow refusals, hostile journal geometry, POSIX edges |
-| format | a geometry sweep, all `e2fsck`-clean; big formats bounded in device commands |
-| open-unlink recovery | the orphan list, and torn ones |
-| crypto & error injection | AES-XTS against OpenSSL; a medium that answers EIO must surface every failure |
-| LUKS containers | judged by real `cryptsetup` |
-| crash consistency | every cut point of the write stream; the Linux kernel replays each journal |
-| reordered writes | the same on a medium that reorders, which is the failure an image cannot produce — and asserts that disabling barriers breaks it |
-| differential vs Linux | both directions, with a silent kernel log |
-| journal replay speed | a deep dirty journal must mount inside DiskArbitration's budget on a modelled USB stick |
-| mounted driver | a live FSKit mount: crash sweeps, encrypted volumes, kill recovery with a timed remount, newfs |
-
-(The suites print their own assertion tallies; the counts grow too often to
-be worth restating here.)
-
-A file deleted while something still has it open goes on ext4's own **orphan
-list**, so a crash in that window is recoverable by the next mount rather than
-a leak — and `chattr +i` / `chattr +a` are honoured, reported to macOS as
-`uchg` / `uappnd`.
-
-**ext4 inside LUKS mounts**, LUKS1 and LUKS2 alike — the one thing macOS
-otherwise cannot open at all, since `cryptsetup` needs device-mapper and
-cannot be ported:
-
-Plug one in and a menu-bar agent asks for the passphrase; after that it mounts
-by itself, under its own name, like any other disk. Or without the GUI:
-
-```bash
-Ext4Mac unlock /dev/disk6            # prompts; derives the master key
-Ext4Mac mount /dev/disk6             # or just plug it in again
-Ext4Mac forget /dev/disk6            # locked again
-Ext4Mac last-error /dev/disk6        # why a disk did not mount, in one screen
-Ext4Mac status                       # the extension, and every volume with
-                                     # something to report
-```
-
-The passphrase is typed into the app and never reaches the sandboxed
-extension, which only ever sees a master key. Everything macOS writes to an
-encrypted volume is handed back to real `cryptsetup` and the Linux kernel to
-read; see [docs/STATUS.md](docs/STATUS.md).
-
-Testing has found over twenty genuine bugs in lwext4 — including one that replayed stale
-journal records over live metadata, and one that hung the driver forever
-instead of failing — plus several of our own. See
-[docs/STATUS.md](docs/STATUS.md) and
-[patches/lwext4/README.md](patches/lwext4/README.md).
-
-> **Everything writable mounts read-write — USB sticks included — and that
-> is a measured decision.** The driver's earliest write path corrupted a
-> pulled stick five times out of five, so for a while removable media was
-> read-only unless a privileged helper daemon confirmed a device cache-flush.
-> Then the question was remeasured on the current direct-I/O write path, as
-> an A/B with that daemon as the control arm: twenty mid-write pulls across
-> five drives — USB-2 sticks through an NVMe SSD behind a bridge chip,
-> fenced and under sustained load — recovered by journal replay to an
-> `e2fsck`-clean filesystem every time, barriered and unbarriered alike
-> ([Tests/run_pull_tests.sh](Tests/run_pull_tests.sh)). The daemon is gone.
->
-> **Eject before unplugging** anyway: a pull mid-write can panic macOS
-> itself (an `IOMediaBSDClient` busy timeout in Apple's storage stack,
-> observed once during that sweep), and the last seconds of unsynced writes
-> are only as durable as any filesystem's. Details in
-> [docs/STATUS.md](docs/STATUS.md). Keep a backup.
-
-## Requirements
-
-- macOS 15.4 or later (developed and tested on macOS 26)
-- **Apple Silicon only.** Intel Macs are not supported: the build targets
-  `arm64`, and no Intel or universal build is produced or tested.
-- Xcode Command Line Tools (full Xcode is **not** required)
-
-To *mount* volumes, additionally:
-
-- A **paid Apple Developer Program** membership — FSKit's
-  `com.apple.developer.fskit.fsmodule` is a restricted entitlement and needs a
-  provisioning profile to authorise it
-
-That is covered under [Building](#building). It is not needed to build the
-driver or to run any of the test suites.
-
-## Building
-
-```bash
-git submodule update --init
-make            # build Ext4Mac.app with the FSKit extension inside
-make test       # read + write suites (needs: brew install e2fsprogs)
-make validate   # everything, including the Linux-kernel stages (needs Docker)
-```
-
-The ext4 core is deliberately decoupled from FSKit, so `make test` and
-`make validate` exercise the real filesystem code against disk images with **no
-Apple account, no signing and no mounting**. Everything below is needed only to
-*mount* volumes.
-
-### Mounting needs a paid Apple Developer account
-
-Not just a certificate. FSKit modules require the restricted entitlement
-`com.apple.developer.fskit.fsmodule`, and macOS only honours a restricted
-entitlement when an embedded **provisioning profile** authorises it. Profiles
-come from a paid Apple Developer Program membership; there is no free path, and
-nothing in this repository can supply one for you.
-
-You need two things of your own:
+## What it does
 
 | | |
 |---|---|
-| A Developer ID Application certificate | in your login keychain |
-| `Extension/Ext4FS.provisionprofile` | for the App ID `<TEAM>.dev.h3ct0r.ext4mac.Ext4FS`, with the FSKit capability enabled |
+| **ext2, ext3, ext4** | mount, read and write; volumes written on macOS read back byte-for-byte on Linux |
+| **Journal** | replayed before any read-write mount; an unreplayed log is never written over |
+| **LUKS1 and LUKS2** | `aes-xts-plain64`; PBKDF2 and Argon2; unlock from the menu bar or `Ext4Mac unlock`; the passphrase never enters the sandboxed extension |
+| **Formatting** | `newfs_fskit -t ext4 /dev/diskN`; Disk Utility after `sudo make install-diskutil` |
+| **Files** | extended attributes, hard links, symlinks, rename, preallocation; `chattr +i` / `+a` honoured as `uchg` / `uappnd` |
+| **Refused by name** | `bigalloc`, `inline_data`, `meta_bg`, `casefold`, `large_dir`, `ea_inode`, fscrypt, compression, external journals — each with a message that says which |
+| **Read-only** | `quota`, `project`, `verity`, any unknown RO_COMPAT bit, and read-only media |
+| **Not yet** | kernel-offloaded I/O (every byte is copied through the extension), LUKS detached headers, ciphers other than XTS |
 
-Both are gitignored, deliberately — a provisioning profile is tied to your team
-and your certificate, and committing one would be useless to you and careless
-of us. Change `BUNDLE_ID` in the `Makefile` to your own reverse-DNS name and
-create the App ID under it.
+The full policy table is [docs/ENVELOPE.md](docs/ENVELOPE.md); it is diffed
+against the driver's own table on every test run, so it cannot drift.
+
+## Three things to know
+
+- **Eject before unplugging.** FSKit gives a third-party module no way to
+  flush a drive's cache, so the journal's ordering guarantee stops at the
+  drive. Twenty mid-write pulls across five drives all recovered cleanly, but
+  a pull mid-write can also panic macOS itself — the storage stack's problem,
+  not one this driver can prevent. Details and numbers: [ENVELOPE.md](docs/ENVELOPE.md#the-barrier-what-this-driver-cannot-promise).
+- **Apple Silicon, macOS 15.4 or later.** No Intel or universal build is
+  produced or tested.
+- **Building a copy that mounts needs a paid Apple Developer account.**
+  FSKit's entitlement is restricted and macOS honours it only under a
+  provisioning profile. Building and running every test suite does not need
+  one; only mounting does.
+
+## Command line
+
+`/Applications/Ext4Mac.app/Contents/MacOS/Ext4Mac` — or put it on your `PATH`.
+
+| verb | what it does |
+|---|---|
+| `status` | is the extension enabled, and every volume with something to report |
+| `last-error /dev/diskN` | why a disk did not mount, and what to do about it |
+| `events [n]` | the last *n* volume events |
+| `unlock /dev/diskN` | prompt for a passphrase, derive the master key, keep it in the keychain |
+| `mount /dev/diskN` | mount a volume whose key is stored |
+| `forget /dev/diskN` | forget that key; `forget --all` lists them, `--yes` removes them |
+| `list` | which encrypted volumes are unlocked |
+| `login-item on\|off` | start at login so the extension stays registered across reboots |
+| `version` | which build the installed bundles are |
+
+## When it looks broken
+
+| symptom | do this |
+|---|---|
+| "The disk you inserted was not readable" | `Ext4Mac last-error /dev/diskN` — it says whether the volume is locked, refused, damaged or degraded, and why |
+| The extension shows *disabled*, or mounts fail with "Unable to invoke task" | Approve it in System Settings (path above), then `make check-extension` |
+| Nothing mounts and Paragon ExtFS is installed | Its driver wins the probe. Disable it. |
+
+More in [docs/INSTALL.md](docs/INSTALL.md).
+
+## Building from source
+
+Requirements: macOS 15.4+, Apple Silicon, Xcode Command Line Tools,
+`brew install e2fsprogs`; Docker for the Linux-kernel stages.
+
+```bash
+git submodule update --init
+make            # Ext4Mac.app with the extension inside
+make test       # read + write suites against disk images
+make validate   # everything, including the Linux-kernel and mounted stages
+make help       # every target
+```
+
+The ext4 core is decoupled from FSKit, so `make test` and `make validate`
+exercise the real filesystem code with no Apple account, no signing and no
+mounting. To mount you need a Developer ID certificate and a provisioning
+profile for the extension's App ID with the FSKit capability — both
+gitignored, both yours. Then:
 
 ```bash
 make sign SIGN_ID="Developer ID Application: Your Name (TEAMID)"
 make install
 ```
 
-Then enable it in **System Settings → General → Login Items & Extensions →
-File System Extensions**, and check with `make check-extension`.
+The failure mode is silent: a wrongly provisioned extension is killed by AMFI
+the instant it launches, with no crash report, and looks exactly like one
+that is merely disabled. `make sign` checks every claimed entitlement against
+the profile for that reason. Everything about certificates, profiles and
+`errSecInternalComponent` is in [docs/SIGNING.md](docs/SIGNING.md).
 
-The failure mode is worth knowing in advance, because it is silent: an ad-hoc
-or wrongly-provisioned signature does not produce an error. AMFI kills the
-extension the instant it launches — no crash report, nothing in the log — and
-what you see is a module that will not mount anything, which looks exactly like
-a module that is merely disabled. `make sign` runs
-`scripts/verify_signing.sh`, which compares every claimed entitlement against
-the ones the embedded profile actually authorises, precisely because this
-failure has no other symptom. See [docs/SIGNING.md](docs/SIGNING.md).
+## How it is tested
 
-### Removable media, pulled sticks, and the retired barrier daemon
+The oracle is never this driver: every volume it writes is handed to
+`e2fsck`, `debugfs`, `cryptsetup` and the Linux kernel's own ext4, which
+replays each crash cut and reads back each byte. `make validate` runs the
+whole chain unattended in about ten minutes on a recent Mac (longer the first time, while Docker images build):
 
-Removable media mounts **read-write like everything else**. A journal is a
-claim about write ordering, and FSKit exposes no way for a third-party module
-to flush a drive's cache: `metadataFlush` — the only write barrier in the
-whole `FSResource` API — fails with `EIO` here, and the device-level call
-underneath it, `DKIOCSYNCHRONIZE`, is denied to the sandbox by name. For a
-while that gap was closed by `ext4barrierd`, a root daemon with one verb
-(flush this disk's cache), and removable media was read-only without it.
+| stage | what it proves |
+|---|---|
+| read, write, bounds | every read against `debugfs`; `e2fsck` after **every** write; overflow refusals and hostile geometry |
+| format, orphans, preallocation, revokes | `e2fsck`-clean across a geometry sweep; open-unlink recovery; journal revoke records |
+| crypto, error injection, checksums | AES-XTS against OpenSSL; a medium that answers EIO surfaces every failure; checksums that act |
+| fuzzing | an in-process libFuzzer harness with a structure-aware mutator, a mutation campaign, and 20 hostile fixtures — one per finding, each shown to fail before its fix |
+| crash consistency, reordered writes, differential | every cut of the write stream and a reordering medium, replayed by the Linux kernel; both directions byte-exact |
+| replay speed | a deep dirty journal must mount inside DiskArbitration's budget on a modelled USB stick |
+| mounted driver | a live FSKit mount: crash snapshots, kill recovery with a timed remount, encrypted volumes, newfs, user-visible events |
 
-The daemon was retired after the question was remeasured on the current
-write path, which hands every write synchronously to the device through
-FSKit's raw descriptor. A five-drive pull-test sweep — twenty mid-write
-pulls, fenced and under sustained load, with the daemon as the A/B control
-arm — recovered identically with and without barriers: `e2fsck` found
-nothing to fix, and no synced file was lost
-([Tests/run_pull_tests.sh](Tests/run_pull_tests.sh), results in
-[docs/STATUS.md](docs/STATUS.md)). The sweep also showed the old policy
-never covered the drives most likely to cache: large sticks and USB SSDs
-report themselves as *fixed* media, so they wrote unbarriered all along.
+CI runs the offline suites on macOS, the same core under AddressSanitizer
+and UBSan, a fuzz smoke with a coverage gate, and the oracle suites on Ubuntu
+where the Linux kernel judges. A nightly fuzzes for an hour each way. The
+mounted stages and the pull test need an approved extension and a stick, so
+they stay local — recorded in [docs/HARDWARE.md](docs/HARDWARE.md).
 
-If a machine still has the daemon from an earlier build:
-
-```bash
-sudo make uninstall-barrier
-```
-
-For pull-testing real media, `make preflight EXT4_KILL_DEVICE=diskNs1`
-verifies the hand-granted switches and proves the driver owns the volume
-before a run spends your time measuring nothing.
+Testing has found more than twenty genuine bugs in the vendored lwext4 —
+one replayed stale journal records over live metadata, one hung the driver
+forever instead of failing — carried as 78 numbered patches, each with its
+reason in [patches/lwext4/README.md](patches/lwext4/README.md).
 
 ## Documentation
 
-- [Architecture](docs/ARCHITECTURE.md) — how it fits together and why
-- [Status](docs/STATUS.md) — what works today
-- [Signing](docs/SIGNING.md) — certificates and entitlements
+| | |
+|---|---|
+| [docs/INSTALL.md](docs/INSTALL.md) | installing, approving, upgrading, uninstalling — for users |
+| [docs/ENVELOPE.md](docs/ENVELOPE.md) | what is supported, refused, read-only, and measured; the barrier |
+| [docs/STATUS.md](docs/STATUS.md) | what works today and the engineering record behind it |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | how it fits together and the decisions that shaped it |
+| [docs/SIGNING.md](docs/SIGNING.md) | certificates, entitlements, profiles, releasing from CI |
+| [docs/HARDWARE.md](docs/HARDWARE.md) | the runbook for a day with real media |
+| [patches/lwext4/README.md](patches/lwext4/README.md) | every change to lwext4 and why |
+| [Tests/fuzz/README.md](Tests/fuzz/README.md) | the fuzzing instruments |
+| [CHANGELOG.md](CHANGELOG.md) | what changed, by version |
 
-## Licence
+## Contributing, security, licence
+
+Contributions are welcome under the rules in [CONTRIBUTING.md](CONTRIBUTING.md)
+— every fix arrives with a test shown failing first. Data-loss or memory-safety
+findings go through [SECURITY.md](SECURITY.md) rather than a public issue.
 
 **GPL-3.0-or-later.** This project vendors [lwext4](https://github.com/gkostka/lwext4),
-whose `ext4_extent.c` and `ext4_xattr.c` are GPL-2.0-or-later; the remainder is
-BSD-3-Clause. The combined work is therefore distributed under GPL-3.0-or-later.
-
-See `LICENSE`.
+whose `ext4_extent.c` and `ext4_xattr.c` are GPL-2.0-or-later and whose
+remainder is BSD-3-Clause; the combined work is distributed under
+GPL-3.0-or-later. See [LICENSE](LICENSE).
