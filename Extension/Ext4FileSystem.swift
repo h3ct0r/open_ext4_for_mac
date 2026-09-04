@@ -95,7 +95,29 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             $0.lastSeen = device
             $0.probedBSDNames.insert(device.bsdName)
         }
+        Ext4Log.forgetCoreLines()
 
+        let result = examine(device)
+        if result.result == .notRecognized {
+            // The resource arrives with the device open, and the descriptor
+            // lives as long as the object does. Keeping a declined one in
+            // `lastSeen` kept the device open for as long as fskitd kept
+            // this idle process around -- minutes -- and a disk this driver
+            // had refused to touch then failed to eject with "Resource
+            // busy", until the next probe of anything replaced it. (Measured
+            // with lsof: the descriptor went away with the reference, and
+            // `revoke()` on its own freed nothing.) Nothing here needs a
+            // declined resource again: a format or check arrives after a
+            // load, which presents a resource of its own.
+            state.withLock {
+                if $0.lastSeen === device { $0.lastSeen = nil }
+            }
+        }
+        return result
+    }
+
+    /// The probe proper: what is on this device, and will we touch it.
+    private func examine(_ device: FSBlockDeviceResource) -> FSProbeResult {
         guard let bridge = BlockDeviceBridge(resource: device, forceReadOnly: true, mode: .direct),
               let dev = bridge.device else {
             return .notRecognized
@@ -116,10 +138,13 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
 
         case EXT4B_PROBE_UNSUPPORTED:
             Ext4Log.info("declining volume: \(Self.reason(info))")
+            Self.report(.refused, device: device.bsdName, info: info, reason: Self.reason(info))
             return .notRecognized
 
         case EXT4B_PROBE_READ_ONLY:
             Ext4Log.info("volume usable read-only: \(Self.reason(info))")
+            Self.report(.degradedReadOnly, device: device.bsdName, info: info,
+                        reason: Self.reason(info))
             return .usableButLimited(name: Self.name(info),
                                      containerID: Self.containerID(info))
 
@@ -143,10 +168,14 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             // it is honest: claiming it would put a volume in front of the
             // user that can never be opened.
             Ext4Log.info("declining LUKS volume: \(Ext4LUKS.reason(info))")
+            report(.refused, device: bridge.resource.bsdName, luks: info,
+                   reason: Ext4LUKS.reason(info))
             return .notRecognized
         }
         guard let container = Ext4LUKS.containerID(info) else {
             Ext4Log.info("declining LUKS volume: unreadable UUID")
+            report(.refused, device: bridge.resource.bsdName, luks: info,
+                   reason: "LUKS\(info.version) container with an unreadable UUID")
             return .notRecognized
         }
 
@@ -169,8 +198,21 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         } catch let e as NSError where e.domain == NSPOSIXErrorDomain && e.code == Int(EAUTH) {
             Ext4Log.info("LUKS\(info.version) container: stored key no longer opens it "
                          + "(EAUTH); presenting as locked")
+            report(.keyRejected, device: bridge.resource.bsdName, luks: info,
+                   reason: "a stored key no longer opens this container")
+        } catch let e as NSError where e.domain == NSPOSIXErrorDomain && e.code == Int(ENEEDAUTH) {
+            // Locked: no key anywhere. Not a fault, but it is the volume
+            // that most looks like a broken disk from the outside.
+            report(.locked, device: bridge.resource.bsdName, luks: info,
+                   reason: "no key is stored for this container")
         } catch {
-            // ENEEDAUTH and anything else: locked, present it for unlocking.
+            // Anything else -- the cipher stack would not open, the key
+            // store was unreadable -- still presents as locked so the user
+            // can act, but it is not silent any more: this catch used to be
+            // empty, and an EIO from the key path read as "locked" forever.
+            Ext4Log.error("LUKS\(info.version) container could not be opened: \(error)")
+            report(.locked, device: bridge.resource.bsdName, luks: info,
+                   reason: "the container could not be opened: \(Self.describe(error))")
         }
         if unlocked, let decrypted = bridge.device {
             var inner = ext4b_probe_info()
@@ -183,6 +225,8 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
                     return .usableButLimited(name: name(inner, or: info), containerID: container)
                 default:
                     Ext4Log.info("declining volume inside LUKS: \(reason(inner))")
+                    report(.refused, device: bridge.resource.bsdName, info: inner,
+                           uuid: Ext4LUKSKeys.uuidString(info), reason: reason(inner))
                     return .notRecognized
                 }
             }
@@ -224,6 +268,8 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
                 Ext4Log.error("refusing to load \(device.bsdName): this extension "
                               + "process already has \(existing) mounted "
                               + "(one volume per process)")
+                Self.report(.mountFailed, device: device.bsdName,
+                            reason: "this extension process already has \(existing) mounted")
                 throw Ext4Error.posix(EBUSY)
             }
         }
@@ -232,6 +278,7 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             $0.lastSeen = device
             $0.probedBSDNames.insert(device.bsdName)
         }
+        Ext4Log.forgetCoreLines()
 
         //
         // Mount mode.
@@ -273,18 +320,43 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
 
         guard let bridge = BlockDeviceBridge(resource: device, forceReadOnly: readOnly),
               var dev = bridge.device else {
+            Self.report(.mountFailed, device: device.bsdName,
+                        reason: "the device could not be opened")
             throw Ext4Error.ioError
         }
 
         // An encrypted container is recognised here rather than by the
         // filesystem probe, which would only see ciphertext.
-        if try Ext4LUKSKeys.openEncryptedIfNeeded(bridge) {
-            guard let decrypted = bridge.device else { throw Ext4Error.ioError }
-            dev = decrypted
+        do {
+            if try Ext4LUKSKeys.openEncryptedIfNeeded(bridge) {
+                guard let decrypted = bridge.device else { throw Ext4Error.ioError }
+                dev = decrypted
+            }
+        } catch {
+            let luks = bridge.probeLUKS()?.1
+            switch Self.posixCode(error) {
+            case ENEEDAUTH:
+                Self.report(.locked, device: device.bsdName, luks: luks,
+                            reason: "no key is stored for this container")
+            case EAUTH:
+                Self.report(.keyRejected, device: device.bsdName, luks: luks,
+                            reason: "a stored key no longer opens this container")
+            default:
+                Self.report(.mountFailed, device: device.bsdName, luks: luks,
+                            reason: "the encrypted container could not be opened: "
+                                    + Self.describe(error))
+            }
+            throw error
         }
 
         var info = ext4b_probe_info()
-        try Ext4Error.check(ext4b_probe(dev, &info), "probe")
+        do {
+            try Ext4Error.check(ext4b_probe(dev, &info), "probe")
+        } catch {
+            Self.report(.mountFailed, device: device.bsdName,
+                        reason: "the superblock could not be read: \(Self.describe(error))")
+            throw error
+        }
 
         // A volume the probe only rates usable-but-limited must never be
         // written, whatever the media allows.
@@ -300,14 +372,33 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             bridge.close()
             Ext4Log.info("no mountable filesystem (\(Self.reason(info))); "
                          + "loaded for maintenance only")
+            if info.verdict == EXT4B_PROBE_UNSUPPORTED {
+                Self.report(.refused, device: device.bsdName, info: info,
+                            reason: Self.reason(info))
+            } else {
+                Self.report(.unformatted, device: device.bsdName,
+                            reason: "nothing recognisable as ext2, ext3 or ext4 here")
+            }
             containerStatus = FSContainerStatus.ready
             return Ext4UnformattedVolume(bsdName: device.bsdName)
         }
 
-        try executor.runSync {
-            // ext4b_mount replays the journal and attaches it for read-write
-            // mounts; it fails rather than proceeding if either step fails.
-            try Ext4Error.check(ext4b_mount(dev, effectiveReadOnly), "mount")
+        do {
+            try executor.runSync {
+                // ext4b_mount replays the journal and attaches it for read-write
+                // mounts; it fails rather than proceeding if either step fails.
+                try Ext4Error.check(ext4b_mount(dev, effectiveReadOnly), "mount")
+            }
+        } catch {
+            // A read-write mount of a dirty volume that would not replay is
+            // its own kind: the next step is e2fsck, not a retry.
+            let replay = info.needs_recovery && !effectiveReadOnly
+            Self.report(replay ? .replayRefused : .mountFailed,
+                        device: device.bsdName, info: info,
+                        reason: replay ? "the journal could not be replayed: \(Self.describe(error))"
+                                       : "the volume could not be mounted: \(Self.describe(error))")
+            bridge.close()
+            throw error
         }
 
         let volume = Ext4Volume(bridge: bridge,
@@ -316,6 +407,17 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
                                 readOnly: effectiveReadOnly,
                                 identity: IdentityMapper())
         volume.fileSystem = self
+        if effectiveReadOnly {
+            // Mounted, but not the way it was asked for. The reason is the
+            // whole message: read-only media and a feature we will not write
+            // through are different next steps -- and a dirty journal on
+            // either means the files predate the last crash, which the
+            // core's own line in bridge[] says. Recorded when the volume
+            // activates, not here: see `readOnlyReport`.
+            let why = mediaWritable ? Self.reason(info) : "the device is read-only"
+            volume.readOnlyReport = (info.needs_recovery ? "\(why); its journal was not replayed" : why,
+                                     Ext4Log.recentCoreLines())
+        }
         state.withLock {
             $0.bridge = bridge
             $0.volume = volume
@@ -353,13 +455,13 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         // (nil, nil) and returns. The unmount and close then happen on a
         // bridge nobody else can still reach, so there is no double free and
         // no double ext4b_unmount. The lock is released before the await.
-        let taken: BlockDeviceBridge? = state.withLock {
-            let b = $0.bridge
+        let taken: (BlockDeviceBridge?, Ext4Volume?) = state.withLock {
+            let b = $0.bridge, v = $0.volume
             $0.bridge = nil
             $0.volume = nil
-            return b
+            return (b, v)
         }
-        guard let bridge = taken, let dev = bridge.device else { return }
+        guard let bridge = taken.0, let dev = bridge.device else { return }
         // Carried across the concurrency boundary as an integer: OpaquePointer
         // is not Sendable, and the executor guarantees serial access anyway.
         let handle = UInt(bitPattern: dev)
@@ -389,6 +491,10 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             Ext4Log.error("unmount failed (\(unmountRC)) while closing the "
                           + "volume: something it was asked to write may not "
                           + "have reached the medium")
+            Self.report(.unmountFailed, device: bridge.resource.bsdName, info: taken.1?.probe,
+                        reason: "the final write-back failed (\(Self.describe(unmountRC))): "
+                                + "something the volume was asked to write may not have "
+                                + "reached the medium")
         } else {
             Ext4Log.info("volume closed")
         }
@@ -425,5 +531,92 @@ final class Ext4FileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         return withUnsafeBytes(of: &text) { raw -> String in
             String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
         }
+    }
+
+    // MARK: - Saying what happened
+
+    /// Which build wrote the event. The same stamp `Ext4Mac version` prints,
+    /// read once: a field report that names a commit is worth several that
+    /// do not.
+    static let buildID: String = Bundle.main.object(forInfoDictionaryKey: "Ext4BuildID")
+                                 as? String ?? "unknown"
+
+    /// Write a VolumeEvent for the app to find. Never throws and never fails
+    /// the caller: every site is already on its way to reporting a failure
+    /// to FSKit, and a mount that fails differently because it could not
+    /// write a note about failing is worse than one that just fails.
+    ///
+    /// `info` supplies the UUID, label and verdict when the probe got that
+    /// far; `luks` supplies them for an encrypted container, whose identity
+    /// is the container's, not the filesystem's; `uuid` overrides both.
+    /// `lines` replaces the ring buffer's current contents when the caller
+    /// captured the core's lines earlier than now.
+    static func report(_ kind: VolumeEvent.Kind,
+                       device: String,
+                       info: ext4b_probe_info? = nil,
+                       luks: luks_info? = nil,
+                       uuid: String? = nil,
+                       reason: String,
+                       lines: [String]? = nil) {
+        var id = uuid
+        var label: String?
+        var verdict: String?
+        if let luks {
+            id = id ?? Ext4LUKSKeys.uuidString(luks)
+            label = Ext4LUKS.name(luks)
+        }
+        if let info, info.verdict != EXT4B_PROBE_NOT_EXT {
+            id = id ?? uuidString(info)
+            let text = name(info)
+            label = label ?? (text.hasPrefix("ext") && text.hasSuffix(" Volume") ? nil : text)
+            verdict = verdictName(info.verdict)
+        }
+        let event = VolumeEvent(kind: kind, device: device, uuid: id, label: label,
+                                verdict: verdict, reason: reason,
+                                bridge: lines ?? Ext4Log.recentCoreLines(), build: buildID)
+        guard let directory = VolumeEventStore.directoryFromInsideTheSandbox() else {
+            Ext4Log.error("no events directory to record \(kind.rawValue) for \(device)")
+            return
+        }
+        if VolumeEventStore.record(event, in: directory) {
+            Ext4Log.info("recorded \(kind.rawValue) for \(device): \(reason)")
+        } else {
+            Ext4Log.error("could not record \(kind.rawValue) for \(device) in \(directory.path)")
+        }
+    }
+
+    private static func uuidString(_ info: ext4b_probe_info) -> String? {
+        var raw = info.uuid
+        let bytes = withUnsafeBytes(of: &raw) { Array($0) }
+        guard bytes.contains(where: { $0 != 0 }) else { return nil }
+        return bytes.enumerated().map { i, b in
+            ([4, 6, 8, 10].contains(i) ? "-" : "") + String(format: "%02x", b)
+        }.joined()
+    }
+
+    private static func verdictName(_ verdict: ext4b_probe_verdict) -> String {
+        switch verdict {
+        case EXT4B_PROBE_USABLE:      return "USABLE"
+        case EXT4B_PROBE_READ_ONLY:   return "READ_ONLY"
+        case EXT4B_PROBE_UNSUPPORTED: return "UNSUPPORTED"
+        default:                      return "NOT_EXT"
+        }
+    }
+
+    /// The POSIX code inside an error FSKit made, or -1.
+    static func posixCode(_ error: Error) -> Int32 {
+        let e = error as NSError
+        return e.domain == NSPOSIXErrorDomain ? Int32(e.code) : -1
+    }
+
+    /// One sentence about an error, without the module prefix Swift's
+    /// description puts on it.
+    static func describe(_ error: Error) -> String {
+        let code = posixCode(error)
+        return code >= 0 ? describe(code) : error.localizedDescription
+    }
+
+    static func describe(_ code: Int32) -> String {
+        String(cString: strerror(abs(code)))
     }
 }

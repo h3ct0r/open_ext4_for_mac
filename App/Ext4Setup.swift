@@ -122,6 +122,9 @@ enum Ext4Setup {
             The extension is registered only while Ext4Mac has run. After a \
             reboot it disappears from System Settings until the app is opened \
             again — starting Ext4Mac at login keeps it available.
+
+            Without the agent running, a locked encrypted volume is reported \
+            only by `Ext4Mac status`, not as a notification.
             """
         alert.addButton(withTitle: "Start at Login")
         alert.addButton(withTitle: "Not Now")

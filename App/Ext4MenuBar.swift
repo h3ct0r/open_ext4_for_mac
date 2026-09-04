@@ -48,6 +48,10 @@ final class Ext4MenuBar: NSObject, NSApplicationDelegate {
     /// the same panel up again and again.
     private var asked: Set<String> = []
     private var panelIsUp = false
+    /// What the extension wrote about volumes it would not, or could not,
+    /// mount. Started once the menu exists; its notifications are the only
+    /// way "encrypted and locked, not broken" reaches a person in time.
+    private var notifier: Ext4Notifier?
 
     static func run() -> Never {
         let app = NSApplication.shared
@@ -103,6 +107,12 @@ final class Ext4MenuBar: NSObject, NSApplicationDelegate {
             Task { @MainActor in me.diskChanged(snapshot) }
         }, context)
 
+        if let dir = VolumeEventStore.directory(insideSandbox: false) {
+            let n = Ext4Notifier(directory: dir)
+            n.onChange = { [weak self] in self?.rebuildMenu() }
+            n.start()
+            notifier = n
+        }
         rebuildMenu()
     }
 
@@ -165,6 +175,10 @@ final class Ext4MenuBar: NSObject, NSApplicationDelegate {
     }
 
     private func diskChanged(_ snapshot: Snapshot) {
+        // A description change is what a probe's verdict looks like from
+        // here, and the event it wrote may have landed between two watch
+        // events.
+        notifier?.check()
         guard var known = volumes[snapshot.bsdName] else {
             diskAppeared(snapshot)
             return
@@ -295,6 +309,11 @@ final class Ext4MenuBar: NSObject, NSApplicationDelegate {
         }
 
         menu.addItem(.separator())
+        let issues = NSMenuItem(title: "Recent Issues", action: nil, keyEquivalent: "")
+        issues.submenu = recentIssuesMenu()
+        menu.addItem(issues)
+
+        menu.addItem(.separator())
         let login = NSMenuItem(title: "Open at Login",
                                action: #selector(toggleOpenAtLogin), keyEquivalent: "")
         login.target = self
@@ -333,6 +352,29 @@ final class Ext4MenuBar: NSObject, NSApplicationDelegate {
             forget.representedObject = volume.bsdName
             menu.addItem(forget)
         }
+        return menu
+    }
+
+    /// The last ten things the extension had to say, newest first. Read
+    /// from the file every time the menu is built: it is a few kilobytes,
+    /// and a menu that caches it is a menu that is wrong after a replug.
+    private func recentIssuesMenu() -> NSMenu {
+        let menu = NSMenu()
+        guard let dir = VolumeEventStore.directory(insideSandbox: false) else { return menu }
+        let recent = VolumeEventStore.recent(VolumeEventStore.recentCount, in: dir).reversed()
+        if recent.isEmpty {
+            menu.addItem(withTitle: "No recent issues", action: nil, keyEquivalent: "").isEnabled = false
+            return menu
+        }
+        for event in recent {
+            let item = NSMenuItem(title: Ext4Events.oneLine(event), action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            item.toolTip = Ext4Events.describe(event)
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Details: Ext4Mac last-error <disk>", action: nil,
+                     keyEquivalent: "").isEnabled = false
         return menu
     }
 

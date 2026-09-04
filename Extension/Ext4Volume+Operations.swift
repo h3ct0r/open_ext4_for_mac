@@ -104,6 +104,13 @@ extension Ext4Volume: FSVolume.Operations {
         Ext4Log.volume.info("activating ext\(self.probe.generation, privacy: .public) volume, readOnly=\(self.isReadOnly, privacy: .public)")
         // Ready -> Active: the volume now has a live root.
         fileSystem?.containerStatus = FSContainerStatus.active
+        // Only an actual mount gets here -- the check pass loads and unloads
+        // without activating -- so this is where "read-only, and here is
+        // why" is true enough to tell somebody.
+        if let report = readOnlyReport {
+            Ext4FileSystem.report(.degradedReadOnly, device: bridge.resource.bsdName,
+                                  info: probe, reason: report.reason, lines: report.lines)
+        }
         return item(for: UInt32(EXT4B_ROOT_INO))
     }
 

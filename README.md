@@ -78,6 +78,9 @@ by itself, under its own name, like any other disk. Or without the GUI:
 Ext4Mac unlock /dev/disk6            # prompts; derives the master key
 Ext4Mac mount /dev/disk6             # or just plug it in again
 Ext4Mac forget /dev/disk6            # locked again
+Ext4Mac last-error /dev/disk6        # why a disk did not mount, in one screen
+Ext4Mac status                       # the extension, and every volume with
+                                     # something to report
 ```
 
 The passphrase is typed into the app and never reaches the sandboxed

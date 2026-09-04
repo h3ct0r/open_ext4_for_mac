@@ -28,6 +28,14 @@ final class Ext4Volume: FSVolume {
     /// downgraded it.
     let isReadOnly: Bool
 
+    /// Why the mount is read-only when read-write was what the media allows
+    /// asking for, and the core's lines from the mount, kept for `activate`.
+    /// Reported there and not at load, because fskitd loads every volume
+    /// read-only once *before* it mounts it -- the check pass -- and that
+    /// load never activates. Reporting at load time made every normal mount
+    /// of a dirty stick leave a "degraded" record behind it.
+    var readOnlyReport: (reason: String, lines: [String])?
+
     /// Whether this driver offers the kernel a direct path to the medium.
     ///
     /// False while `FSVolumeKernelOffloadedIOOperations` is out of the build

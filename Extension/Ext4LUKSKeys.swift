@@ -144,7 +144,7 @@ enum Ext4LUKSKeys {
 
     // MARK: - Helpers
 
-    private static func uuidString(_ info: luks_info) -> String? {
+    static func uuidString(_ info: luks_info) -> String? {
         var raw = info.uuid
         let text = withUnsafeBytes(of: &raw) { buf -> String in
             String(cString: buf.bindMemory(to: CChar.self).baseAddress!)

@@ -357,6 +357,20 @@ struct Ext4MacApp {
             // extension works, and an unentitled build simply has no items.
         }
 
+        // What the extension last had to say about each volume it would not,
+        // or could not, mount. Without the menu-bar agent running this is the
+        // only place a locked container is reported at all.
+        if let dir = VolumeEventStore.directory(insideSandbox: false) {
+            let events = VolumeEventStore.all(in: dir)
+            if !events.isEmpty {
+                print("")
+                print("volumes with something to report (newest first):")
+                for e in events.prefix(5) { print("  " + Ext4Events.oneLine(e)) }
+                if events.count > 5 { print("  … and \(events.count - 5) more") }
+                print("  Ext4Mac last-error <disk|uuid> shows the whole record")
+            }
+        }
+
         print("")
         print("Mount manually with:")
         print("  mount -F -t ext4 <disk> <mountpoint>")

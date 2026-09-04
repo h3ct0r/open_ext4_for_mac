@@ -17,9 +17,10 @@
 # which is the point, because those are precisely the things that are not
 # always available, and none of them are what usually breaks.
 #
-# The other half -- the extension actually writing one of these from a real
-# refused mount -- is a mounted-path suite and is not here yet. See the commit
-# that added this file for why.
+# The other half -- the installed extension actually writing one of these
+# from a real refused, degraded, locked or pulled volume -- is at the end,
+# and runs only where the extension is installed and enabled. It says so
+# when it cannot; the offline cells count either way.
 #
 # Runs unattended. Exit 77 (SKIP) without the probe binary.
 set -uo pipefail
@@ -273,6 +274,239 @@ else
   n=$("$APP" events 5 "$D" 2>/dev/null | wc -l | tr -d ' ')
   [ "$n" = "5" ] && ok "the recent list prints what was asked for" \
                  || bad "the recent list prints what was asked for" "got $n lines"
+fi
+
+# ------------------------------------------------------- the mounted half --
+echo ""
+echo "what the installed extension actually writes"
+echo ""
+
+# Everything above drives the store directly. These cells attach real images
+# and let the installed extension refuse, degrade, lock and fail them, then
+# read what it wrote back through the installed app with no directory
+# argument -- the exact path a person takes. They need the extension enabled,
+# so on a machine where it is not (a CI runner, a fresh install) they say so
+# and the offline cells above still count.
+EVENTS="$HOME/Library/Containers/dev.h3ct0r.ext4mac.Ext4FS/Data/Library/Application Support/events"
+INSTALLED="/Applications/Ext4Mac.app/Contents/MacOS/Ext4Mac"
+export PATH="/opt/homebrew/opt/e2fsprogs/sbin:/opt/homebrew/opt/e2fsprogs/bin:$PATH"
+
+MDEV=""
+MNT="$WORK/mnt"
+mounted_cleanup() {
+  umount "$MNT" 2>/dev/null
+  [ -n "$MDEV" ] && hdiutil detach "$MDEV" -force >/dev/null 2>&1
+  return 0
+}
+trap mounted_cleanup EXIT
+
+attach_img() {  # attach_img <img> [hdiutil flags...] -> MDEV
+  local img="$1"; shift
+  MDEV=$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount "$@" "$img" 2>/dev/null \
+         | head -1 | awk '{print $1}')
+  [ -n "$MDEV" ]
+}
+detach_img() {
+  # DiskArbitration is still probing a freshly attached image for a few
+  # seconds, and a detach issued into that loses; a refused volume gets
+  # probed more than once. Keep asking.
+  local i
+  for i in $(seq 1 20); do
+    hdiutil detach "$MDEV" -force >/dev/null 2>&1 && { MDEV=""; return 0; }
+    sleep 1
+  done
+  return 1
+}
+# The extension's own file, if it wrote one during THIS run. Keyed by UUID
+# when the volume had a readable one, by BSD name when it did not -- the
+# same rule the store uses -- and it must be newer than the run's start, or
+# a leftover from last week would pass today's cell.
+event_file() {  # event_file <uuid> <bsd-name>
+  local f
+  for f in "$EVENTS/$1.json" "$EVENTS/$2.json"; do
+    [ -f "$f" ] && [ "$f" -nt "$WORK/started" ] && { echo "$f"; return 0; }
+  done
+  return 1
+}
+# Wait for the extension to get round to it: a probe runs on attach, but on
+# DiskArbitration's schedule, not ours.
+wait_event() {  # wait_event <uuid> <bsd-name> [secs]
+  local i n="${3:-15}"
+  for (( i = 0; i < n * 2; i++ )); do
+    event_file "$1" "$2" >/dev/null 2>&1 && return 0
+    sleep 0.5
+  done
+  return 1
+}
+mkimg() {  # mkimg <name> <mb> <mke2fs args...> -> prints uuid
+  local name="$1" mb="$2"; shift 2
+  dd if=/dev/zero of="$WORK/$name.img" bs=1M count="$mb" 2>/dev/null
+  mke2fs -q -t ext4 -F "$@" "$WORK/$name.img" >/dev/null 2>&1 || return 1
+  dumpe2fs -h "$WORK/$name.img" 2>/dev/null | sed -n 's/^Filesystem UUID: *//p'
+}
+
+if ! bash "$ROOT/scripts/check_extension.sh" >/dev/null 2>&1; then
+  echo "  (mounted cells skipped: the FSKit extension is not installed and enabled)"
+elif ! command -v mke2fs >/dev/null 2>&1; then
+  echo "  (mounted cells skipped: mke2fs not found; brew install e2fsprogs)"
+else
+  bash "$ROOT/scripts/check_install_freshness.sh" || exit 1
+  touch "$WORK/started"; sleep 1
+  mkdir -p "$MNT"
+
+  # (a) A feature the driver refuses by name. inline_data is in the table as
+  # refused, so the probe declines the volume -- and until now that was an
+  # os_log line and "not readable by this computer".
+  uuid=$(mkimg inline 16 -O inline_data)
+  if [ -n "$uuid" ] && attach_img "$WORK/inline.img"; then
+    bsd=${MDEV#/dev/}
+    if wait_event "$uuid" "$bsd"; then
+      out=$("$INSTALLED" last-error "$uuid" 2>&1)
+      case "$out" in
+        *"kind:     refused"*) ok "a volume with inline_data is recorded as refused" ;;
+        *) bad "a volume with inline_data is recorded as refused" "$out" ;;
+      esac
+      case "$out" in
+        *inline*) ok "and the reason names the feature" ;;
+        *) bad "and the reason names the feature" "$out" ;;
+      esac
+    else
+      bad "a volume with inline_data is recorded as refused" "no event for $uuid or $bsd in $EVENTS"
+      bad "and the reason names the feature" "no event"
+    fi
+    # A refused volume used to stay busy for as long as the idle probe
+    # process lived: FSKit hands the module a resource with the device open,
+    # and a module that answers "not recognised" and does nothing else
+    # keeps that descriptor. Eject then fails with "Resource busy" for a
+    # disk this driver had just declined to touch. The probe now revokes
+    # the resource it declines, and this is the cell that noticed.
+    detach_img && ok "the declined image can be ejected straight away" || bad "the declined image can be ejected straight away"
+  else
+    bad "a volume with inline_data is recorded as refused" "could not make or attach the image"
+    bad "and the reason names the feature" "no image"
+  fi
+
+  # (b) A damaged superblock. One byte of the label changed and the checksum
+  # left alone: lwext4 folds that into "unsupported feature", which sends a
+  # person looking for a driver when e2fsck is the fix. The probe says which.
+  uuid=$(mkimg damaged 16 -O metadata_csum -L GOODLABEL)
+  if [ -n "$uuid" ]; then
+    printf 'X' | dd of="$WORK/damaged.img" bs=1 seek=$((1024 + 0x78)) conv=notrunc 2>/dev/null
+    if attach_img "$WORK/damaged.img"; then
+      bsd=${MDEV#/dev/}
+      if wait_event "$uuid" "$bsd"; then
+        out=$("$INSTALLED" last-error "$uuid" 2>&1 || "$INSTALLED" last-error "$bsd" 2>&1)
+        case "$out" in
+          *"superblock checksum mismatch"*) ok "an unstamped superblock edit is reported as damage, not a feature" ;;
+          *) bad "an unstamped superblock edit is reported as damage, not a feature" "$out" ;;
+        esac
+      else
+        bad "an unstamped superblock edit is reported as damage, not a feature" "no event for $uuid or $bsd"
+      fi
+      detach_img && ok "the damaged image can be ejected straight away" || bad "the damaged image can be ejected straight away"
+    else
+      bad "an unstamped superblock edit is reported as damage, not a feature" "could not attach"
+    fi
+  else
+    bad "an unstamped superblock edit is reported as damage, not a feature" "could not make the image"
+  fi
+
+  # (c) A dirty journal on read-only media. Mounted read-only, so no replay:
+  # the files predate the crash, and the one line that says so was a level-2
+  # log line nobody was streaming. It has to arrive in the event.
+  uuid=$(mkimg dirty 16 -O has_journal); dirty_uuid=$uuid; dirty_bsd=""
+  if [ -n "$uuid" ] && debugfs -w -R "feature +needs_recovery" "$WORK/dirty.img" >/dev/null 2>&1 \
+     && attach_img "$WORK/dirty.img" -readonly; then
+    bsd=${MDEV#/dev/}; dirty_bsd=$bsd
+    if mount -F -r -t ext4 "$MDEV" "$MNT" >/dev/null 2>&1; then
+      umount "$MNT" 2>/dev/null
+      if wait_event "$uuid" "$bsd" 5; then
+        out=$("$INSTALLED" last-error "$uuid" 2>&1)
+        case "$out" in
+          *"kind:     degradedReadOnly"*) ok "a read-only mount of a dirty journal is recorded as degraded" ;;
+          *) bad "a read-only mount of a dirty journal is recorded as degraded" "$out" ;;
+        esac
+        case "$out" in
+          *"unreplayed journal"*) ok "and carries the core's own line about the unreplayed journal" ;;
+          *) bad "and carries the core's own line about the unreplayed journal" "$out" ;;
+        esac
+      else
+        bad "a read-only mount of a dirty journal is recorded as degraded" "no event for $uuid or $bsd"
+        bad "and carries the core's own line about the unreplayed journal" "no event"
+      fi
+    else
+      bad "a read-only mount of a dirty journal is recorded as degraded" "the read-only mount itself failed"
+      bad "and carries the core's own line about the unreplayed journal" "not mounted"
+    fi
+    detach_img || bad "detached the dirty image"
+  else
+    bad "a read-only mount of a dirty journal is recorded as degraded" "could not make or attach the image"
+    bad "and carries the core's own line about the unreplayed journal" "no image"
+  fi
+
+  # (d) A LUKS container nobody has unlocked. The one that most looks like a
+  # broken disk and is not. Needs cryptsetup, which lives on Linux.
+  if have_linux; then
+    ensure_oracle_image ext4luks:cryptsetup-attr <<'DOCKERFILE'
+FROM debian:stable-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cryptsetup-bin e2fsprogs attr && rm -rf /var/lib/apt/lists/*
+DOCKERFILE
+    printf 'not the key anybody stored' > "$WORK/pass.txt"
+    ORACLE_IMAGE=ext4luks:cryptsetup-attr in_linux "$WORK" '
+      set -e
+      dd if=/dev/zero of=locked.img bs=1M count=32 status=none
+      cryptsetup luksFormat --batch-mode --key-file pass.txt --type luks1 locked.img
+      cryptsetup luksUUID locked.img > locked.uuid
+      chmod 666 locked.img' >/dev/null 2>&1
+    luks_uuid=$(tr -d '\r\n' < "$WORK/locked.uuid" 2>/dev/null)
+    if [ -n "$luks_uuid" ] && attach_img "$WORK/locked.img"; then
+      bsd=${MDEV#/dev/}
+      if wait_event "$luks_uuid" "$bsd"; then
+        out=$("$INSTALLED" last-error "$luks_uuid" 2>&1)
+        case "$out" in
+          *"kind:     locked"*) ok "a LUKS container with no key is recorded as locked, not broken" ;;
+          *) bad "a LUKS container with no key is recorded as locked, not broken" "$out" ;;
+        esac
+      else
+        bad "a LUKS container with no key is recorded as locked, not broken" "no event for $luks_uuid or $bsd"
+      fi
+      detach_img || bad "detached the locked container"
+    else
+      bad "a LUKS container with no key is recorded as locked, not broken" "could not make or attach the container"
+    fi
+  else
+    echo "  (locked-container cell skipped: $(no_linux_reason))"
+  fi
+
+  # There is no (e). The plan asked for an unmount failure provoked by
+  # taking the device away, and that was tried three ways: hdiutil detach
+  # -force (the kernel unmounts cleanly first, so nothing fails), a shadow
+  # file on a full volume (the writes were absorbed), and the image's own
+  # backing volume force-detached from under it (a real pull: every read
+  # failed with EIO). Even then ext4b_unmount returned 0, because a revoked
+  # block device REPORTS SUCCESS for writes on macOS -- only reads fail. The
+  # unmountFailed site is in the extension and fires on a non-zero return;
+  # no external provocation on this platform makes that return non-zero.
+
+  # (f) The reader with no directory argument reads the file the extension
+  # wrote. Every cell above already relies on that; this one says it in as
+  # many words, by comparing the default path with the explicit one, on the
+  # dirty-journal record from (c).
+  if [ -n "$dirty_uuid" ] && f=$(event_file "$dirty_uuid" "$dirty_bsd"); then
+    a=$("$INSTALLED" last-error "$dirty_uuid" 2>&1)
+    b=$("$INSTALLED" last-error "$dirty_uuid" "$EVENTS" 2>&1)
+    [ -n "$a" ] && [ "$a" = "$b" ] && ok "last-error with no directory reads the extension's own file" \
+                                   || bad "last-error with no directory reads the extension's own file" "default: $a / explicit: $b"
+    if grep -q '"build":"' "$f" && ! grep -q '"build":"unknown"' "$f"; then
+      ok "and the event says which build wrote it"
+    else
+      bad "and the event says which build wrote it" "$(cat "$f")"
+    fi
+  else
+    bad "last-error with no directory reads the extension's own file" "no event to compare"
+    bad "and the event says which build wrote it" "no event"
+  fi
 fi
 
 echo ""

@@ -173,7 +173,9 @@ Macs are not supported: no Intel or universal build is produced or tested.
   that has been growing across runs, and an offline soak.
 - **Only on a Mac with the extension installed and approved**
   (`make validate`, `make soak`): the mounted stages -- the real FSKit mount,
-  crash snapshots by `SIGSTOP`, kill-recovery, mounted LUKS, newfs, scale --
-  and the pull test, which needs hands on a stick. No runner can grant an
+  crash snapshots by `SIGSTOP`, kill-recovery, mounted LUKS, newfs, scale,
+  the installed extension writing a volume event for a refused, damaged,
+  dirty-read-only and locked volume -- and the pull test, which needs hands
+  on a stick. No runner can grant an
   extension approval, so these stay local, and CI's job is to make everything
   else impossible to forget.
