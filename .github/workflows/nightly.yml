@@ -68,7 +68,7 @@ jobs:
       # the run number so each night writes a new entry, restored from the
       # most recent one -- actions/cache has no update-in-place.
       - name: cache the corpus
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .fuzz/corpus
           key: fuzz-corpus-nightly-${{ github.run_number }}
