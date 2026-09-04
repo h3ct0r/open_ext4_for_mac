@@ -1,0 +1,22 @@
+name: Feature request
+description: Something the driver should do, or a feature it should support.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check `docs/ENVELOPE.md` first: it lists what is supported, refused
+        and read-only, and why. If your request is one of the refused
+        features, say which and why it matters to you.
+  - type: textarea
+    id: what
+    attributes:
+      label: What should it do?
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why, and what do you do today instead?
+    validations:
+      required: true

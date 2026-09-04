@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Data loss or memory-safety finding
+    url: https://github.com/h3ct0r/open_ext4_for_mac/security/advisories/new
+    about: Report privately. See SECURITY.md.
+  - name: Is my volume's feature supported?
+    url: https://github.com/h3ct0r/open_ext4_for_mac/blob/master/docs/ENVELOPE.md
+    about: The feature policy, limits and measurements.

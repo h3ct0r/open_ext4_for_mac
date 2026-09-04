@@ -1,0 +1,65 @@
+name: Bug report
+description: A volume did not mount, mounted wrong, or the driver misbehaved.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks. The three commands below are what make a mount failure
+        diagnosable in one round trip — please run them before filing.
+        **Data-loss or memory-safety findings: use Security → Report a
+        vulnerability instead of this form.**
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "26.0 (25A123), Apple Silicon"
+    validations:
+      required: true
+  - type: textarea
+    id: version
+    attributes:
+      label: "`Ext4Mac version`"
+      description: "`/Applications/Ext4Mac.app/Contents/MacOS/Ext4Mac version`"
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: "`Ext4Mac status`"
+      description: Is the extension enabled? Which volumes have something to report?
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: lasterror
+    attributes:
+      label: "`Ext4Mac last-error /dev/diskN`"
+      description: For the disk involved. Say "no event recorded" if that is what it prints.
+      render: text
+  - type: textarea
+    id: diskutil
+    attributes:
+      label: "`diskutil info /dev/diskN`"
+      render: text
+  - type: textarea
+    id: log
+    attributes:
+      label: Extension log
+      description: "`/usr/bin/log show --last 10m --info --predicate 'subsystem == \"dev.h3ct0r.ext4\"'`"
+      render: text
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+      description: How the volume was made (mke2fs on Linux? this driver? which features?), what you did, what you saw.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: The extension shows **enabled** in System Settings → General → Login Items & Extensions → File System Extensions
+        - label: No other ext driver (Paragon ExtFS, macFUSE ext plugins) is installed
