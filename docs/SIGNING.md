@@ -253,31 +253,12 @@ with the GPL.
 
 ## Releasing from CI
 
-`make release VERSION=x.y.z` is the local half: it checks the changelog,
-builds and signs here, then commits and tags. `git push --tags` starts
-`.github/workflows/release.yml`, which runs `scripts/ci_release.sh` on a
-macOS runner: imports the certificate into a temporary keychain, signs,
-notarizes, staples, verifies with `spctl`, and publishes the DMG as a GitHub
-Release with the changelog section as its notes. The keychain is deleted in
-an `always()` step. A `workflow_dispatch` with `dry_run` stops after the
-signed, checked DMG -- the way to prove the signing path on a branch without
-notarizing or publishing anything.
-
-The repository secrets it reads, and how each is made:
-
-| secret | what | how |
-|---|---|---|
-| `DEVELOPER_ID_P12` | the Developer ID Application identity -- certificate AND private key | Keychain Access -> **My Certificates** -> expand the *Developer ID Application* row so the private key shows under it -> right-click the certificate -> Export, file format **Personal Information Exchange (.p12)**, set a password; then `base64 -i cert.p12 \| pbcopy`. A `.cer` is the certificate alone and imports as "Unknown format". Keychain Access writes the .p12 with legacy 40-bit-RC2 encryption; that is fine (`security import` and the release check both read it), but to verify it locally with OpenSSL 3 you must add `-legacy`: `openssl pkcs12 -legacy -in cert.p12 -noout -info` should list a private key AND a certificate. If you export with openssl instead of Keychain Access, also pass `-legacy` on export. |
-| `DEVELOPER_ID_P12_PASSWORD` | that password | as chosen at export |
-| `EXT_PROVISIONING_PROFILE` | `Extension/Ext4FS.provisionprofile` | `base64 -i Extension/Ext4FS.provisionprofile \| pbcopy` |
-| `APP_PROVISIONING_PROFILE` | `App/Ext4Mac.provisionprofile` | `base64 -i App/Ext4Mac.provisionprofile \| pbcopy` |
-| `NOTARY_KEY` | an App Store Connect API key (.p8) with the Developer role | App Store Connect -> Users and Access -> Integrations -> App Store Connect API -> generate; `base64 -i AuthKey_XXXX.p8 \| pbcopy` |
-| `NOTARY_KEY_ID` | its Key ID | shown beside the key |
-| `NOTARY_ISSUER` | the Issuer ID | shown at the top of that page |
-
-`GITHUB_TOKEN` is the workflow's own. Set the seven under Settings ->
-Secrets and variables -> Actions. Nothing is written to the login keychain on
-the runner, and a failed run leaves only its logs.
+`make release VERSION=x.y.z` builds, signs and checks locally, then commits
+and tags; pushing the tag runs `.github/workflows/release.yml`, which imports
+the identity into a temporary keychain, signs, notarizes, staples and
+publishes the DMG. The steps, the seven secrets and how each is made, the
+release-notes template and the local fallback are in
+[RELEASING.md](RELEASING.md).
 
 ## Can a free Apple account be used?
 
