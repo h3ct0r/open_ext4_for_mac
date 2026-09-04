@@ -70,7 +70,7 @@ fi
 echo "signing extension..."
 codesign --force --timestamp --options runtime \
          --entitlements "$ENTITLEMENTS" \
-         "${KEYCHAIN_ARG[@]}" \
+         ${KEYCHAIN_ARG[@]+"${KEYCHAIN_ARG[@]}"} \
          --sign "$IDENTITY" \
          "$APPEX"
 
@@ -95,9 +95,15 @@ else
   echo "          and 'Ext4Mac list' cannot see them. A volume unlocked once"
   echo "          keeps mounting without its passphrase on this build."
 fi
+# ${arr[@]+"${arr[@]}"}, not "${arr[@]}": under `set -u`, bash 3.2 -- which
+# is what macOS ships and the runner uses -- treats the expansion of an EMPTY
+# array as an unbound variable and aborts. APP_ENTITLEMENT_ARG is empty
+# whenever there is no App/Ext4Mac.provisionprofile (the usual case), so the
+# app-signing step died there after the extension signed fine. The guarded
+# form expands to nothing when empty and to the elements otherwise.
 codesign --force --timestamp --options runtime \
-         "${APP_ENTITLEMENT_ARG[@]}" \
-         "${KEYCHAIN_ARG[@]}" \
+         ${APP_ENTITLEMENT_ARG[@]+"${APP_ENTITLEMENT_ARG[@]}"} \
+         ${KEYCHAIN_ARG[@]+"${KEYCHAIN_ARG[@]}"} \
          --sign "$IDENTITY" \
          "$APP"
 
