@@ -11,7 +11,17 @@ IDENTITY="${2:--}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APPEX="$APP/Contents/Extensions/Ext4FS.appex"
 ENTITLEMENTS="$ROOT/Extension/Ext4FS.entitlements"
-PROFILE="${PROVISIONING_PROFILE:-$ROOT/Extension/Ext4FS.provisionprofile}"
+# Path overrides for the two profiles. Named *_PATH on purpose: the release
+# workflow exports APP_PROVISIONING_PROFILE and EXT_PROVISIONING_PROFILE as
+# the base64 CONTENT of the secrets, and an override that shared a name with
+# a secret took that base64 text as a path, found no such file, and signed
+# the app without its keychain entitlement -- silently, on every CI build,
+# while the log said "no App/Ext4Mac.provisionprofile". An override that
+# names a file which does not exist is refused rather than fallen back from.
+PROFILE="${EXT_PROFILE_PATH:-$ROOT/Extension/Ext4FS.provisionprofile}"
+if [ -n "${EXT_PROFILE_PATH:-}" ] && [ ! -f "$EXT_PROFILE_PATH" ]; then
+  echo "error: EXT_PROFILE_PATH=$EXT_PROFILE_PATH is not a file"; exit 1
+fi
 
 # The app shares a keychain access group with the extension, so the two can
 # hand a master key across without the passphrase ever entering the sandboxed
@@ -24,7 +34,10 @@ PROFILE="${PROVISIONING_PROFILE:-$ROOT/Extension/Ext4FS.provisionprofile}"
 # present. Without one it still works; it just leaves the key in the
 # extension's container instead of the keychain. See docs/SIGNING.md.
 APP_ENTITLEMENTS="$ROOT/App/Ext4Mac.entitlements"
-APP_PROFILE="${APP_PROVISIONING_PROFILE:-$ROOT/App/Ext4Mac.provisionprofile}"
+APP_PROFILE="${APP_PROFILE_PATH:-$ROOT/App/Ext4Mac.provisionprofile}"
+if [ -n "${APP_PROFILE_PATH:-}" ] && [ ! -f "$APP_PROFILE_PATH" ]; then
+  echo "error: APP_PROFILE_PATH=$APP_PROFILE_PATH is not a file"; exit 1
+fi
 
 # Optional: sign from a specific keychain.
 #

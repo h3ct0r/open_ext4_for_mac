@@ -115,7 +115,17 @@ done
 
 # ------------------------------------------------------------------- build --
 make patch >/dev/null
-make app sign check-signing dmg SIGN_ID="$identity" SIGN_KEYCHAIN="$KEYCHAIN"
+make app sign check-signing dmg SIGN_ID="$identity" SIGN_KEYCHAIN="$KEYCHAIN" 2>&1 | tee build/release-sign.log
+[ "${PIPESTATUS[0]}" -eq 0 ] || exit 1
+# The app must have been signed WITH the shared keychain group. sign.sh says
+# which it did in one line; "without" once went unnoticed through two rounds
+# of re-exporting secrets, because the profile was fine and the name it was
+# exported under was not. check_release.sh below reads the entitlement off
+# the signature as well; this reads the intent.
+if ! grep -q "  with the shared keychain group (app profile found)" build/release-sign.log; then
+  echo "release: the app was signed WITHOUT the shared keychain group -- forget/list would not reach the extension's keys; refusing"
+  exit 1
+fi
 bash scripts/check_release.sh
 DMG="$(ls build/Ext4Mac-*.dmg | head -1)"
 echo "release: built $DMG"
