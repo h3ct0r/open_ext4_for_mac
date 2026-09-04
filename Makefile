@@ -216,9 +216,14 @@ ARGON2_CFLAGS := $(CFLAGS) $(NO_WARN) -I$(ARGON2_DIR)
 CORE_LIB      := $(BUILD)/lib/$(CONFIG)/libext4core.a
 CORE_TEST_LIB := $(BUILD)/lib/$(CONFIG)/libext4core-test.a
 
-.PHONY: all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-fuzz test-fuzz-regressions test-reorder test-crypto test-events test-envelope test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline ci-linux release changelog-draft check-release uninstall test-uninstall print-fuzz-flags fuzz-build fuzz fuzz-rw fuzz-repro fuzz-minimize fuzz-merge fuzz-check fuzz-cov fuzz-cov-gate
+.PHONY: help all core verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-fuzz test-fuzz-regressions test-reorder test-crypto test-events test-envelope test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline ci-linux release changelog-draft check-release uninstall test-uninstall print-fuzz-flags fuzz-build fuzz fuzz-rw fuzz-repro fuzz-minimize fuzz-merge fuzz-check fuzz-cov fuzz-cov-gate
 
-all: app
+all: app  ## build Ext4Mac.app with the FSKit extension inside (same as app)
+
+# The targets a person types, one line each, read out of the `##` comment on
+# the target line so the list cannot drift from the Makefile it describes.
+help:  ## this list
+	@awk 'BEGIN { FS = ":.*  ## " } /^[a-zA-Z0-9_-]+:.*  ## / { printf "  %-20s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 check-submodule:
 	@test -f $(LWEXT4_DIR)/include/ext4.h || { \
@@ -306,7 +311,7 @@ verify-patches: $(PATCH_STAMP)
 # Does the patch set reproduce the tree we compile? verify-patches asks whether
 # each patch is applied; this asks the stronger question, which is whether the
 # working tree contains anything the patches do not.
-check-patches:
+check-patches:  ## do the lwext4 patches reproduce Core/lwext4 exactly?
 	@bash scripts/check_patches.sh
 
 # Put the submodule back to pinned-plus-patches, whatever state it is in.
@@ -399,7 +404,7 @@ $(BUILD)/.tools-config: FORCE
 	@mkdir -p $(BUILD)
 	@printf '%s' "$(CONFIG)" | cmp -s - $@ 2>/dev/null || printf '%s' "$(CONFIG)" > $@
 
-tools: verify-patches $(BUILD)/bin/ext4dump $(BUILD)/bin/cryptotest $(BUILD)/bin/datafile $(BUILD)/bin/ext4_stampcheck $(EVENT_PROBE)
+tools: verify-patches $(BUILD)/bin/ext4dump $(BUILD)/bin/cryptotest $(BUILD)/bin/datafile $(BUILD)/bin/ext4_stampcheck $(EVENT_PROBE)  ## ext4dump, cryptotest, datafile and friends
 
 # The fuzzing stamper's oracle. Built with the ordinary compiler and linked
 # against nothing of ours -- it is a SECOND implementation of ext4's
@@ -453,7 +458,7 @@ $(BUILD)/bin/ext4dump: tools/ext4dump.c $(CORE_TEST_LIB) $(BUILD)/.build-id $(BU
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(CFLAGS) -DEXT4B_TEST_HOOKS=1 $< $(CORE_TEST_LIB) $(CORE_LDLIBS) -o $@
 
-test: tools
+test: tools  ## read + write suites against disk images (needs: brew install e2fsprogs)
 	@bash Tests/run_tests.sh
 	@echo
 	@bash Tests/run_write_tests.sh
@@ -560,7 +565,7 @@ test-scale: tools
 # The full set, over and over, stopping dead at the first failure. Not a
 # pass rate: the question is whether this ever loses data, and "usually not"
 # is not an answer. SOAK_ROUNDS=N to bound it.
-soak:
+soak:  ## validation rounds until stopped (SOAK_ROUNDS=n, --fuzz via scripts/soak.sh)
 	@bash scripts/soak.sh
 
 # What a killed driver leaves behind, and whether the journal recovers it.
@@ -568,7 +573,7 @@ soak:
 # which it ERASES. preflight checks the hand-granted switches (extension
 # enabled, .fs bundle installed) before spending the run, not after -- none
 # of them announces itself when it lapses.
-preflight: tools
+preflight: tools  ## the hardware-day gate (EXT4_KILL_DEVICE=diskNsM)
 	@bash scripts/preflight.sh $(EXT4_KILL_DEVICE)
 
 # `tools` is not decoration: the suite formats its target with ext4dump, and
@@ -597,7 +602,7 @@ test-mount-crash:
 # a disabled module are inconsistent enough to be worth a dedicated check.
 # `|| true` so a disabled extension reads as a diagnosis rather than a build
 # failure; call scripts/check_extension.sh directly if you want the exit code.
-check-extension:
+check-extension:  ## is the installed extension approved and answering?
 	@bash scripts/check_extension.sh || true
 
 # Are the entitlements each binary claims actually authorised by the profile it
@@ -607,10 +612,10 @@ check-signing:
 	@bash scripts/verify_signing.sh "$(BUILD)/$(APP_NAME).app"
 
 # Everything, unattended, one stage after another. Stages 5-7 need Docker.
-validate:
+validate:  ## every stage, including the Linux-kernel and mounted ones
 	@bash scripts/run_full_validation.sh
 
-validate-asan:
+validate-asan:  ## validate on the sanitizer core
 	@bash scripts/run_full_validation.sh --asan
 
 # The subset a GitHub runner can run: no Docker, no mounted extension, no
@@ -627,7 +632,7 @@ ci-linux:
 
 # Same suites under AddressSanitizer + UBSan. Slower, but this is how the
 # NULL dereference in lwext4's xattr removal was found.
-test-asan:
+test-asan:  ## the offline suites on an AddressSanitizer/UBSan core
 	@$(MAKE) --no-print-directory clean
 	@$(MAKE) --no-print-directory tools CONFIG=debug
 	@bash Tests/run_tests.sh
@@ -650,7 +655,7 @@ test-asan:
 	@echo
 	@bash Tests/run_fuzz_regressions_tests.sh
 
-clean:
+clean:  ## remove build/ (corpus and soak logs live outside it)
 	rm -rf $(BUILD)
 
 # --- fuzzing ------------------------------------------------------------------
@@ -775,7 +780,7 @@ $(FUZZ_DIR)/seeds/.stamp: $(BUILD)/bin/ext4dump
 	fi
 	@touch $@
 
-fuzz: fuzz-build $(FUZZ_DIR)/seeds/.stamp
+fuzz: fuzz-build $(FUZZ_DIR)/seeds/.stamp  ## libFuzzer, read-only mode (needs Homebrew LLVM; FUZZ_TIME=secs)
 	@mkdir -p $(FUZZ_DIR)/corpus/ro $(FUZZ_DIR)/crashes $(FUZZ_DIR)/logs
 	@cd $(FUZZ_DIR)/logs && EXT4_FUZZ_MODE=ro \
 	  $(CURDIR)/$(FUZZ_BIN) $(CURDIR)/$(FUZZ_DIR)/corpus/ro $(CURDIR)/$(FUZZ_DIR)/seeds \
@@ -784,7 +789,7 @@ fuzz: fuzz-build $(FUZZ_DIR)/seeds/.stamp
 # Read-write is a different question, not more of the same one: it is the only
 # mode that runs jbd2 recovery and the dx split, and it is the only mode where
 # a bug can write. Slower per input, hence the longer per-input timeout.
-fuzz-rw: fuzz-build $(FUZZ_DIR)/seeds/.stamp
+fuzz-rw: fuzz-build $(FUZZ_DIR)/seeds/.stamp  ## libFuzzer, read-write mode
 	@mkdir -p $(FUZZ_DIR)/corpus/rw $(FUZZ_DIR)/crashes $(FUZZ_DIR)/logs
 	@cd $(FUZZ_DIR)/logs && EXT4_FUZZ_MODE=rw \
 	  $(CURDIR)/$(FUZZ_BIN) $(CURDIR)/$(FUZZ_DIR)/corpus/rw $(CURDIR)/$(FUZZ_DIR)/seeds \
@@ -938,7 +943,7 @@ endif
 # `Ext4Mac selftest` must fail with that and pass without it.
 SWIFTFLAGS += $(EXTRA_SWIFTFLAGS)
 
-typecheck: core
+typecheck: core  ## swiftc -typecheck the extension sources
 	swiftc -typecheck $(SWIFT_SRCS) $(SWIFTFLAGS)
 
 extension: $(APPEX)
@@ -965,7 +970,7 @@ $(APPEX): $(SWIFT_SRCS) $(CORE_LIB) Extension/Info.plist $(BUILD)/.build-id
 # The container app exists only to host the extension: macOS discovers FSKit
 # modules through an installed application bundle, and the user enables it in
 # System Settings > General > Login Items & Extensions.
-app: extension $(BUILD)/$(APP_NAME).app/Contents/Info.plist $(BUILD)/$(APP_NAME).app/Contents/MacOS/$(APP_NAME)
+app: extension $(BUILD)/$(APP_NAME).app/Contents/Info.plist $(BUILD)/$(APP_NAME).app/Contents/MacOS/$(APP_NAME)  ## build Ext4Mac.app with the FSKit extension inside
 
 # Stamping the plists has to notice a new commit even when no source file
 # changed, or the bundle keeps claiming the revision it was first built at --
@@ -1020,7 +1025,7 @@ SIGN_KEYCHAIN ?=
 check-ship-surface: $(CORE_LIB) $(CORE_TEST_LIB)
 	@bash scripts/check_ship_surface.sh
 
-sign: app entitlements check-ship-surface
+sign: app entitlements check-ship-surface  ## codesign the bundle with SIGN_ID="Developer ID Application: ..."
 	@SIGN_KEYCHAIN="$(SIGN_KEYCHAIN)" bash scripts/sign.sh "$(BUILD)/$(APP_NAME).app" "$(SIGN_ID)"
 
 # ------------------------------------------------------------- distribution --
@@ -1036,7 +1041,7 @@ DMG     := $(BUILD)/$(APP_NAME)-$(VERSION).dmg
 # Build the distributable disk image from the signed app. Notarize it before
 # handing it to anyone: an unnotarized Developer ID app is refused by Gatekeeper
 # on first launch.
-dmg: sign
+dmg: sign  ## build a signed DMG
 	@bash scripts/make_dmg.sh "$(BUILD)/$(APP_NAME).app" "$(DMG)"
 	@echo "next: make notarize NOTARY_PROFILE=<your-stored-profile>"
 
@@ -1044,7 +1049,7 @@ dmg: sign
 # come from a keychain profile you create once with
 #   xcrun notarytool store-credentials <name> --apple-id <email> --team-id $(TEAM_ID)
 # so no password ever appears here. On success, staple the ticket into the DMG.
-notarize:
+notarize:  ## submit the DMG to Apple (NOTARY_PROFILE=name)
 	@test -n "$(NOTARY_PROFILE)" || { \
 	  echo "set NOTARY_PROFILE=<name> (see 'make notarize' comment for setup)"; exit 1; }
 	@test -f "$(DMG)" || { echo "no $(DMG); run 'make dmg' first"; exit 1; }
@@ -1065,7 +1070,7 @@ notarize:
 # is written, committed as "Release 0.2.0", tagged v0.2.0, and the signed DMG
 # is built and checked locally so the tag is never pushed on a build that
 # cannot produce one. Pushing the tag is left to you: `git push --tags`.
-release:
+release:  ## cut a release: make release VERSION=x.y.z
 	@test -n "$(RELEASE_VERSION)" || { echo "usage: make release VERSION=x.y.z"; exit 2; }
 	@echo "$(RELEASE_VERSION)" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$$' || { echo "not a version: $(RELEASE_VERSION)"; exit 2; }
 	@test -z "$$(git status --porcelain)" || { echo "the working tree is not clean"; git status --short; exit 1; }
@@ -1094,7 +1099,7 @@ RELEASE_VERSION := $(if $(filter-out $(strip $(shell cat VERSION 2>/dev/null)),$
 # The commits since the last tag, sorted into Keep-a-Changelog headings by
 # their first word, for editing into CHANGELOG.md. A draft, not a section: the
 # point of a hand-maintained changelog is that a person decided what mattered.
-changelog-draft:
+changelog-draft:  ## commits since the last tag, under Keep-a-Changelog headings
 	@last=$$(git describe --tags --abbrev=0 2>/dev/null); \
 	  echo "## [Unreleased]  (since $${last:-the beginning})"; echo; \
 	  for h in Added Changed Fixed; do echo "### $$h"; \
@@ -1102,7 +1107,7 @@ changelog-draft:
 	      case $$h in Added) echo 'add|new|introduc|creat';; Changed) echo 'chang|mov|rename|switch|now';; Fixed) echo 'fix|bug|crash|hang|overflow|leak|wrong';; esac))" || true; \
 	    echo; done
 
-check-release:
+check-release:  ## is the built bundle the version VERSION says?
 	@bash scripts/check_release.sh
 
 # Everything an install leaves behind, removed -- or, with DRY_RUN=1, named.
@@ -1113,14 +1118,14 @@ check-release:
 #
 # One thing it cannot do: the approval toggle in System Settings > Login Items
 # & Extensions is the user's, and no command resets it.
-uninstall:
+uninstall:  ## name every artifact an install left (DRY_RUN=1 by default)
 	@DRY_RUN="$(DRY_RUN)" bash scripts/uninstall.sh
 
 test-uninstall:
 	@bash Tests/run_uninstall_tests.sh
 
 # Just the staple, for a DMG already notarized in a previous submission.
-staple:
+staple:  ## staple the notarization ticket
 	@test -f "$(DMG)" || { echo "no $(DMG)"; exit 1; }
 	xcrun stapler staple "$(DMG)"
 
@@ -1179,7 +1184,7 @@ prepare-device: tools
 	    EXT4_SIZE="$(EXT4_SIZE)" \
 	    bash scripts/prepare_device.sh
 
-install-diskutil:
+install-diskutil:  ## appear in Disk Utility (sudo)
 	@test "$$(id -u)" = "0" || { echo "needs root: sudo make install-diskutil"; exit 1; }
 	@test "$(FS_BUNDLE_DEST)" = "/Library/Filesystems/ext4.fs" || { echo "refusing: unexpected destination"; exit 1; }
 	@test -f "$(FS_BUNDLE_SRC)/Contents/Info.plist" || { echo "missing $(FS_BUNDLE_SRC)"; exit 1; }
@@ -1191,13 +1196,13 @@ install-diskutil:
 	@echo "verify with: diskutil listFilesystems | grep -i ext"
 	@echo "remove with: sudo make uninstall-diskutil"
 
-uninstall-diskutil:
+uninstall-diskutil:  ## remove the Disk Utility integration (sudo)
 	@test "$$(id -u)" = "0" || { echo "needs root: sudo make uninstall-diskutil"; exit 1; }
 	@test "$(FS_BUNDLE_DEST)" = "/Library/Filesystems/ext4.fs" || { echo "refusing: unexpected destination"; exit 1; }
 	@rm -rf "$(FS_BUNDLE_DEST)"
 	@echo "removed $(FS_BUNDLE_DEST)"
 
-install: sign
+install: sign  ## sign and install to /Applications, keeping the extension approval
 # In place, not delete-and-recreate. rm -rf + cp gives the bundle a new
 # identity, and (since the last reboot, reliably) LaunchServices responds by
 # deregistering the extension and dropping its System Settings approval --

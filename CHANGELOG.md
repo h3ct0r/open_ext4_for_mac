@@ -15,10 +15,14 @@ headings to be edited into one.
   coverage gate, and the five oracle suites judged by the Linux kernel's own
   ext4 on an Ubuntu runner.
 - In-process libFuzzer harness with a structure-aware mutator and checksum
-  stamper; a mutation campaign that runs inside `make validate`; seventeen
+  stamper; a mutation campaign that runs inside `make validate`; twenty
   hostile fixtures, one per finding, each proven red before its fix.
 - `Ext4Mac last-error` and `Ext4Mac events`: the extension records why it
-  refused or degraded a volume, and the app reads it back with advice.
+  refused, degraded, locked or could not mount a volume, and the app reads it
+  back with advice. The menu-bar agent turns a new record into a
+  notification and keeps the last ten under "Recent Issues"; `Ext4Mac status`
+  lists every volume with something to report.
+- `make help`.
 - `Ext4Mac forget --all`, which lists what it would forget and requires
   `--yes`; `forget` verifies removal and says which store it cleared.
 - `Ext4Mac selftest`: is key material locked into memory on this machine.
@@ -36,6 +40,17 @@ headings to be edited into one.
 ### Fixed
 - Twelve memory-safety and logic bugs in the vendored lwext4 found by fuzzing,
   and five more found by CI's first runs, as patches 0062 through 0078.
+- A superblock whose inode count does not cover every block group is refused
+  at probe: the last group's inode count underflowed and the first create
+  read past the end of a one-block bitmap (found by the nightly fuzzer).
+- A volume this driver declined could not be ejected until the idle probe
+  process exited: the declined resource was kept, and with it the device.
+- A read-only "degraded" record was written for every normal mount of a
+  dirty volume, because fskitd loads each volume read-only once before
+  mounting it; the record is now written only when the mount activates.
+- The release pipeline: a Keychain-exported .p12 (legacy RC2 encryption) is
+  accepted, `security import` is told the format, and the app signs when it
+  has no entitlements on macOS's bash 3.2.
 - An infinite loop in the inode allocator on a group whose descriptor and
   bitmap disagree; a use-after-free in the journal's block records after an
   aborted transaction; the read-only mount of a dirty journal now says so at
