@@ -464,13 +464,20 @@ enum Ext4Unlock {
             } else if r.keychain == .deleted {
                 print("  \(uuid): forgotten\(files)")
                 deleted += 1
-            } else if includeKeychain {
-                // Files went, the keychain saw nothing. That is not "forgotten":
-                // the keychain cannot tell "never stored" from "stored by a
-                // build this one cannot see", and the single-UUID path refuses
-                // to say forgot in this state for that reason. So does this.
-                print("  \(uuid): no keychain item visible to this build\(files)")
+            } else if includeKeychain && r.filesRemoved.isEmpty {
+                // Nothing removed and no keychain item this build can see.
+                // Not "forgotten": the keychain cannot tell "never stored"
+                // from "stored by a build this one cannot see".
+                print("  \(uuid): no keychain item visible to this build")
                 unseen += 1
+            } else if includeKeychain {
+                // The container files went; the keychain saw nothing. That is
+                // exactly what the single-UUID path reports as success with
+                // the files listed -- on a build without the provisioning
+                // profile, the container IS where the keys live -- so this
+                // agrees with it rather than exiting 1 over a job it did.
+                print("  \(uuid): forgot the container files\(files); no keychain item visible")
+                deleted += 1
             } else if r.removedSomething {
                 print("  \(uuid): forgotten\(files)")
                 deleted += 1

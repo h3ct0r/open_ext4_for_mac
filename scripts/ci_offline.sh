@@ -48,6 +48,13 @@ ci_begin
 # we are about to compile? A green run of a tree that only exists on one
 # machine is the most expensive kind of pass, and it is the exact failure a
 # CI system is supposed to make impossible.
+# The submodule on a fresh checkout is the PINNED tree, unpatched. check_patches
+# replays the patch set onto the pinned commit and diffs against Core/lwext4 --
+# which on a developer's Mac is always already patched, and on a runner is not
+# until something applies them. The first CI run failed here with "the patch
+# set does not reproduce Core/lwext4" for exactly that reason: it was true, and
+# meant nothing. Apply first (idempotent), then ask.
+stage patch          make patch
 stage check-patches  bash scripts/check_patches.sh
 
 stage build          make tools

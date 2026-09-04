@@ -78,17 +78,17 @@ corruption on the medium, not an invariant of the code.
  			rc = ext4_dir_dx_hash_string(&hinfo_tmp, len,
  						     (char *)de->name);
  			if (rc != EOK) {
-@@ -971,10 +1012,6 @@
+@@ -970,10 +1011,6 @@
+ 				ext4_free(entry_buffer);
  				return rc;
  			}
- 
+-
 -			uint32_t rec_len = 8 + len;
 -			if ((rec_len % 4) != 0)
 -				rec_len += 4 - (rec_len % 4);
--
+ 
  			memcpy(entry_buffer_ptr, de, rec_len);
  
- 			sort[idx].dentry = entry_buffer_ptr;
 @@ -986,7 +1023,6 @@
  			idx++;
  		}
@@ -97,3 +97,25 @@ corruption on the medium, not an invariant of the code.
  		de = (void *)((uint8_t *)de + elen);
  	}
  
+@@ -1037,6 +1073,21 @@
+ 		}
+ 
+ 		current_size += sort[i].rec_len;
++	}
++
++	/*
++	 * mid is 0 when the loop above never broke: the leaf's live entries
++	 * total less than half a block, or there are none. Upstream then reads
++	 * sort[mid - 1], which is sort[-1] -- a heap read four gigabytes before
++	 * the array. A leaf that reached the split path (the insert saw no gap
++	 * large enough) with that little in it is fragmented past what this
++	 * splitter can halve, or corrupt; either way it goes to e2fsck rather
++	 * than to an index built around a garbage hash.
++	 */
++	if (mid == 0) {
++		ext4_free(sort);
++		ext4_free(entry_buffer);
++		return EIO;
+ 	}
+ 
+ 	/* Check hash collision */

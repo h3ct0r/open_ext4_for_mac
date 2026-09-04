@@ -306,11 +306,16 @@ BAIMG="$WORK/bigalloc.img"; rm -f "$BAIMG"; dd if=/dev/zero of="$BAIMG" bs=1M co
 if mke2fs -q -F -t ext4 -b 4096 -O bigalloc -C 65536 "$BAIMG" >/dev/null 2>&1; then
   v=$("$DUMP" "$BAIMG" probe 2>&1 | awk '/^verdict:/{print $2}')
   n=$("$DUMP" "$BAIMG" probe 2>&1 | sed -n 's/^note: *//p' | head -1)
-  if [ "$v" = "READ_ONLY" ]; then
-    ok "bigalloc probes READ_ONLY, not as a damaged superblock ($n)"
-  else
-    bad "bigalloc probes READ_ONLY, not as a damaged superblock" "verdict=$v: $n"
-  fi
+  # UNSUPPORTED, and it has to say bigalloc. Not READ_ONLY: lwext4 sizes the
+  # bitmap checksum by blocks_per_group/8 with no cluster concept, so mounting
+  # a bigalloc volume reads 64 KB out of a 4 KB buffer -- the read-only verdict
+  # this driver used to give was never safe. And not "damaged": e2fsck reports
+  # the volume clean, and sending its owner there is the wrong advice.
+  case "$v:$n" in
+    UNSUPPORTED:*damaged*) bad "bigalloc is refused by name, not mounted and not called damaged" "it was called damaged: $n" ;;
+    UNSUPPORTED:*bigalloc*) ok "bigalloc is refused by name, not mounted and not called damaged ($n)" ;;
+    *) bad "bigalloc is refused by name, not mounted and not called damaged" "verdict=$v: $n" ;;
+  esac
 else
   echo "  (this mke2fs cannot make a bigalloc volume; cell skipped)"
 fi
@@ -650,22 +655,7 @@ fi
 echo ""
 echo "hostile journal geometry"
 
-run_deadline() {  # run_deadline <seconds> <cmd...>; rc 137 if killed
-  local secs=$1; shift
-  "$@" & local pid=$!
-  # The watchdog's output goes to /dev/null, and that is not tidiness.
-  #
-  # A caller that captures this function -- out=$(run_deadline 20 ...) -- is
-  # waiting for every process holding the write end of the substitution pipe,
-  # and the backgrounded subshell holds it too. Killing the subshell does not
-  # reap the `sleep` it forked, so the orphaned sleep keeps the pipe open and
-  # the capture blocks for the FULL deadline on every call, however fast the
-  # command was. Redirecting here detaches the watchdog from that pipe.
-  ( sleep "$secs"; kill -9 $pid 2>/dev/null ) >/dev/null 2>&1 & local dog=$!
-  wait $pid 2>/dev/null; local rc=$?
-  kill $dog 2>/dev/null; wait $dog 2>/dev/null
-  return $rc
-}
+# run_deadline comes from Tests/lib.sh.
 
 # Is there a sanitizer watching?
 #

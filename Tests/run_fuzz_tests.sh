@@ -72,22 +72,7 @@ command -v mke2fs  >/dev/null 2>&1 || { echo "  mke2fs not found; brew install e
 # The suite's own deadline, copied from the bounds suite rather than shared:
 # macOS has no timeout(1), and a driver that stops answering is the failure
 # being guarded against. rc 137 means killed.
-run_deadline() {  # run_deadline <seconds> <cmd...>; rc 137 if killed
-  local secs=$1; shift
-  "$@" & local pid=$!
-  # The watchdog's output goes to /dev/null, and that is not tidiness.
-  #
-  # A caller that captures this function -- out=$(run_deadline 20 ...) -- is
-  # waiting for every process holding the write end of the substitution pipe,
-  # and the backgrounded subshell holds it too. Killing the subshell does not
-  # reap the `sleep` it forked, so the orphaned sleep keeps the pipe open and
-  # the capture blocks for the FULL deadline on every call, however fast the
-  # command was. Redirecting here detaches the watchdog from that pipe.
-  ( sleep "$secs"; kill -9 $pid 2>/dev/null ) >/dev/null 2>&1 & local dog=$!
-  wait $pid 2>/dev/null; local rc=$?
-  kill $dog 2>/dev/null; wait $dog 2>/dev/null
-  return $rc
-}
+# run_deadline comes from Tests/lib.sh.
 
 md5of() { md5 -q "$1" 2>/dev/null || md5sum "$1" | cut -d' ' -f1; }
 

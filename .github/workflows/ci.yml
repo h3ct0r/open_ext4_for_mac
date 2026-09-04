@@ -62,7 +62,6 @@ jobs:
 
       - name: install e2fsprogs
         env:
-          HOMEBREW_NO_REQUIRE_TAP_TRUST: 1
           HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
         run: |
           brew install e2fsprogs
@@ -119,7 +118,6 @@ jobs:
 
       - name: install e2fsprogs
         env:
-          HOMEBREW_NO_REQUIRE_TAP_TRUST: 1
           HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
         run: |
           brew install e2fsprogs
@@ -257,7 +255,6 @@ jobs:
 
       - name: install e2fsprogs
         env:
-          HOMEBREW_NO_REQUIRE_TAP_TRUST: 1
           HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
         run: |
           brew install e2fsprogs
@@ -280,7 +277,7 @@ jobs:
             fi
           done
           echo "no compiler here ships a libFuzzer runtime; installing llvm"
-          HOMEBREW_NO_REQUIRE_TAP_TRUST=1 brew install llvm
+          brew install llvm
           echo "fuzz_cc=/opt/homebrew/opt/llvm/bin/clang" >> "$GITHUB_OUTPUT"
 
       # The corpus is the point of running this repeatedly. Keyed on the

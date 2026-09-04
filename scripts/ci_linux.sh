@@ -57,6 +57,13 @@ ci_begin
 # to compile? Cheap, and it is the one check that a second machine can make
 # that the first one cannot -- a patch that only applies to one working tree
 # fails here.
+# The submodule on a fresh checkout is the PINNED tree, unpatched. check_patches
+# replays the patch set onto the pinned commit and diffs against Core/lwext4 --
+# which on a developer's Mac is always already patched, and on a runner is not
+# until something applies them. The first CI run failed here with "the patch
+# set does not reproduce Core/lwext4" for exactly that reason: it was true, and
+# meant nothing. Apply first (idempotent), then ask.
+stage patch          make patch
 stage check-patches  bash scripts/check_patches.sh
 
 # gcc, no -target, -lcrypto: see the HOST_OS block in the Makefile.

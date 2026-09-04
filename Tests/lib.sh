@@ -175,6 +175,36 @@ no_linux_reason() {
   fi
 }
 
+# Run a command with a deadline; rc 137 if the deadline killed it.
+#
+# Both halves of this have bitten. The watchdog's output goes to /dev/null:
+# a caller that captures this function -- out=$(run_deadline 20 ...) -- waits
+# for every process holding the write end of the substitution pipe, and the
+# backgrounded subshell holds it too, so the capture blocked for the FULL
+# deadline on every call however fast the command was.
+#
+# And the sleep has to be reaped, not just its subshell. `kill $dog` ends the
+# subshell; the sleep it forked keeps running for the whole deadline. Three
+# suites each carried a copy of this with that leak, and a mutation campaign
+# spawning a few thousand of them on a macOS runner exhausted the process
+# table -- "fork: Resource temporarily unavailable", exit 128, from the stage
+# runner itself. Three sleeps were still alive after one run of the hostile
+# suite here. pkill -P takes the sleep down with its parent.
+run_deadline() {  # run_deadline <seconds> <cmd...>
+  local secs=$1; shift
+  "$@" & local pid=$!
+  # The watchdog owns its sleep and takes it down on TERM. `wait` in bash is
+  # interruptible by a trap, so the kill below ends the sleep and then the
+  # subshell, with no process-table scan: pkill -P did the same job and
+  # tripled the mutation campaign's run time, because it walks every process
+  # on the machine once per call and the campaign makes over a thousand.
+  ( sleep "$secs" & s=$!; trap 'kill $s 2>/dev/null; exit 0' TERM
+    wait $s; kill -9 $pid 2>/dev/null ) >/dev/null 2>&1 & local dog=$!
+  wait $pid 2>/dev/null; local rc=$?
+  kill $dog 2>/dev/null; wait $dog 2>/dev/null
+  return $rc
+}
+
 # Print the tally and exit nonzero on any failure.
 finish() {
   echo ""

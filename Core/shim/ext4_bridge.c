@@ -690,13 +690,29 @@ int ext4b_probe(ext4b_device *dev, ext4b_probe_info *out)
          * that used to mount read-only. Bounded, because the shift is off
          * the medium too.
          */
-        uint32_t cluster_ratio = 1;
+        /*
+         * bigalloc is refused here, by name, and not admitted at all. lwext4
+         * has no cluster concept: ext4_balloc_bitmap_csum runs the checksum
+         * over blocks_per_group / 8 bytes of a block-sized bitmap buffer, and
+         * on a bigalloc volume blocks_per_group is clusters x ratio -- 524288
+         * for 4 KiB blocks and 64 KiB clusters -- so the first BLOCK_UNINIT
+         * group it initialises reads 64 KB out of a 4 KB buffer. That is at
+         * mount, from an `ls`. The READ_ONLY verdict this used to give was
+         * never safe; the geometry gate closed the hole by accident and named
+         * the volume "damaged", which it is not. The honest answer is the
+         * feature is not implemented.
+         */
         if (bigalloc) {
-            if (log_cluster < log_block || log_cluster - log_block > 16)
-                why = "bigalloc cluster size is smaller than the block size or absurd";
-            else
-                cluster_ratio = 1u << (log_cluster - log_block);
+            /* Its own sentence, not the geometry wrapper's: the volume is not
+             * damaged and e2fsck is not the fix. */
+            out->verdict = EXT4B_PROBE_UNSUPPORTED;
+            snprintf(out->unsupported, sizeof(out->unsupported),
+                     "bigalloc (clustered allocation) is not supported by "
+                     "this driver; the volume itself is fine");
+            return EOK;
         }
+        uint64_t cluster_ratio = 1;
+        (void)log_cluster; (void)log_block;
 
         /*
          * rev 0 has no s_inode_size field: the inode is 128 bytes by
@@ -717,9 +733,9 @@ int ext4b_probe(ext4b_device *dev, ext4b_probe_info *out)
             why = "inode size is outside [128, block size]";
         else if (inode_size & (inode_size - 1))
             why = "inode size is not a power of two";
-        else if (blocks_per_group < 8 || blocks_per_group > 8u * bs * cluster_ratio)
-            why = bigalloc ? "blocks per group is outside [8, 8 x block size x cluster ratio]"
-                           : "blocks per group is outside [8, 8 x block size]";
+        else if (blocks_per_group < 8 ||
+                 (uint64_t)blocks_per_group > 8ull * bs * cluster_ratio)
+            why = "blocks per group is outside [8, 8 x block size]";
         else if (blocks_per_group % 8)
             why = "blocks per group is not a multiple of 8";
         else if (inodes_per_group == 0 || inodes_per_group > 8u * bs)

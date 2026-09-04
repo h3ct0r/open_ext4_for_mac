@@ -713,12 +713,27 @@ fuzz-build:
 # Linked with the full -fsanitize=fuzzer (the core objects carry
 # fuzzer-no-link), and with EXT4B_TEST_HOOKS so the harness can reach the
 # orphan-inspection API and the deliberate-assert hook.
+# Two links, because Homebrew clang and Xcode's linker do not always agree.
+# Objects from a newer Homebrew clang carry relocations that an older Xcode
+# ld-prime rejects ("invalid r_symbolnum") -- which is what the fuzz job hit on
+# a macos-15 runner with Xcode 16.4 -- while Apple's classic linker still reads
+# them. Try the default linker first (it works here, and -ld_classic is
+# deprecated), and only fall back when it fails. The fuzz binary never ships,
+# so which linker built it is nobody's concern but the campaign's.
 $(FUZZ_BIN): $(FUZZ_SRCS) $(CORE_TEST_LIB)
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(CFLAGS) -DEXT4B_TEST_HOOKS=1 \
 	    -DEXT4_FUZZ_WEIGHTS_PATH='"$(CURDIR)/tools/fuzz/mutweights.json"' \
 	    -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined \
-	    $(FUZZ_SRCS) $(CORE_TEST_LIB) $(CORE_LDLIBS) -o $@
+	    $(FUZZ_SRCS) $(CORE_TEST_LIB) $(CORE_LDLIBS) -o $@ 2>$@.ld.log \
+	|| { echo "fuzz: default linker refused the objects; retrying with -ld_classic"; \
+	     sed -n '1,3p' $@.ld.log; \
+	     $(CC) $(TARGET_FLAG) $(CFLAGS) -DEXT4B_TEST_HOOKS=1 \
+	        -DEXT4_FUZZ_WEIGHTS_PATH='"$(CURDIR)/tools/fuzz/mutweights.json"' \
+	        -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined \
+	        -Wl,-ld_classic \
+	        $(FUZZ_SRCS) $(CORE_TEST_LIB) $(CORE_LDLIBS) -o $@; }
+	@rm -f $@.ld.log
 	@echo "built $@"
 
 # The seed corpus is generated, never committed: it is mke2fs output, and
@@ -784,7 +799,14 @@ $(COV_BIN): $(FUZZ_SRCS) $(CORE_TEST_LIB)
 	$(CC) $(TARGET_FLAG) $(CFLAGS) -DEXT4B_TEST_HOOKS=1 \
 	    -DEXT4_FUZZ_WEIGHTS_PATH='"$(CURDIR)/tools/fuzz/mutweights.json"' \
 	    -fsanitize=fuzzer -fprofile-instr-generate -fcoverage-mapping \
-	    $(FUZZ_SRCS) $(CORE_TEST_LIB) $(CORE_LDLIBS) -o $@
+	    $(FUZZ_SRCS) $(CORE_TEST_LIB) $(CORE_LDLIBS) -o $@ 2>$@.ld.log \
+	|| { echo "cov: default linker refused the objects; retrying with -ld_classic"; \
+	     $(CC) $(TARGET_FLAG) $(CFLAGS) -DEXT4B_TEST_HOOKS=1 \
+	        -DEXT4_FUZZ_WEIGHTS_PATH='"$(CURDIR)/tools/fuzz/mutweights.json"' \
+	        -fsanitize=fuzzer -fprofile-instr-generate -fcoverage-mapping \
+	        -Wl,-ld_classic \
+	        $(FUZZ_SRCS) $(CORE_TEST_LIB) $(CORE_LDLIBS) -o $@; }
+	@rm -f $@.ld.log
 	@echo "built $@"
 
 fuzz-cov:

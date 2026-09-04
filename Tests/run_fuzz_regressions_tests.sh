@@ -31,17 +31,7 @@ trap 'rm -rf "$WORK"' EXIT
 [ -x "$DUMP" ] || { echo "  build first: make tools"; exit 77; }
 [ -f "$HOSTILE/MANIFEST" ] || { echo "  no $HOSTILE/MANIFEST"; exit 77; }
 
-run_deadline() {  # run_deadline <seconds> <cmd...>; rc 137 if killed
-  local secs=$1; shift
-  "$@" & local pid=$!
-  # Output redirected: see the note in Tests/run_fuzz_tests.sh. A watchdog
-  # that holds the caller's pipe makes every captured call wait its full
-  # deadline.
-  ( sleep "$secs"; kill -9 $pid 2>/dev/null ) >/dev/null 2>&1 & local dog=$!
-  wait $pid 2>/dev/null; local rc=$?
-  kill $dog 2>/dev/null; wait $dog 2>/dev/null
-  return $rc
-}
+# run_deadline comes from Tests/lib.sh.
 
 md5of() { md5 -q "$1" 2>/dev/null || md5sum "$1" | cut -d' ' -f1; }
 
@@ -135,6 +125,13 @@ while read -r file mode verbs fix note; do
     if [ "$rc" -ge 128 ]; then
       # First, because a crash ends the process before any trailer.
       bad "$file: the write path does not crash or hang" "rc=$rc (fix: $fix)"
+      failed=1
+    elif grep -qE 'AddressSanitizer|LeakSanitizer|runtime error:' "$WORK/rw-out.txt"; then
+      # Before the ran-at-all check: ASan on Linux exits 1 after its report,
+      # below the crash arm, and never prints the trailer -- so the memory
+      # bug would be reported as "the script never reached ext4dump".
+      bad "$file: the write path is free of sanitizer reports" \
+          "$(grep -m1 -E 'AddressSanitizer|runtime error:' "$WORK/rw-out.txt")"
       failed=1
     elif ! grep -qE "^script: [1-9][0-9]* command\(s\) run|^mount failed" "$WORK/rw-out.txt"; then
       # Either the script ran (N >= 1 -- a create that FAILS still counts), or

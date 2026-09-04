@@ -24,7 +24,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LWEXT4="$ROOT/Core/lwext4"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/lwext4-patchcheck.XXXXXX")"
-trap 'rm -rf "$WORK"' EXIT
+trap 'rm -rf "$WORK" "$WORK.giterr"' EXIT
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
@@ -36,21 +36,20 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 # "detected dubious ownership" and exit 128 -- a CI runner trips this. Name the
 # command that failed rather than letting a bare 128 stand, and suggest the
 # fix, so a runner problem does not read as a patch problem.
-pinned="$(git -C "$ROOT" ls-tree HEAD Core/lwext4 2>/tmp/giterr | awk '{print $3}')"
+giterr="$WORK.giterr"   # beside $WORK, not inside it: $WORK is the tree that gets diffed
+pinned="$(git -C "$ROOT" ls-tree HEAD Core/lwext4 2>"$giterr" | awk '{print $3}')"
 if [ -z "$pinned" ]; then
-    pinned="$(git -C "$LWEXT4" rev-parse HEAD 2>>/tmp/giterr)"
+    pinned="$(git -C "$LWEXT4" rev-parse HEAD 2>>"$giterr")"
 fi
 if [ -z "$pinned" ]; then
     echo "check-patches: could not read the pinned lwext4 commit." >&2
-    sed 's/^/  git: /' /tmp/giterr >&2 2>/dev/null || true
-    if grep -q "dubious ownership" /tmp/giterr 2>/dev/null; then
+    sed 's/^/  git: /' "$giterr" >&2 2>/dev/null || true
+    if grep -q "dubious ownership" "$giterr" 2>/dev/null; then
         echo "  this is git refusing a checkout it does not own, not a patch problem." >&2
         echo "  fix: git config --global --add safe.directory '*'" >&2
     fi
-    rm -f /tmp/giterr
     exit 1
 fi
-rm -f /tmp/giterr
 
 # Extract rather than clone, so no .git comes along -- a copied submodule
 # gitlink points back into the superproject and every git command in the copy
