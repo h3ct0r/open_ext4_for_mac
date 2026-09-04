@@ -2553,7 +2553,11 @@ static void
 jbd_trans_change_ownership(struct jbd_block_rec *block_rec,
 			   struct jbd_trans *new_trans)
 {
-	LIST_REMOVE(block_rec, tbrec_node);
+	/* A record with no owner is on no owner's list; there is nothing
+	 * to unlink, and its stale links point into a transaction that may
+	 * already be freed. See jbd_trans_remove_block_rec. */
+	if (block_rec->trans)
+		LIST_REMOVE(block_rec, tbrec_node);
 	if (new_trans) {
 		/* Now this block record belongs to this transaction. */
 		LIST_INSERT_HEAD(&new_trans->tbrec_list, block_rec, tbrec_node);
@@ -2692,14 +2696,30 @@ jbd_trans_remove_block_rec(struct jbd_journal *journal,
 	 * cache pressure re-dirtying a block whose first copy had already
 	 * flushed). A record that stays until its queue drains is a few
 	 * bytes; a dangling one is a crash in the commit path. */
-	if (block_rec->trans == trans &&
-	    TAILQ_EMPTY(&block_rec->dirty_buf_queue)) {
+	if (block_rec->trans != trans)
+		return;
+	if (TAILQ_EMPTY(&block_rec->dirty_buf_queue)) {
 		LIST_REMOVE(block_rec, tbrec_node);
 		RB_REMOVE(jbd_block,
 				&journal->block_rec_root,
 				block_rec);
 		ext4_free(block_rec);
+		return;
 	}
+	/*
+	 * Kept, because an older transaction's buffers still queue on it --
+	 * but the transaction being freed is its OWNER, and the record stays
+	 * in the journal's tree. Leaving it owned was a use-after-free found
+	 * by the CI fuzz smoke: a create failed and its transaction was
+	 * aborted and freed with this record still linked into its tbrec_list
+	 * and pointing at it; the next create dirtied the same block, found
+	 * the record in the tree, and LIST_REMOVE wrote through the stale
+	 * link into the freed transaction. Unlink it and orphan it: the next
+	 * transaction to touch the block adopts it, and its queue drains as
+	 * the older transaction checkpoints.
+	 */
+	LIST_REMOVE(block_rec, tbrec_node);
+	block_rec->trans = NULL;
 }
 
 /**@brief  Add block to a transaction and mark it dirty.
