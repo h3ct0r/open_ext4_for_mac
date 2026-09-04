@@ -328,6 +328,18 @@ int ext4_ialloc_alloc_inode(struct ext4_fs *fs, uint32_t *idx, bool is_dir)
 				if (rc != EOK)
 					return rc;
 
+				/*
+				 * The descriptor said this group had free inodes and
+				 * the bitmap says it has none. That is corruption on
+				 * the medium, and it used to be an infinite loop: this
+				 * continue skipped the ++bgid at the bottom, so the
+				 * same group was re-read, its checksum re-verified and
+				 * its bitmap re-scanned forever, from a create on a
+				 * read-write mount. Found by the CI fuzz smoke on its
+				 * first successful run. Move on to the next group; the
+				 * counters are wrong and e2fsck will say so.
+				 */
+				++bgid;
 				continue;
 			}
 
