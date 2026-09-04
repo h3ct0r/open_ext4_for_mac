@@ -1027,6 +1027,17 @@ int ext4_fs_alloc_inode(struct ext4_fs *fs, struct ext4_inode_ref *inode_ref,
 	ext4_inode_set_generation(inode, 0);
 	if (inode_size > EXT4_GOOD_OLD_INODE_SIZE) {
 		uint16_t size = ext4_get16(&fs->sb, want_extra_isize);
+		/* want_extra_isize is off the medium. An inode born with an
+		 * in-body area that does not fit its own inode size is
+		 * corrupt on its first day, and the first setxattr on it was a
+		 * memset with a wrapped size (CI fuzz smoke, fifth run). Give
+		 * such an inode no in-body area at all; e2fsck will say what it
+		 * thinks of the superblock. */
+		/* + 4: the in-body xattr header is one 32-bit magic number, and
+		 * its struct is private to ext4_xattr.c. */
+		if ((uint32_t)EXT4_GOOD_OLD_INODE_SIZE + size + 4 >
+		    ext4_get16(&fs->sb, inode_size))
+			size = 0;
 		ext4_inode_set_extra_isize(&fs->sb, inode, size);
 	}
 

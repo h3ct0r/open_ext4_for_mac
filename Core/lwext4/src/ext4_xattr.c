@@ -703,6 +703,18 @@ static void ext4_xattr_ibody_initialize(struct ext4_inode_ref *inode_ref)
 	if (!extra_isize)
 		return;
 
+	/*
+	 * extra_isize comes off the medium. The size below is
+	 * inode_size - 128 - extra_isize, unsigned, and an extra_isize past
+	 * that point wraps it into a memset of nearly the whole address space
+	 * starting inside the inode buffer -- AddressSanitizer reported it as
+	 * a negative size, from a setxattr on a fuzzed volume, on the CI smoke.
+	 * An in-body area that does not fit its inode cannot be initialised;
+	 * leave it alone, and the caller's second lookup reports the corruption.
+	 */
+	if (EXT4_GOOD_OLD_INODE_SIZE + extra_isize +
+	    sizeof(struct ext4_xattr_ibody_header) > inode_size)
+		return;
 	header = EXT4_XATTR_IHDR(&fs->sb, inode_ref->inode);
 	memset(header, 0, inode_size - EXT4_GOOD_OLD_INODE_SIZE - extra_isize);
 	header->h_magic = to_le32(EXT4_XATTR_MAGIC);
@@ -1597,7 +1609,13 @@ int ext4_xattr_set(struct ext4_inode_ref *inode_ref, uint8_t name_index,
 	 * ext4_xattr_set_entry() below dereferences NULL. Which it did.
 	 */
 	ret = ext4_xattr_ibody_find_entry(inode_ref, &ibody_finder);
-	if (ret != EOK || !ext4_xattr_ibody_initialized(inode_ref)) {
+	/* An error from the finder is corruption (a header outside the inode),
+	 * not an uninitialised area -- absence comes back as EOK/not-found.
+	 * Initialising over corruption is how a memset of the address space
+	 * was reached; the error goes to the caller instead. */
+	if (ret != EOK)
+		goto out;
+	if (!ext4_xattr_ibody_initialized(inode_ref)) {
 		ext4_xattr_ibody_initialize(inode_ref);
 		ret = ext4_xattr_ibody_find_entry(inode_ref, &ibody_finder);
 		if (ret != EOK)
