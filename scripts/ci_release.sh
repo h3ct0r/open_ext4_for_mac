@@ -60,13 +60,35 @@ security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
 P12="$(mktemp)"; unb64 DEVELOPER_ID_P12 "$P12"
 # Validate before importing, so a wrong password and a wrong file are told
 # apart here rather than both reading as "Unknown format in import".
-if ! openssl pkcs12 -in "$P12" -passin "pass:$DEVELOPER_ID_P12_PASSWORD" -noout -info >/dev/null 2>"$P12.err"; then
-  if grep -qi "mac verify\|invalid password\|wrong password" "$P12.err"; then
-    echo "release: DEVELOPER_ID_P12_PASSWORD does not open DEVELOPER_ID_P12"
-  else
-    echo "release: DEVELOPER_ID_P12 is not a PKCS#12 file (export the identity from Keychain Access as .p12, not the certificate alone as .cer)"
-    sed 's/^/  openssl: /' "$P12.err" | head -3
-  fi
+#
+# Keychain Access still writes its .p12 with 40-bit-RC2 encryption, which
+# OpenSSL 3 refuses to decrypt without -legacy -- it errors with
+# "unsupported ... Algorithm (RC2-40-CBC)", which is NOT a wrong file and NOT
+# a wrong password. `security import` below (Security.framework) reads that
+# encryption fine, so rejecting it here failed a perfectly good identity.
+# So: try plain, then -legacy (OpenSSL 3 only; LibreSSL has no such flag and
+# reads the legacy encryption anyway), and only then classify the failure.
+p12_ok=0
+if openssl pkcs12 -in "$P12" -passin "pass:$DEVELOPER_ID_P12_PASSWORD" \
+     -noout -info >/dev/null 2>"$P12.err"; then
+  p12_ok=1
+elif openssl pkcs12 -legacy -in "$P12" -passin "pass:$DEVELOPER_ID_P12_PASSWORD" \
+     -noout -info >/dev/null 2>>"$P12.err"; then
+  p12_ok=1
+elif grep -qiE "mac verify|invalid password|wrong password|verification failure" "$P12.err"; then
+  echo "release: DEVELOPER_ID_P12_PASSWORD does not open DEVELOPER_ID_P12"
+  rm -f "$P12" "$P12.err"; exit 1
+elif grep -qiE "unsupported|RC2|digital envelope|Algorithm \(" "$P12.err"; then
+  # A p12 openssl parsed but cannot decrypt (legacy encryption on a build
+  # without the legacy provider). It is a p12; let security import be the
+  # judge of the password.
+  echo "release: DEVELOPER_ID_P12 uses legacy encryption openssl will not decrypt here;"
+  echo "         security import will read it. (Keychain Access writes this by default.)"
+  p12_ok=1
+fi
+if [ "$p12_ok" -ne 1 ]; then
+  echo "release: DEVELOPER_ID_P12 is not a PKCS#12 file (export the identity from Keychain Access as .p12, not the certificate alone as .cer)"
+  sed 's/^/  openssl: /' "$P12.err" | head -3
   rm -f "$P12" "$P12.err"; exit 1
 fi
 rm -f "$P12.err"
