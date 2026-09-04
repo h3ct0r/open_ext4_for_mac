@@ -840,6 +840,20 @@ static int ext4_xattr_ibody_find_entry(struct ext4_inode_ref *inode_ref,
 	 * Corruption still returns EIO; absence no longer does.
 	 */
 	iheader = EXT4_XATTR_IHDR(&fs->sb, inode_ref->inode);
+	/*
+	 * Where the header lands is decided by i_extra_isize, which comes off
+	 * the medium, and the magic number below is read BEFORE the validity
+	 * check that bounds it -- deliberately, so that an inode with no
+	 * attributes is "not found" rather than an I/O error. That ordering
+	 * left the one read here unguarded: a corrupt extra_isize puts the
+	 * header past the inode buffer and the magic read runs off the end.
+	 * Found by the CI fuzz smoke, read-only mode, from a getxattr. Bound
+	 * the header itself first; a header outside the inode is corruption.
+	 */
+	if ((char *)iheader < (char *)inode_ref->inode ||
+	    (char *)iheader + sizeof(*iheader) >
+	    (char *)inode_ref->inode + inode_size)
+		return EIO;
 	if (iheader->h_magic != to_le32(EXT4_XATTR_MAGIC)) {
 		finder->s.not_found = true;
 		return EOK;
