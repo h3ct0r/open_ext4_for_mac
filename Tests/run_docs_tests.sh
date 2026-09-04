@@ -39,13 +39,29 @@ for dp, dn, fn in os.walk(root):
         if not f.endswith('.md'): continue
         p = os.path.join(dp, f)
         text = open(p, encoding='utf-8', errors='replace').read()
-        for m in re.finditer(r'\]\(([^)#\s]+)(#[^)]*)?\)', text):
-            t = m.group(1)
-            if t.startswith(('http://', 'https://', 'mailto:')): continue
-            target = os.path.normpath(os.path.join(dp, t))
+        for m in re.finditer(r'\]\(([^)\s]*)\)', text):
+            link = m.group(1)
+            if link.startswith(('http://', 'https://', 'mailto:')): continue
+            t, _, anchor = link.partition('#')
+            target = os.path.normpath(os.path.join(dp, t)) if t else p
             if not os.path.exists(target):
-                print(f"  broken in {os.path.relpath(p, root)}: {t}")
+                print(f"  broken in {os.path.relpath(p, root)}: {link}")
                 bad += 1
+                continue
+            # An anchor into a markdown file has to name a heading there, the
+            # way GitHub slugs it: lowercase, punctuation dropped, spaces to
+            # hyphens. Moving a section between files is exactly what breaks
+            # these silently.
+            if anchor and target.endswith('.md'):
+                heads = set()
+                for line in open(target, encoding='utf-8', errors='replace'):
+                    if line.startswith('#'):
+                        h = line.lstrip('#').strip().lower()
+                        h = re.sub(r'[^\w\s-]', '', h).strip().replace(' ', '-')
+                        heads.add(h)
+                if anchor.lower() not in heads:
+                    print(f"  no anchor in {os.path.relpath(p, root)}: {link}")
+                    bad += 1
 print(f"broken: {bad}")
 PY
 }

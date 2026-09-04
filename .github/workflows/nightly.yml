@@ -118,7 +118,7 @@ jobs:
   # A suite that has passed once tells you it can pass; a suite that has
   # passed repeatedly, on a machine in different states, tells you something
   # else. Three rounds is what fits in a nightly; the developer's soak runs
-  # for days and is where the number in docs/STATUS.md comes from.
+  # for days and is where the number in docs/notebook/soak.md comes from.
   offline-soak:
     name: offline soak
     runs-on: macos-26

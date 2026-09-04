@@ -7,6 +7,15 @@ Program account ($99/yr). There is no way around this: an ad-hoc or
 self-signed build will compile and pass `codesign --verify`, but `fskitd` will
 refuse to load it, and the extension will not appear in System Settings.
 
+*For developers building a copy that mounts. Users installing the DMG never
+need any of this; [INSTALL.md](INSTALL.md) is theirs.*
+
+Contents: [One-time setup](#one-time-setup) · [Building a signed bundle](#building-a-signed-bundle) ·
+[Troubleshooting `errSecInternalComponent`](#troubleshooting-errsecinternalcomponent) ·
+[Distribution](#distribution) · [Releasing from CI](#releasing-from-ci) ·
+[Can a free Apple account be used?](#can-a-free-apple-account-be-used) ·
+[Building without a certificate](#building-without-a-certificate)
+
 This is the same path Apple's own modules and the other third-party FSKit
 drivers take — the shipping ExtendFS extension, for example, is signed
 `Developer ID Application` with exactly these two entitlements.

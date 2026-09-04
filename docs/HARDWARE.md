@@ -6,6 +6,14 @@ something wedges — sometimes a reboot. The 2026-08-29 replay incident cost
 days because the failing mount reported nothing and every hypothesis needed
 another plug-in. The rule that follows from that:
 
+*For the maintainer, before a session with real media. Users do not need
+this page; [INSTALL.md](INSTALL.md) is theirs.*
+
+Contents: [0. Before leaving the desk](#0-before-leaving-the-desk) ·
+[1. Prepare the device](#1-prepare-the-device) · [2. The ladder](#2-the-ladder) ·
+[3. Evidence before retry](#3-evidence-before-retry) · [4. When it wedges](#4-when-it-wedges) ·
+[Appendix: every knob](#appendix-every-knob)
+
 **The stick is the last step.** Anything discoverable offline is discovered
 offline first. The offline harness now models the two things a disk image
 otherwise hides — per-command cost (`EXT4DUMP_IO_LATENCY_US`) and a medium
@@ -474,7 +482,7 @@ fork, and this is the command that settles it.
 
 ## 4. When it wedges
 
-Known states, from mildest to worst (docs/STATUS.md has the histories):
+Known states, from mildest to worst (docs/notebook/write-ordering-and-the-barrier.md has the histories):
 
 - **Extension serving stale code** — `pkill -9 -f Ext4FS`; fskitd relaunches
   on the next probe.

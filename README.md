@@ -152,7 +152,8 @@ reason in [patches/lwext4/README.md](patches/lwext4/README.md).
 |---|---|
 | [docs/INSTALL.md](docs/INSTALL.md) | installing, approving, upgrading, uninstalling — for users |
 | [docs/ENVELOPE.md](docs/ENVELOPE.md) | what is supported, refused, read-only, and measured; the barrier |
-| [docs/STATUS.md](docs/STATUS.md) | what works today and the engineering record behind it |
+| [docs/STATUS.md](docs/STATUS.md) | what works today, the known gaps, the record |
+| [docs/notebook/](docs/notebook/README.md) | the engineering record: every investigation, dated and unedited |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | how it fits together and the decisions that shaped it |
 | [docs/SIGNING.md](docs/SIGNING.md) | certificates, entitlements, profiles, releasing from CI |
 | [docs/HARDWARE.md](docs/HARDWARE.md) | the runbook for a day with real media |

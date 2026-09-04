@@ -1161,7 +1161,7 @@ override FS_BUNDLE_DEST := /Library/Filesystems/ext4.fs
 # --- the retired barrier daemon ----------------------------------------------
 # ext4barrierd, a root LaunchDaemon issuing DKIOCSYNCHRONIZE for the sandboxed
 # extension, was removed after remeasurement: twenty mid-write pulls across
-# five drives recovered identically with and without it (docs/STATUS.md). This
+# five drives recovered identically with and without it (docs/notebook/write-ordering-and-the-barrier.md). This
 # target remains so a machine that installed it can take it back out.
 #
 # `override` because this runs as root and removes what it finds.

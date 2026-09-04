@@ -24,6 +24,15 @@ Two rules follow from `git apply` being all-or-nothing:
   present, the patch failed as a unit, and the build skipped it with a note —
   a clone got a driver with no write barrier and no visible error.
 
+There are 78 patches; `Tests/run_docs_tests.sh` checks that every file has
+a row here and that the README's count matches. The bold tag on each row is
+its severity: **Bug fix, corruption** and **data loss** wrote or replayed
+wrong bytes onto a volume; **memory safety** and **use-after-free** are
+sanitizer findings on hostile or fuzzed input; **availability** hung or
+aborted the driver; **Conformance** matches `mke2fs`/Linux where lwext4
+diverged without being wrong; **Portability** and **Observability** are
+build and logging. Untagged rows are plumbing the shim needed.
+
 | Patch | What it does |
 |---|---|
 | `0001-guard-EXT_FINCOM_IGNORED` | Lets the build extend the INCOMPAT bits lwext4 tolerates, so we can accept `metadata_csum_seed` (which modern `mke2fs` enables by default) after the bridge has verified the seed still matches the UUID. |

@@ -28,7 +28,7 @@
 # answer for a filesystem: the question is whether it ever loses data, and
 # "usually not" is not an answer. The round's full output stays in
 # .soak/round-N.log, and the tally is printed in the form that belongs in
-# docs/STATUS.md.
+# docs/notebook/soak.md.
 #
 # NOT under build/. A round begins with `make clean`, which removes build/
 # entirely -- so a log opened there is unlinked while it is still being
@@ -147,7 +147,7 @@ report() {
         fi
     fi
     echo ""
-    echo "for docs/STATUS.md:"
+    echo "for docs/notebook/soak.md:"
     # Name the set. "N clean rounds" means something quite different for the
     # full chain and for the offline subset, and a line that does not say
     # which is a line that will be read as the stronger one.

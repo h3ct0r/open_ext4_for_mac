@@ -14,7 +14,7 @@ GitHub Release whose notes are the changelog section — produced by
   `Tests/fixtures/hostile/MANIFEST` and `patches/lwext4/` (the docs suite
   checks the README's; check the changelog's by eye).
 - The soak and, when lwext4's write path changed, the hardware loop have been
-  run on this build and recorded in `docs/STATUS.md` / `docs/HARDWARE.md`.
+  run on this build and recorded in `docs/notebook/soak.md` / `docs/HARDWARE.md`, and `docs/STATUS.md`'s record table updated.
 
 ## Cutting it
 

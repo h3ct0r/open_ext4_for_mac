@@ -140,7 +140,7 @@ clean; ~7,500 sync-fenced files verified bit-for-bit; **zero synced files
 lost.** Two of the five drives were run as an A/B against a privileged helper
 issuing real barriers, and the unbarriered arm recovered exactly as cleanly.
 That is why the helper is gone. The full record is in
-[docs/STATUS.md](STATUS.md#the-barrier-daemon-is-retired-a-five-drive-verdict)
+[the notebook](notebook/write-ordering-and-the-barrier.md#the-barrier-daemon-is-retired-a-five-drive-verdict)
 and the sessions in [docs/HARDWARE.md](HARDWARE.md).
 
 **What remains:** an observation about five drives on this macOS version is
