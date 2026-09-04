@@ -118,7 +118,11 @@ while read -r file mode verbs fix note; do
     # abort left behind. So the script keeps going after a failure
     # (EXT4DUMP_SCRIPT_CONTINUE), and creates in the root as well as in the
     # directory, in case the directory never came to be.
-    printf 'mkdir /hostile\ncreate /hostile/a\ncreate /a\nwrite /a some-bytes\nrm /a\nrm /hostile/a\n' \
+    # The 600-byte attribute is the harness's: too big for the inode body, so
+    # it lands in an xattr block, and the set path has to read the in-body
+    # header first -- the finding fixture 0017 pins lives on that path.
+    big=$(python3 -c "import sys; sys.stdout.write('v'*600)")
+    printf 'mkdir /hostile\ncreate /hostile/a\ncreate /a\nwrite /a some-bytes\nsetxattr /hostile/a user.big %s\nsetxattr /a user.big %s\nrm /a\nrm /hostile/a\n' "$big" "$big" \
       > "$WORK/rw-script.txt"
     EXT4DUMP_SCRIPT_CONTINUE=1 \
     run_deadline 60 "$DUMP" "$img" script "$WORK/rw-script.txt" > "$WORK/rw-out.txt" 2>&1

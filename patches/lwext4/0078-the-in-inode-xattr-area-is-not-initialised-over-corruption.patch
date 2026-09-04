@@ -1,0 +1,80 @@
+Subject: the in-inode xattr area is not initialised over corruption
+
+Two halves of one finding. ext4_xattr_set treated an ERROR from the in-body
+finder as "no header yet" and called ext4_xattr_ibody_initialize; after
+patch 0076 the finder returns EIO for a header placed past the inode, so the
+set path initialised over exactly the corruption 0076 had just refused. And
+the initialiser computes its memset size as inode_size - 128 - extra_isize,
+unsigned, with extra_isize off the medium: past the inode it wraps into a
+memset of nearly the address space, which AddressSanitizer reported as
+negative-size-param (size -16834) from a setxattr on the CI fuzz smoke.
+
+The finder error now goes to the caller -- absence has come back as
+EOK/not-found since 0013, so an error is corruption -- and the initialiser
+refuses an in-body area that does not fit its inode. And the root of it:
+new inodes take i_extra_isize from the superblock's s_want_extra_isize
+unbounded (ext4_fs.c), so one corrupt superblock field made every created
+file's in-body area impossible -- creation now clamps it to none. Fixture
+0017 is crafted to exactly that: want_extra_isize 200 on 256-byte inodes,
+no metadata_csum so no restamp, reproduced here as negative-size-param
+(size=-72). The runner's own artifact did not reproduce on this machine --
+its create lands on a different inode here than there, for reasons this
+commit does not settle -- and a fixture that cannot be shown red is not a
+fixture.
+
+--- a/src/ext4_xattr.c
++++ b/src/ext4_xattr.c
+@@ -703,6 +703,18 @@
+ 	if (!extra_isize)
+ 		return;
+ 
++	/*
++	 * extra_isize comes off the medium. The size below is
++	 * inode_size - 128 - extra_isize, unsigned, and an extra_isize past
++	 * that point wraps it into a memset of nearly the whole address space
++	 * starting inside the inode buffer -- AddressSanitizer reported it as
++	 * a negative size, from a setxattr on a fuzzed volume, on the CI smoke.
++	 * An in-body area that does not fit its inode cannot be initialised;
++	 * leave it alone, and the caller's second lookup reports the corruption.
++	 */
++	if (EXT4_GOOD_OLD_INODE_SIZE + extra_isize +
++	    sizeof(struct ext4_xattr_ibody_header) > inode_size)
++		return;
+ 	header = EXT4_XATTR_IHDR(&fs->sb, inode_ref->inode);
+ 	memset(header, 0, inode_size - EXT4_GOOD_OLD_INODE_SIZE - extra_isize);
+ 	header->h_magic = to_le32(EXT4_XATTR_MAGIC);
+@@ -1597,7 +1609,13 @@
+ 	 * ext4_xattr_set_entry() below dereferences NULL. Which it did.
+ 	 */
+ 	ret = ext4_xattr_ibody_find_entry(inode_ref, &ibody_finder);
+-	if (ret != EOK || !ext4_xattr_ibody_initialized(inode_ref)) {
++	/* An error from the finder is corruption (a header outside the inode),
++	 * not an uninitialised area -- absence comes back as EOK/not-found.
++	 * Initialising over corruption is how a memset of the address space
++	 * was reached; the error goes to the caller instead. */
++	if (ret != EOK)
++		goto out;
++	if (!ext4_xattr_ibody_initialized(inode_ref)) {
+ 		ext4_xattr_ibody_initialize(inode_ref);
+ 		ret = ext4_xattr_ibody_find_entry(inode_ref, &ibody_finder);
+ 		if (ret != EOK)
+--- a/src/ext4_fs.c
++++ b/src/ext4_fs.c
+@@ -1027,6 +1027,17 @@
+ 	ext4_inode_set_generation(inode, 0);
+ 	if (inode_size > EXT4_GOOD_OLD_INODE_SIZE) {
+ 		uint16_t size = ext4_get16(&fs->sb, want_extra_isize);
++		/* want_extra_isize is off the medium. An inode born with an
++		 * in-body area that does not fit its own inode size is
++		 * corrupt on its first day, and the first setxattr on it was a
++		 * memset with a wrapped size (CI fuzz smoke, fifth run). Give
++		 * such an inode no in-body area at all; e2fsck will say what it
++		 * thinks of the superblock. */
++		/* + 4: the in-body xattr header is one 32-bit magic number, and
++		 * its struct is private to ext4_xattr.c. */
++		if ((uint32_t)EXT4_GOOD_OLD_INODE_SIZE + size + 4 >
++		    ext4_get16(&fs->sb, inode_size))
++			size = 0;
+ 		ext4_inode_set_extra_isize(&fs->sb, inode, size);
+ 	}
+ 

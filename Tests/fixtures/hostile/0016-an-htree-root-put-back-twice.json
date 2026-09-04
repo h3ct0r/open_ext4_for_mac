@@ -1,0 +1,7 @@
+{ "id": "0016", "slug": "an-htree-root-put-back-twice",
+  "found_by": "the CI fuzz smoke job, fifth run, read-only mode: lwext4 assertion at ext4_bcache.c:318 (refctr) from a lookup",
+  "base": "a read-only mutant of a 5 MiB seed, the runner's artifact, trimmed to a multiple of 512",
+  "edits": [ { "what": "a corrupt htree index in a directory", "note": "enough that ext4_dir_dx_get_leaf fails" } ],
+  "symptom": "ext4_dir_dx_get_leaf put back the root block it had been handed before returning EXT4_ERR_BAD_DX_DIR; ext4_dir_dx_find_entry put it back again on the same error, and the block cache asserted on a zero reference count: abort, from a lookup by name.",
+  "fixed_by": "patch 0077 -- the walk puts back only blocks it acquired",
+  "reproduce": "build/bin/ext4dump <img> walk /   # the tree walk's lookups reach it" }

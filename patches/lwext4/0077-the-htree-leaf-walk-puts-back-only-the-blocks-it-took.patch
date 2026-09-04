@@ -1,0 +1,28 @@
+Subject: the htree leaf walk puts back only the blocks it took
+
+ext4_dir_dx_get_leaf is handed the index root block by its caller and walks
+down from it, and on a malformed index it put that root block back before
+returning EXT4_ERR_BAD_DX_DIR. The caller, ext4_dir_dx_find_entry, then put
+the same block back again on the same error return -- reference count zero,
+and the block cache asserts: an abort from a lookup by name in a corrupt
+indexed directory. Found by the CI fuzz smoke, read-only mode. The walk now
+puts back a block only if it acquired it itself. Fixture 0016.
+
+--- a/src/ext4_dir_idx.c
++++ b/src/ext4_dir_idx.c
+@@ -647,7 +647,14 @@
+ 		entry_space = entry_space / sizeof(struct ext4_dir_idx_entry);
+ 
+ 		if (limit != entry_space) {
+-			ext4_block_set(inode_ref->fs->bdev, tmp_blk);
++			/* tmp_blk starts out as the caller's root block, which the
++			 * caller owns and will put on this same error return. Putting
++			 * it here too dropped its reference count to zero and tripped
++			 * the block cache's assertion -- a crash from a lookup in a
++			 * corrupt indexed directory, found by the CI fuzz smoke. Only
++			 * a block this walk acquired is this walk's to put back. */
++			if (tmp_blk != root_block)
++				ext4_block_set(inode_ref->fs->bdev, tmp_blk);
+ 			return EXT4_ERR_BAD_DX_DIR;
+ 		}
+ 

@@ -1,0 +1,8 @@
+{ "id": "0017", "slug": "an-in-inode-xattr-area-initialised-over-corruption",
+  "found_by": "the CI fuzz smoke job, fifth run, read-write mode: AddressSanitizer negative-size-param (size=-16834) in ext4_xattr_ibody_initialize from a setxattr. The runner's artifact did not reproduce on the developer's machine (its create allocates a different inode there); this fixture is crafted to the mechanism instead.",
+  "base": "mke2fs -b 1024 -I 256 -O ^metadata_csum,^64bit on 4 MiB, empty",
+  "edits": [ { "what": "superblock s_min_extra_isize (0x15C) and s_want_extra_isize (0x15E)", "from": 32, "to": 200, "note": "128 + 200 + 4 > 256: every inode created on this volume is born with an in-body area that does not fit it. No metadata_csum, so nothing to restamp." } ],
+  "symptom": "The write script's create gave the new file i_extra_isize 200; setxattr's finder returned EIO (patch 0076: header past the inode); the set path took that as 'not initialised yet' and initialised: memset with inode_size - 128 - extra_isize wrapped, AddressSanitizer negative-size-param (size=-72).",
+  "fixed_by": "patch 0078 -- creation clamps extra_isize to none when it cannot fit, the finder's error goes to the caller, and the initialiser refuses an area that does not fit",
+  "reproduce": "build/bin/ext4dump <img> mkdir /d; create /d/a; setxattr /d/a user.big <600 bytes>   under make test-asan",
+  "note_on_detection": "Faults only under AddressSanitizer." }

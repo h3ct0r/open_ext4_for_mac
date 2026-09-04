@@ -160,3 +160,10 @@ on one of its records. Read-write mode, from a failed create.
 read ahead of a check for a good reason, 0065 later strengthened the
 check, and the moved read was outside it the whole time. Read-only mode,
 from a getxattr.
+
+0077 and 0078 came out of the same CI run as 0076, the smoke job's fifth:
+a root block put back twice on an htree lookup's error path, and a memset
+whose unsigned size wrapped when the set path initialised an in-body area
+over the corruption 0076 had just learned to refuse. The second one is
+what a fix can do: close one read and open the next path along -- which is
+what the smoke job is for.

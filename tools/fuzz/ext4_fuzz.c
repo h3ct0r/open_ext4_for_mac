@@ -571,11 +571,15 @@ static void fuzz_one_rw(const uint8_t *data, size_t size)
         uint32_t dir = 0, file = 0;
         size_t   wrote = 0;
 
-        (void)ext4b_create(dev, EXT4B_ROOT_INO, "fzdir", 5, EXT4B_TYPE_DIR,
-                           0755, 0, 0, &dir);
+        int crc = ext4b_create(dev, EXT4B_ROOT_INO, "fzdir", 5, EXT4B_TYPE_DIR,
+                               0755, 0, 0, &dir);
+        if (getenv("EXT4_FUZZ_TRACE"))
+            fprintf(stderr, "trace: rw mkdir fzdir rc=%d ino=%u\n", crc, dir);
         if (dir == 0) dir = EXT4B_ROOT_INO;
 
-        (void)ext4b_create(dev, dir, "a", 1, EXT4B_TYPE_FILE, 0644, 0, 0, &file);
+        crc = ext4b_create(dev, dir, "a", 1, EXT4B_TYPE_FILE, 0644, 0, 0, &file);
+        if (getenv("EXT4_FUZZ_TRACE"))
+            fprintf(stderr, "trace: rw create a rc=%d ino=%u\n", crc, file);
         if (file != 0) {
             /* Three blocks: past the inline case, into the extent tree. */
             (void)ext4b_write(dev, file, 0, payload, 3u * 4096, &wrote);
