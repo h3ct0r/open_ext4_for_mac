@@ -149,8 +149,18 @@ TRANS_MIN=1200
 TRANS_MAX=2600
 
 dirty_ok=""
-kill_after=20
-for attempt in 1 2 3 4; do
+# Bisection on the kill time, not a linear aim. The count of waiting
+# transactions is not linear in how long the load runs: a fast machine fills
+# the 128 MiB ring in about fourteen seconds and the count then sits on a
+# plateau (~4,670 on a GitHub runner), and a checkpoint that wraps the ring
+# can drop it to zero for a moment. The first version scaled the kill point
+# by target/measured, which from the plateau aimed at 7 s, saw a wrap, doubled
+# to 14 s, hit the plateau again, and ran out of its four attempts -- while
+# an identical run minutes earlier had landed on the third try. Bisection
+# keeps a bracket [too shallow, too deep] and halves it; a zero sample steers
+# neither side.
+kill_lo=1; kill_hi=""; kill_after=20
+for attempt in 1 2 3 4 5 6 7 8; do
   cp "$WORK/bench.img" "$WORK/dirty.img"
   # The batch size is pinned, not inherited. This cell needs a log deep in
   # TRANSACTIONS -- the window above is counted in them -- and how many a given
@@ -168,10 +178,10 @@ for attempt in 1 2 3 4; do
     wait "$load_pid" 2>/dev/null
   else
     wait "$load_pid" 2>/dev/null
-    # It ran to the end, so its last commit left the journal clean. Kill
-    # earlier, not later -- the sequence used to grow here, which meant the one
-    # case that needed a shorter run got three progressively longer ones.
-    kill_after=$(( kill_after / 2 )); [ "$kill_after" -lt 2 ] && kill_after=2
+    # It ran to the end, so its last commit left the journal clean: this
+    # kill time is an upper bound.
+    kill_hi=$kill_after
+    kill_after=$(( (kill_lo + kill_hi) / 2 )); [ "$kill_after" -lt 1 ] && kill_after=1
     note "  load finished before the kill; retrying with a ${kill_after}s kill"
     continue
   fi
@@ -179,7 +189,8 @@ for attempt in 1 2 3 4; do
   "$DUMP" "$WORK/dirty.img" decrypt "$WORK/dirty-plain.img" >/dev/null 2>&1
   if ! dumpe2fs -h "$WORK/dirty-plain.img" 2>/dev/null \
        | grep -q 'needs_recovery'; then
-    kill_after=$(( kill_after / 2 )); [ "$kill_after" -lt 2 ] && kill_after=2
+    kill_hi=$kill_after
+    kill_after=$(( (kill_lo + kill_hi) / 2 )); [ "$kill_after" -lt 1 ] && kill_after=1
     note "  kill left a clean journal; retrying with a ${kill_after}s kill"
     continue
   fi
@@ -192,16 +203,20 @@ for attempt in 1 2 3 4; do
      && [ "${revokes:-0}" -ge 1 ]; then
     dirty_ok=yes; break
   fi
-  # Aim the next attempt: transactions accumulate roughly linearly in the time
-  # the load is allowed to run, so scale the kill point by how far off this one
-  # landed. Clamped, because a zero or a runaway would cost the whole suite.
-  if [ "${trans:-0}" -gt 0 ]; then
-    kill_after=$(( kill_after * TARGET_TRANS / trans ))
-    [ "$kill_after" -lt 2 ]   && kill_after=2
-    [ "$kill_after" -gt 120 ] && kill_after=120
+  if [ "${trans:-0}" -eq 0 ]; then
+    # A wrap caught mid-checkpoint says nothing about the bracket; try a
+    # little earlier without moving either end.
+    kill_after=$(( kill_after * 4 / 5 )); [ "$kill_after" -lt 1 ] && kill_after=1
+  elif [ "${trans:-0}" -gt "$TRANS_MAX" ]; then
+    kill_hi=$kill_after
+    kill_after=$(( (kill_lo + kill_hi) / 2 ))
   else
-    kill_after=$(( kill_after * 2 ))
+    # Too shallow (or deep enough but no revoke yet): later.
+    kill_lo=$kill_after
+    if [ -n "$kill_hi" ]; then kill_after=$(( (kill_lo + kill_hi) / 2 )); else kill_after=$(( kill_after * 2 )); fi
   fi
+  [ "$kill_after" -lt 1 ]   && kill_after=1
+  [ "$kill_after" -gt 120 ] && kill_after=120
   note "  depth outside [$TRANS_MIN, $TRANS_MAX]; retrying with a ${kill_after}s kill"
 done
 [ -n "$dirty_ok" ] || { bad "could not construct a deep dirty journal"; note ""; note "RESULT: FAIL"; exit 1; }
