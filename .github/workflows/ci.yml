@@ -33,8 +33,8 @@ permissions:
 jobs:
   # Everything that needs nothing but the checkout, a compiler and e2fsprogs.
   core-macos:
-    name: offline suites (macOS, arm64)
-    runs-on: macos-15
+    name: offline suites (macOS 26, arm64)
+    runs-on: macos-26
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -51,17 +51,18 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global --add safe.directory "*"
 
-      # The image defaults to Xcode 16.4, whose macOS 15.5 SDK carries an older
-      # FSKit: FSUnaryFileSystemOperations there requires the replyHandler
-      # forms of probeResource/loadResource, and this extension implements the
-      # async forms the macOS 26 SDK requires -- the SDK it is developed and
-      # installed against. Same SDK on the runner, or typecheck fails on a
-      # protocol conformance that is correct where the driver actually runs.
-      - name: select Xcode 26.3
+      # The SDK has to be the one this driver is written against. FSKit moved
+      # between SDKs twice in this project's life: the macOS 15.x SDK wants the
+      # replyHandler forms of probeResource/loadResource where this code has
+      # the async ones, and the 26.2 SDK (Xcode 26.3) has no FSVolume.MountOptions
+      # at all. The developer's machine has the 26.5 SDK; so does Xcode 26.5 on
+      # the macos-26 image, and the image's default 26.6 ships the same SDK.
+      # Pin it, and print it, so a drift is one line at the top of the log.
+      - name: select Xcode 26.5
         if: runner.os == 'macOS'
         run: |
-          sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
-          echo "SDK: $(xcrun --show-sdk-path)"
+          sudo xcode-select -s /Applications/Xcode_26.5.app/Contents/Developer
+          echo "SDK: $(xcrun --show-sdk-version) at $(xcrun --show-sdk-path)"
           xcodebuild -version | head -1
 
       # The suites patch the pinned lwext4 commit; a shallow submodule with no
@@ -112,7 +113,7 @@ jobs:
   # job rather than doubling the length of the one above.
   asan-macos:
     name: sanitizers (macOS, arm64)
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -129,17 +130,18 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global --add safe.directory "*"
 
-      # The image defaults to Xcode 16.4, whose macOS 15.5 SDK carries an older
-      # FSKit: FSUnaryFileSystemOperations there requires the replyHandler
-      # forms of probeResource/loadResource, and this extension implements the
-      # async forms the macOS 26 SDK requires -- the SDK it is developed and
-      # installed against. Same SDK on the runner, or typecheck fails on a
-      # protocol conformance that is correct where the driver actually runs.
-      - name: select Xcode 26.3
+      # The SDK has to be the one this driver is written against. FSKit moved
+      # between SDKs twice in this project's life: the macOS 15.x SDK wants the
+      # replyHandler forms of probeResource/loadResource where this code has
+      # the async ones, and the 26.2 SDK (Xcode 26.3) has no FSVolume.MountOptions
+      # at all. The developer's machine has the 26.5 SDK; so does Xcode 26.5 on
+      # the macos-26 image, and the image's default 26.6 ships the same SDK.
+      # Pin it, and print it, so a drift is one line at the top of the log.
+      - name: select Xcode 26.5
         if: runner.os == 'macOS'
         run: |
-          sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
-          echo "SDK: $(xcrun --show-sdk-path)"
+          sudo xcode-select -s /Applications/Xcode_26.5.app/Contents/Developer
+          echo "SDK: $(xcrun --show-sdk-version) at $(xcrun --show-sdk-path)"
           xcodebuild -version | head -1
 
       - name: install e2fsprogs
@@ -200,17 +202,18 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global --add safe.directory "*"
 
-      # The image defaults to Xcode 16.4, whose macOS 15.5 SDK carries an older
-      # FSKit: FSUnaryFileSystemOperations there requires the replyHandler
-      # forms of probeResource/loadResource, and this extension implements the
-      # async forms the macOS 26 SDK requires -- the SDK it is developed and
-      # installed against. Same SDK on the runner, or typecheck fails on a
-      # protocol conformance that is correct where the driver actually runs.
-      - name: select Xcode 26.3
+      # The SDK has to be the one this driver is written against. FSKit moved
+      # between SDKs twice in this project's life: the macOS 15.x SDK wants the
+      # replyHandler forms of probeResource/loadResource where this code has
+      # the async ones, and the 26.2 SDK (Xcode 26.3) has no FSVolume.MountOptions
+      # at all. The developer's machine has the 26.5 SDK; so does Xcode 26.5 on
+      # the macos-26 image, and the image's default 26.6 ships the same SDK.
+      # Pin it, and print it, so a drift is one line at the top of the log.
+      - name: select Xcode 26.5
         if: runner.os == 'macOS'
         run: |
-          sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
-          echo "SDK: $(xcrun --show-sdk-path)"
+          sudo xcode-select -s /Applications/Xcode_26.5.app/Contents/Developer
+          echo "SDK: $(xcrun --show-sdk-version) at $(xcrun --show-sdk-path)"
           xcodebuild -version | head -1
 
       # cryptsetup for the LUKS fixtures, attr for the xattr and chattr checks
@@ -275,7 +278,7 @@ jobs:
   # developer's soak, which run with a corpus that has been growing for weeks.
   fuzz-macos:
     name: fuzzer smoke (macOS, arm64)
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -292,17 +295,18 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global --add safe.directory "*"
 
-      # The image defaults to Xcode 16.4, whose macOS 15.5 SDK carries an older
-      # FSKit: FSUnaryFileSystemOperations there requires the replyHandler
-      # forms of probeResource/loadResource, and this extension implements the
-      # async forms the macOS 26 SDK requires -- the SDK it is developed and
-      # installed against. Same SDK on the runner, or typecheck fails on a
-      # protocol conformance that is correct where the driver actually runs.
-      - name: select Xcode 26.3
+      # The SDK has to be the one this driver is written against. FSKit moved
+      # between SDKs twice in this project's life: the macOS 15.x SDK wants the
+      # replyHandler forms of probeResource/loadResource where this code has
+      # the async ones, and the 26.2 SDK (Xcode 26.3) has no FSVolume.MountOptions
+      # at all. The developer's machine has the 26.5 SDK; so does Xcode 26.5 on
+      # the macos-26 image, and the image's default 26.6 ships the same SDK.
+      # Pin it, and print it, so a drift is one line at the top of the log.
+      - name: select Xcode 26.5
         if: runner.os == 'macOS'
         run: |
-          sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
-          echo "SDK: $(xcrun --show-sdk-path)"
+          sudo xcode-select -s /Applications/Xcode_26.5.app/Contents/Developer
+          echo "SDK: $(xcrun --show-sdk-version) at $(xcrun --show-sdk-path)"
           xcodebuild -version | head -1
 
       - name: install e2fsprogs
@@ -336,8 +340,15 @@ jobs:
       # branch so a pull request grows its own, with restore-keys falling back
       # to master's -- a new branch inherits weeks of exploration instead of
       # starting from the seeds.
-      - name: cache the corpus
-        uses: actions/cache@v4
+      # restore and save are separate steps on purpose. actions/cache saves in
+      # its post step only when the job SUCCEEDED, so for as long as this job
+      # was red -- three runs -- no corpus was ever saved, and every run
+      # started again from the fourteen seeds. A campaign that cannot keep
+      # what it learned while it is finding things is a campaign that never
+      # grows. The save runs always.
+      - name: restore the corpus
+        id: corpus
+        uses: actions/cache/restore@v4
         with:
           path: .fuzz/corpus
           key: fuzz-corpus-${{ github.ref_name }}-${{ github.run_number }}
@@ -382,6 +393,13 @@ jobs:
       - name: any artifact with an input is a failure
         if: always() && env.skip != '1'
         run: make fuzz-check
+
+      - name: save the corpus
+        if: always() && env.skip != '1'
+        uses: actions/cache/save@v4
+        with:
+          path: .fuzz/corpus
+          key: fuzz-corpus-${{ github.ref_name }}-${{ github.run_number }}
 
       - name: artifacts
         if: always()

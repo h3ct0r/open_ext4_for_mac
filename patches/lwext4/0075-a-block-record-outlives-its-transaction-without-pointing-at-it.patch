@@ -1,0 +1,70 @@
+Subject: a block record that outlives its transaction no longer points at it
+
+jbd_trans_remove_block_rec keeps a block record alive when an older
+transaction's buffers still queue on it -- a correct rule, added after a
+measured use-after-free. But it kept the record OWNED: still linked into
+the dying transaction's tbrec_list, still pointing at it. When that
+transaction was aborted and freed -- a create that failed on a fuzzed
+volume -- the record stayed in the journal's tree with links into freed
+memory. The next create dirtied the same block, found the record, and
+jbd_trans_change_ownership's LIST_REMOVE wrote through the stale link
+into the freed transaction.
+
+AddressSanitizer: heap-use-after-free in jbd_trans_change_ownership,
+reached from ext4_fs_put_block_group_ref during inode allocation, on an
+artifact the CI fuzz smoke produced in read-write mode. Fixture 0014 is
+that artifact.
+
+Now a record that must outlive its owner is unlinked and orphaned
+(trans = NULL), and jbd_trans_change_ownership unlinks only a record
+that has an owner. The next transaction to touch the block adopts it;
+its buffer queue drains as the older transaction checkpoints.
+
+--- a/src/ext4_journal.c
++++ b/src/ext4_journal.c
+@@ -2553,7 +2553,11 @@
+ jbd_trans_change_ownership(struct jbd_block_rec *block_rec,
+ 			   struct jbd_trans *new_trans)
+ {
+-	LIST_REMOVE(block_rec, tbrec_node);
++	/* A record with no owner is on no owner's list; there is nothing
++	 * to unlink, and its stale links point into a transaction that may
++	 * already be freed. See jbd_trans_remove_block_rec. */
++	if (block_rec->trans)
++		LIST_REMOVE(block_rec, tbrec_node);
+ 	if (new_trans) {
+ 		/* Now this block record belongs to this transaction. */
+ 		LIST_INSERT_HEAD(&new_trans->tbrec_list, block_rec, tbrec_node);
+@@ -2692,14 +2696,30 @@
+ 	 * cache pressure re-dirtying a block whose first copy had already
+ 	 * flushed). A record that stays until its queue drains is a few
+ 	 * bytes; a dangling one is a crash in the commit path. */
+-	if (block_rec->trans == trans &&
+-	    TAILQ_EMPTY(&block_rec->dirty_buf_queue)) {
++	if (block_rec->trans != trans)
++		return;
++	if (TAILQ_EMPTY(&block_rec->dirty_buf_queue)) {
+ 		LIST_REMOVE(block_rec, tbrec_node);
+ 		RB_REMOVE(jbd_block,
+ 				&journal->block_rec_root,
+ 				block_rec);
+ 		ext4_free(block_rec);
++		return;
+ 	}
++	/*
++	 * Kept, because an older transaction's buffers still queue on it --
++	 * but the transaction being freed is its OWNER, and the record stays
++	 * in the journal's tree. Leaving it owned was a use-after-free found
++	 * by the CI fuzz smoke: a create failed and its transaction was
++	 * aborted and freed with this record still linked into its tbrec_list
++	 * and pointing at it; the next create dirtied the same block, found
++	 * the record in the tree, and LIST_REMOVE wrote through the stale
++	 * link into the freed transaction. Unlink it and orphan it: the next
++	 * transaction to touch the block adopts it, and its queue drains as
++	 * the older transaction checkpoints.
++	 */
++	LIST_REMOVE(block_rec, tbrec_node);
++	block_rec->trans = NULL;
+ }
+ 
+ /**@brief  Add block to a transaction and mark it dirty.

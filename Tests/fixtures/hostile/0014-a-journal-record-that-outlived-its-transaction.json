@@ -1,0 +1,16 @@
+{
+  "id": "0014",
+  "slug": "a-journal-record-that-outlived-its-transaction",
+  "found_by": "the CI fuzz smoke job (fuzz-macos), read-write mode, third run: AddressSanitizer heap-use-after-free",
+  "base": "a read-write mutant of a 4 MiB seed, the runner's own artifact, trimmed by the one trailing byte the fuzzer had appended: the in-process harness takes any length, ext4dump refuses a device that is not a multiple of 512 before any script runs",
+  "edits": [
+    {
+      "what": "corruption that makes a create fail after its transaction has dirtied a group descriptor block",
+      "note": "the exact bytes are the fuzzer's; the property that matters is a create that aborts with a block record kept alive by an older transaction's queued buffers"
+    }
+  ],
+  "symptom": "The aborted transaction was freed with a still-needed block record linked into its list and pointing at it. The next create dirtied the same block, found the record in the journal's tree, and jbd_trans_change_ownership's LIST_REMOVE wrote into the freed transaction: heap-use-after-free at ext4_journal.c:2556, reached from ext4_fs_put_block_group_ref via ext4_ialloc_alloc_inode.",
+  "fixed_by": "patch 0075 -- a record that outlives its owner is unlinked and orphaned; ownership change unlinks only an owned record",
+  "reproduce": "EXT4_FUZZ_MODE=rw build/bin/ext4_fuzz -runs=1 <img>   (or the hostile suite under make test-asan)",
+  "note_on_detection": "A use-after-free: faults only under AddressSanitizer, like fixtures 0001, 0004 and 0012."
+}

@@ -150,3 +150,8 @@ successful run produced a read-write mutant on which a create never
 returned. The inode allocator's "this group is full after all" branch
 forgot to advance to the next group. A hang from a create, on a
 read-write mount, is exactly the class the write-mode campaign exists for.
+
+0075 is CI's second finding, from the same fuzz smoke run as 0074's
+sibling: a use-after-free in the journal's block-record bookkeeping when a
+transaction is aborted while an older transaction still has buffers queued
+on one of its records. Read-write mode, from a failed create.

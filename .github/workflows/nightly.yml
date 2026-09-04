@@ -30,12 +30,20 @@ jobs:
   # run that proves the instrument still works.
   long-fuzz:
     name: an hour each way
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      # See ci.yml: git refuses a checkout it does not own, and the SDK has to
+      # be the 26.5 one this driver is written against.
+      - name: trust the checkout and pick the SDK
+        run: |
+          git config --global --add safe.directory "*"
+          sudo xcode-select -s /Applications/Xcode_26.5.app/Contents/Developer
+          echo "SDK: $(xcrun --show-sdk-version)"
 
       - name: install e2fsprogs
         run: |
@@ -113,12 +121,20 @@ jobs:
   # for days and is where the number in docs/STATUS.md comes from.
   offline-soak:
     name: offline soak
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      # See ci.yml: git refuses a checkout it does not own, and the SDK has to
+      # be the 26.5 one this driver is written against.
+      - name: trust the checkout and pick the SDK
+        run: |
+          git config --global --add safe.directory "*"
+          sudo xcode-select -s /Applications/Xcode_26.5.app/Contents/Developer
+          echo "SDK: $(xcrun --show-sdk-version)"
 
       - name: install e2fsprogs
         run: |

@@ -741,7 +741,14 @@ $(FUZZ_BIN): $(FUZZ_SRCS) $(CORE_TEST_LIB)
 
 # The seed corpus is generated, never committed: it is mke2fs output, and
 # regenerating it is cheaper than versioning ten disk images.
-$(FUZZ_DIR)/seeds/.stamp:
+# ext4dump is a prerequisite, not a nicety. make_seeds.sh builds the indexed
+# directory and the deep extent trees THROUGH ext4dump, and degrades with a
+# note when the tool is absent -- to a corpus with no htree and no extent
+# index, which is a corpus that cannot reach ext4_dir_dx_* or the extent
+# walkers in read-only mode. The CI fuzz job never ran `make tools`, made its
+# seeds that way, and the coverage gate reported the htree paths unreached on
+# every run. They were unreachable, from those seeds.
+$(FUZZ_DIR)/seeds/.stamp: $(BUILD)/bin/ext4dump
 	@mkdir -p $(FUZZ_DIR)/seeds
 	@if [ -x Tests/fuzz/make_seeds.sh ] || [ -f Tests/fuzz/make_seeds.sh ]; then \
 	  bash Tests/fuzz/make_seeds.sh || exit $$?; \

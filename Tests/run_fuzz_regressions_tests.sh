@@ -111,8 +111,16 @@ while read -r file mode verbs fix note; do
     # the exit code says nothing.
     # A file, not a heredoc: run_deadline backgrounds its command, and an
     # asynchronous command's stdin is /dev/null. See the check below.
-    printf 'mkdir /hostile\ncreate /hostile/a\nwrite /hostile/a some-bytes\nrm /hostile/a\n' \
+    # The same shape as the in-process harness's write pass, and for the same
+    # reason it has that shape: each step's state is the next step's input,
+    # and a step that FAILS is part of the state -- fixture 0014's finding is
+    # a create that aborts followed by a create that trips over what the
+    # abort left behind. So the script keeps going after a failure
+    # (EXT4DUMP_SCRIPT_CONTINUE), and creates in the root as well as in the
+    # directory, in case the directory never came to be.
+    printf 'mkdir /hostile\ncreate /hostile/a\ncreate /a\nwrite /a some-bytes\nrm /a\nrm /hostile/a\n' \
       > "$WORK/rw-script.txt"
+    EXT4DUMP_SCRIPT_CONTINUE=1 \
     run_deadline 60 "$DUMP" "$img" script "$WORK/rw-script.txt" > "$WORK/rw-out.txt" 2>&1
     rc=$?
     # The script has to have RUN. For its first weeks this suite fed the
