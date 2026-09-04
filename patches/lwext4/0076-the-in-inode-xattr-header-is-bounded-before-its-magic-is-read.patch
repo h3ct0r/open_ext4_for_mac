@@ -1,0 +1,41 @@
+Subject: the in-inode xattr header is bounded before its magic number is read
+
+Patch 0013 made ext4_xattr_ibody_find_entry read the header's magic number
+BEFORE calling ext4_xattr_is_ibody_valid, so that an inode which has never
+carried an attribute answers "not found" instead of EIO -- the difference
+between Finder copying a file and not. Patch 0065 then bounded the header
+inside ext4_xattr_is_ibody_valid, because i_extra_isize comes off the medium
+and decides where the header lands. Between the two, the one read that 0013
+had moved ahead of the check stayed unguarded.
+
+AddressSanitizer: heap-buffer-overflow, READ of size 4, in
+ext4_xattr_ibody_find_entry, reached from ext4b_getxattr -- the CI fuzz
+smoke's fourth run, read-only mode. Fixture 0015 is that artifact.
+
+The header is bounded against the inode buffer before its magic is read; a
+header outside the inode is corruption and returns EIO, as 0065 already has
+it for everything that follows. The not-found path is unchanged.
+
+--- a/src/ext4_xattr.c
++++ b/src/ext4_xattr.c
+@@ -840,6 +840,20 @@
+ 	 * Corruption still returns EIO; absence no longer does.
+ 	 */
+ 	iheader = EXT4_XATTR_IHDR(&fs->sb, inode_ref->inode);
++	/*
++	 * Where the header lands is decided by i_extra_isize, which comes off
++	 * the medium, and the magic number below is read BEFORE the validity
++	 * check that bounds it -- deliberately, so that an inode with no
++	 * attributes is "not found" rather than an I/O error. That ordering
++	 * left the one read here unguarded: a corrupt extra_isize puts the
++	 * header past the inode buffer and the magic read runs off the end.
++	 * Found by the CI fuzz smoke, read-only mode, from a getxattr. Bound
++	 * the header itself first; a header outside the inode is corruption.
++	 */
++	if ((char *)iheader < (char *)inode_ref->inode ||
++	    (char *)iheader + sizeof(*iheader) >
++	    (char *)inode_ref->inode + inode_size)
++		return EIO;
+ 	if (iheader->h_magic != to_le32(EXT4_XATTR_MAGIC)) {
+ 		finder->s.not_found = true;
+ 		return EOK;

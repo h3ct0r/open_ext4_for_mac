@@ -431,6 +431,14 @@ static void fuzz_one_ro(const uint8_t *data, size_t size)
                 if (ext4b_listxattr(dev, e->inode, fz_xattr_name, &xc) == 0) {
                     for (size_t k = 0; k < nnames; k++) {
                         size_t vlen = 0;
+                        /* Which inode and which name: a finding here is only
+                         * reproducible outside the harness if it can be
+                         * pointed at. tools/ may read the environment. */
+                        if (getenv("EXT4_FUZZ_TRACE"))
+                            fprintf(stderr, "trace: getxattr dir=%u ino=%u"
+                                    " entry=%.*s name=%s\n",
+                                    dir_ino, e->inode, (int)e->name_len,
+                                    e->name, names[k]);
                         (void)ext4b_getxattr(dev, e->inode, names[k],
                                              scratch, 65536, &vlen);
                     }

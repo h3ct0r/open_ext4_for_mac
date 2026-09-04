@@ -155,3 +155,8 @@ read-write mount, is exactly the class the write-mode campaign exists for.
 sibling: a use-after-free in the journal's block-record bookkeeping when a
 transaction is aborted while an older transaction still has buffers queued
 on one of its records. Read-write mode, from a failed create.
+
+0076 is the third finding from CI, and a lesson in ordering: 0013 moved a
+read ahead of a check for a good reason, 0065 later strengthened the
+check, and the moved read was outside it the whole time. Read-only mode,
+from a getxattr.

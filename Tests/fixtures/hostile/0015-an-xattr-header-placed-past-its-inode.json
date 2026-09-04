@@ -1,0 +1,16 @@
+{
+  "id": "0015",
+  "slug": "an-xattr-header-placed-past-its-inode",
+  "found_by": "the CI fuzz smoke job (fuzz-macos), read-only mode, fourth run: AddressSanitizer heap-buffer-overflow, READ of size 4",
+  "base": "a read-only mutant of a 3 MiB seed, the runner's own artifact, kept whole",
+  "edits": [
+    {
+      "what": "an inode's i_extra_isize",
+      "note": "large enough that EXT4_XATTR_IHDR points past the inode buffer"
+    }
+  ],
+  "symptom": "ext4_xattr_ibody_find_entry read the in-inode xattr header's magic number before the bounds check that 0065 had put inside ext4_xattr_is_ibody_valid -- patch 0013 had moved that read ahead of the check so an attribute-less inode answers 'not found' rather than EIO. With the header past the inode, the magic read ran off the end of the inode-table block buffer: heap-buffer-overflow at ext4_xattr.c:843, reached from ext4b_getxattr.",
+  "fixed_by": "patch 0076 -- the header is bounded against the inode before its magic is read",
+  "reproduce": "build/bin/ext4dump <img> getxattr /hardlink/mid.bin user.small   # EIO with the patch; heap-buffer-overflow under ASan without it. The inode is reached through /hardlink, which the corrupt image presents as a file but the harness (and a lookup) traverse as a directory -- the tree-walk verb skips it, which is why the row names the path.",
+  "note_on_detection": "A read overflow: faults only under AddressSanitizer, like fixtures 0001, 0004 and 0012."
+}
