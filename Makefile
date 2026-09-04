@@ -661,6 +661,9 @@ clean:
 # that never grows. .soak/ exists for the same reason.
 FUZZ_DIR   := .fuzz
 FUZZ_TIME  ?= 600
+# Per-input deadline. A hang here is a finding; on a shared ASan runner it is
+# also sometimes just a slow minute, so the CI smoke raises it to 60.
+FUZZ_TIMEOUT ?= 20
 FUZZ_JOBS  ?= 4
 FUZZ_CC    ?= /opt/homebrew/opt/llvm/bin/clang
 
@@ -755,7 +758,7 @@ fuzz: fuzz-build $(FUZZ_DIR)/seeds/.stamp
 	@mkdir -p $(FUZZ_DIR)/corpus/ro $(FUZZ_DIR)/crashes $(FUZZ_DIR)/logs
 	@cd $(FUZZ_DIR)/logs && EXT4_FUZZ_MODE=ro \
 	  $(CURDIR)/$(FUZZ_BIN) $(CURDIR)/$(FUZZ_DIR)/corpus/ro $(CURDIR)/$(FUZZ_DIR)/seeds \
-	  $(FUZZ_ARGS) -timeout=20
+	  $(FUZZ_ARGS) -timeout=$(FUZZ_TIMEOUT)
 
 # Read-write is a different question, not more of the same one: it is the only
 # mode that runs jbd2 recovery and the dx split, and it is the only mode where

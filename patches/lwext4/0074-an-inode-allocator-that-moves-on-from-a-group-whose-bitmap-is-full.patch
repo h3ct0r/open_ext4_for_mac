@@ -1,0 +1,37 @@
+Subject: the inode allocator moves on from a group whose bitmap is full
+
+ext4_ialloc_alloc_inode walks the block groups looking for a free inode.
+When a group's descriptor says it has free inodes but its bitmap has no
+clear bit, the ENOSPC branch released the group and did `continue` -- which
+skipped the ++bgid at the bottom of the loop. Same group, re-read, its
+checksum re-verified, its bitmap re-scanned, forever: an infinite loop from
+a create on a read-write mount, holding the mount.
+
+Found by the CI fuzz smoke on the first run that built the harness on a
+runner: a 5 MiB read-write mutant timed out at 20 s there, and here the
+same input ran a `create` past a 60 s deadline. A descriptor and a bitmap
+that disagree is corruption on the medium, and the counters are e2fsck's to
+fix; the allocator's job is to move to the next group. It does now, and the
+same create completes in a second. Fixture 0013 pins it.
+
+--- a/src/ext4_ialloc.c
++++ b/src/ext4_ialloc.c
+@@ -328,6 +328,18 @@
+ 				if (rc != EOK)
+ 					return rc;
+ 
++				/*
++				 * The descriptor said this group had free inodes and
++				 * the bitmap says it has none. That is corruption on
++				 * the medium, and it used to be an infinite loop: this
++				 * continue skipped the ++bgid at the bottom, so the
++				 * same group was re-read, its checksum re-verified and
++				 * its bitmap re-scanned forever, from a create on a
++				 * read-write mount. Found by the CI fuzz smoke on its
++				 * first successful run. Move on to the next group; the
++				 * counters are wrong and e2fsck will say so.
++				 */
++				++bgid;
+ 				continue;
+ 			}
+ 

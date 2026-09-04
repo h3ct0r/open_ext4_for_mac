@@ -1,0 +1,12 @@
+{
+  "id": "0013",
+  "slug": "a-group-that-claims-free-inodes-its-bitmap-does-not-have",
+  "found_by": "the CI fuzz smoke job (fuzz-macos), read-write mode, on the first run that built the harness on a runner: libFuzzer timeout after 20 s",
+  "base": "a read-write mutant of a 5 MiB seed; kept whole rather than minimised -- it is mostly zeros and gzips to a few kilobytes",
+  "edits": [
+    { "what": "a group descriptor's free-inodes count disagrees with its inode bitmap", "note": "the descriptor says free inodes remain; the bitmap has no clear bit" }
+  ],
+  "symptom": "ext4_ialloc_alloc_inode found the group's bitmap full (ENOSPC), released the group, and did `continue` -- skipping the ++bgid at the bottom of its loop. The same group was re-read, its checksum re-verified and its bitmap re-scanned forever: a create on a read-write mount never returned. Reproduced here: `ext4dump <img> create /x` ran past a 60 s deadline.",
+  "fixed_by": "patch 0074 -- the ENOSPC branch advances to the next group",
+  "reproduce": "build/bin/ext4dump <img> create /x   # returns in about a second with the patch; never without it"
+}

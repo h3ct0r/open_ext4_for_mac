@@ -144,3 +144,9 @@ one it fixed. Each is an out-of-bounds access off the medium — 0071 and 0073
 are writes reachable from a create and from mount respectively — so they are
 the same class as the fuzzer's finds and are pinned by hostile fixtures the
 same way.
+
+0074 is the first finding from CI itself: the fuzz smoke job's first
+successful run produced a read-write mutant on which a create never
+returned. The inode allocator's "this group is full after all" branch
+forgot to advance to the next group. A hang from a create, on a
+read-write mount, is exactly the class the write-mode campaign exists for.

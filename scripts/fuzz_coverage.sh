@@ -153,6 +153,15 @@ for mode in $MODES; do
   ran=$(grep -oE '^ext4_fuzz: inputs=[0-9]+ probed-ext=[0-9]+ mounted=[0-9]+' "$log" | tail -1)
   total=$(grep -c '^COVERED_FUNC' "$log")
   echo "  ${ran:-(no stats line)}, $total function(s) covered"
+  # A symbolizer that cannot read the binary reports nothing covered, and the
+  # gate then lists every function as missing -- eighteen FAILs about coverage
+  # that are one fact about tooling. The first CI run did exactly this: atos
+  # could not symbolize a Homebrew-clang binary. Say what is actually wrong.
+  if [ "$total" -eq 0 ] && grep -q "failed to symbolize\|Can't read from symbolizer" "$log"; then
+    bad "$mode: the symbolizer works" \
+        "$(grep -m1 'failed to symbolize\|symbolizer' "$log") -- coverage cannot be measured on this toolchain"
+    return 0
+  fi
 
   # A run that mounted nothing measures nothing, and every expectation below
   # would fail for one reason rather than for its own.

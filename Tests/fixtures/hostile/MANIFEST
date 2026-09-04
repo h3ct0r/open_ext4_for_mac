@@ -36,3 +36,4 @@
 0010-an-odd-group-descriptor-size.img.gz  ro    probe,ls+/,check,df  gate  s_desc_size odd, which lwext4 uses whether or not 64BIT is set; every descriptor pointer built from it was misaligned
 0011-a-revision-0-superblock-with-an-inode-size-that-is-not-128.img.gz  ro    probe,ls+/,check  gate  fixture 0002 with s_rev_level set to 0: the gate used to substitute 128 for rev 0 instead of validating the field lwext4 actually reads
 0012-a-directory-entry-at-the-last-byte-of-its-block.img.gz  ro    probe,ls+/d,cat+/d/z,check  0072  a directory entry one byte short of its block end; the linear lookup read its header past the buffer, bounded now by the header not the searched name
+0013-a-group-that-claims-free-inodes-its-bitmap-does-not-have.img.gz  rw    probe,ls+/,check  0074  a descriptor that claims free inodes over a full bitmap; the allocator re-scanned the same group forever from a create -- CI fuzz smoke, first successful run
