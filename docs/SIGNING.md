@@ -267,7 +267,7 @@ The repository secrets it reads, and how each is made:
 
 | secret | what | how |
 |---|---|---|
-| `DEVELOPER_ID_P12` | the Developer ID Application identity | Keychain Access -> the certificate -> Export as .p12 with a password; then `base64 -i cert.p12 \| pbcopy` |
+| `DEVELOPER_ID_P12` | the Developer ID Application identity -- certificate AND private key | Keychain Access -> **My Certificates** -> expand the *Developer ID Application* row so the private key shows under it -> right-click the certificate -> Export, file format **Personal Information Exchange (.p12)**, set a password; then `base64 -i cert.p12 \| pbcopy`. A `.cer` is the certificate alone and imports as "Unknown format". If you export with openssl instead, pass `-legacy`: macOS cannot read OpenSSL 3's default PKCS#12 encryption. |
 | `DEVELOPER_ID_P12_PASSWORD` | that password | as chosen at export |
 | `EXT_PROVISIONING_PROFILE` | `Extension/Ext4FS.provisionprofile` | `base64 -i Extension/Ext4FS.provisionprofile \| pbcopy` |
 | `APP_PROVISIONING_PROFILE` | `App/Ext4Mac.provisionprofile` | `base64 -i App/Ext4Mac.provisionprofile \| pbcopy` |

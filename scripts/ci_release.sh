@@ -31,6 +31,20 @@ KEYCHAIN="${RUNNER_TEMP:-/tmp}/ext4-release.keychain-db"
 KEYCHAIN_PASSWORD="$(uuidgen)"
 
 need() { [ -n "${!1:-}" ] || { echo "release: missing $1"; exit 1; }; }
+
+# Decode a base64 secret into a file. Strips every whitespace character first:
+# a value pasted into GitHub's secret box arrives with the line breaks and the
+# trailing newline it was copied with, and macOS base64 --decode hands
+# `security import` a truncated blob for that, which it reports as "Unknown
+# format in import" -- which is what the first dry run said, and it named
+# nothing. Then say what was decoded, by size and type, never by content.
+unb64() {  # unb64 <var-name> <out-file>
+  printf '%s' "${!1}" | tr -d '[:space:]' | base64 --decode > "$2" 2>/dev/null \
+    || { echo "release: $1 is not valid base64"; exit 1; }
+  local n; n=$(wc -c < "$2" | tr -d ' ')
+  [ "$n" -gt 0 ] || { echo "release: $1 decoded to nothing"; exit 1; }
+  echo "release: $1 -> $n bytes, $(file -b "$2" | cut -c1-60)"
+}
 for v in DEVELOPER_ID_P12 DEVELOPER_ID_P12_PASSWORD EXT_PROVISIONING_PROFILE APP_PROVISIONING_PROFILE; do need "$v"; done
 [ -n "$DRY_RUN" ] || for v in NOTARY_KEY NOTARY_KEY_ID NOTARY_ISSUER GITHUB_TOKEN; do need "$v"; done
 
@@ -43,7 +57,19 @@ echo "release: $(cat VERSION) at $(git rev-parse --short HEAD)${DRY_RUN:+ (dry r
 security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
 security set-keychain-settings -lut 3600 "$KEYCHAIN"
 security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-P12="$(mktemp)"; printf '%s' "$DEVELOPER_ID_P12" | base64 --decode > "$P12"
+P12="$(mktemp)"; unb64 DEVELOPER_ID_P12 "$P12"
+# Validate before importing, so a wrong password and a wrong file are told
+# apart here rather than both reading as "Unknown format in import".
+if ! openssl pkcs12 -in "$P12" -passin "pass:$DEVELOPER_ID_P12_PASSWORD" -noout -info >/dev/null 2>"$P12.err"; then
+  if grep -qi "mac verify\|invalid password\|wrong password" "$P12.err"; then
+    echo "release: DEVELOPER_ID_P12_PASSWORD does not open DEVELOPER_ID_P12"
+  else
+    echo "release: DEVELOPER_ID_P12 is not a PKCS#12 file (export the identity from Keychain Access as .p12, not the certificate alone as .cer)"
+    sed 's/^/  openssl: /' "$P12.err" | head -3
+  fi
+  rm -f "$P12" "$P12.err"; exit 1
+fi
+rm -f "$P12.err"
 security import "$P12" -k "$KEYCHAIN" -P "$DEVELOPER_ID_P12_PASSWORD" \
   -T /usr/bin/codesign -T /usr/bin/security >/dev/null
 rm -f "$P12"
@@ -54,8 +80,11 @@ identity="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk -F'"' '/D
 echo "release: signing as $identity"
 
 # ---------------------------------------------------------------- profiles --
-printf '%s' "$EXT_PROVISIONING_PROFILE" | base64 --decode > Extension/Ext4FS.provisionprofile
-printf '%s' "$APP_PROVISIONING_PROFILE" | base64 --decode > App/Ext4Mac.provisionprofile
+unb64 EXT_PROVISIONING_PROFILE Extension/Ext4FS.provisionprofile
+unb64 APP_PROVISIONING_PROFILE  App/Ext4Mac.provisionprofile
+for pp in Extension/Ext4FS.provisionprofile App/Ext4Mac.provisionprofile; do
+  security cms -D -i "$pp" >/dev/null 2>&1 || { echo "release: $pp is not a provisioning profile"; exit 1; }
+done
 
 # ------------------------------------------------------------------- build --
 make patch >/dev/null
@@ -70,7 +99,8 @@ if [ -n "$DRY_RUN" ]; then
 fi
 
 # ---------------------------------------------------------------- notarize --
-KEY="$(mktemp -d)/AuthKey.p8"; printf '%s' "$NOTARY_KEY" | base64 --decode > "$KEY"
+KEY="$(mktemp -d)/AuthKey.p8"; unb64 NOTARY_KEY "$KEY"
+grep -q "BEGIN PRIVATE KEY" "$KEY" || { echo "release: NOTARY_KEY is not a .p8 private key"; exit 1; }
 xcrun notarytool submit "$DMG" --key "$KEY" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER" --wait
 rm -f "$KEY"
 xcrun stapler staple "$DMG"
