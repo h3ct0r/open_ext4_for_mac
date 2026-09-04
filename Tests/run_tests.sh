@@ -75,7 +75,12 @@ for img in ext4_4k ext4_1k ext3_4k ext2_4k; do
 done
 
 out="$("$DUMP" "$FIX/ext4_4k.img" ls 2>/dev/null)"
-echo "$out" | grep -q 'link_to_hello -> docs/hello.txt' \
+# A here-string, not `echo "$out" | grep -q`. This suite runs under pipefail,
+# grep -q exits on its first match and closes the pipe, and when echo is still
+# writing a 500-file listing -- as it was on a slow ASan runner -- it takes
+# SIGPIPE and pipefail turns a line that MATCHED into a failed cell. Seen once
+# in CI, never here: rc=141 on demand with a large enough listing.
+grep -q 'link_to_hello -> docs/hello.txt' <<<"$out" \
   && ok "symlink target resolved" || bad "symlink target resolved"
 
 # A hard link must report the *same* inode from both paths.
