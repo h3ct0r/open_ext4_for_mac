@@ -92,8 +92,13 @@ if [ "$p12_ok" -ne 1 ]; then
   rm -f "$P12" "$P12.err"; exit 1
 fi
 rm -f "$P12.err"
+# -f pkcs12, explicitly. The file is a mktemp with no extension, and
+# security import guesses the format from the extension first: with none it
+# fails a perfectly valid .p12 with "SecKeychainItemImport: Unknown format in
+# import" -- the same message a wrong file gives, which is what made this look
+# like a bad secret. Naming the format removes the guess.
 security import "$P12" -k "$KEYCHAIN" -P "$DEVELOPER_ID_P12_PASSWORD" \
-  -T /usr/bin/codesign -T /usr/bin/security >/dev/null
+  -f pkcs12 -T /usr/bin/codesign -T /usr/bin/security >/dev/null
 rm -f "$P12"
 security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
 security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
