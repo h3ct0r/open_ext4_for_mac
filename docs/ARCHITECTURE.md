@@ -99,11 +99,20 @@ bounds checking — and gates on an **allow-list**. An unknown INCOMPAT bit mean
 the on-disk layout may differ in ways we cannot see, so the volume is refused
 rather than risked.
 
+The gate is a table, not a chain of conditions: one row per feature bit with
+its policy (supported, read-only, refused) and the sentence a person sees.
+`ext4dump policy` prints it, and `docs/ENVELOPE.md` carries the same table for
+readers -- `Tests/run_envelope_tests.sh` diffs the two, so the document cannot
+quietly stop describing the code.
+
 One case is worth calling out. `metadata_csum_seed` (INCOMPAT 0x2000) stores an
 explicit checksum seed so `tune2fs` can change a volume's UUID without
-rewriting every checksum. lwext4 has no notion of that field — its
-`ext4_sblock` struct does not even declare it — and always derives the seed
-from the UUID. `mke2fs` sets the two equal at creation, so they agree until
+rewriting every checksum. Upstream lwext4 has no notion of that field and
+always derives the seed from the UUID; `patches/lwext4/0012` gives it
+`ext4_sb_csum_seed()`, which honours the stored value, so such a volume mounts
+read-write here. (An earlier version of this paragraph described the pre-0012
+behaviour, and the read-only downgrade it implied is gone.) `mke2fs` sets the
+two equal at creation, so they agree until
 somebody changes the UUID. The probe compares them and downgrades the volume to
 read-only when they diverge, because otherwise every checksum lwext4 wrote
 would be wrong. Modern `mke2fs` enables this feature by default, so without

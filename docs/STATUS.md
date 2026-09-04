@@ -7,7 +7,7 @@
 | 2 — kernel-offloaded I/O | **disabled** — see below |
 | 3 — write path | **complete and working on real mounts** |
 | 4 — correctness harness | **complete: image, crash-consistency, differential-vs-Linux, and mounted-driver** |
-| 5 — polish & distribution | **format implemented**; check is a mountability check only; no DMG yet |
+| 5 — polish & distribution | **format implemented**; check is a mountability check only; `make dmg` builds a DMG, `make notarize`/`staple` exist; versioning and a release workflow are the remaining plumbing |
 
 ## What works today
 

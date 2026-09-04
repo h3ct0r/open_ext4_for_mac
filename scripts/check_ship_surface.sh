@@ -34,7 +34,7 @@ else
 fi
 
 # 2. The test-only orphan hooks must be absent from the shipping symbol table.
-for sym in ext4b_set_orphan_cleanup ext4b_orphan_head; do
+for sym in ext4b_set_orphan_cleanup ext4b_orphan_head ext4b_feature_policy; do
   if grep -qE "T _?$sym\$" <<<"$syms"; then
     note "FAIL the shipping core exports the test hook $sym"
     fail=1

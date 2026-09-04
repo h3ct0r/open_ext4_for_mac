@@ -674,6 +674,15 @@ static void io_stats_report(void)
             c->flushes);
 }
 
+static void print_policy_row(void *ctx, char set, uint32_t bit,
+                             const char *name, const char *policy,
+                             const char *why)
+{
+    (void)ctx;
+    printf("%s 0x%05x %-20s %-10s %s\n",
+           set == 'I' ? "incompat" : "ro_compat", bit, name, policy, why);
+}
+
 static void logger(void *ctx, int level, const char *msg)
 {
     (void)ctx;
@@ -1500,6 +1509,7 @@ int main(int argc, char **argv)
             "usage: %s <image> <command> [args]\n"
             "\ncommands:\n"
             "  probe              inspect the superblock without mounting\n"
+            "  policy             every feature bit the probe has a rule for\n"
             "  format [gen] [bs] [label]\n"
             "                     write a fresh filesystem (gen 2/3/4, default 4)\n"
             "  ls [path]          recursive listing (default /)\n"
@@ -2100,6 +2110,11 @@ int main(int argc, char **argv)
                   st.avail_blocks > st.free_blocks ||
                   st.free_inodes > st.total_inodes) ? 1 : 0;
         }
+
+    } else if (strcmp(cmd, "policy") == 0) {
+        /* One line per feature rule, exactly as the envelope suite renders
+         * docs/ENVELOPE.md's table -- the diff between the two is the test. */
+        ext4b_feature_policy(print_policy_row, NULL);
 
     } else if (strcmp(cmd, "groups") == 0) {
         /*

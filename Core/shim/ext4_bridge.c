@@ -537,21 +537,95 @@ void ext4b_set_txn_batch(ext4b_device *dev, uint32_t batch)
  * INCOMPAT bit means the on-disk layout may differ in ways we cannot see, so
  * writing would risk corruption.
  */
-#define INCOMPAT_SUPPORTED  (0x0002 /* FILETYPE  */ | \
-                             0x0004 /* RECOVER   */ | \
-                             0x0040 /* EXTENTS   */ | \
-                             0x0080 /* 64BIT     */ | \
-                             0x0100 /* MMP       */ | \
-                             0x0200 /* FLEX_BG   */ | \
-                             0x2000 /* CSUM_SEED — conditional, see below */)
+/*
+ * The policy, as data. One row per feature bit this driver has an opinion
+ * about; the probe below walks it, and so does `ext4dump policy`, and so does
+ * Tests/run_envelope_tests.sh, which renders docs/ENVELOPE.md's table to the
+ * same lines and diffs. That is what keeps the document from drifting away
+ * from the code: the code IS the table, and the document has to match it.
+ *
+ * A bit that is not in the table is refused (INCOMPAT) or downgraded to
+ * read-only (RO_COMPAT) with a generic message -- the allow-list rule the
+ * comment above describes. A bit that is here as REFUSED or DOWNGRADED is one
+ * that has been looked at and given its reason. SUPPORTED bits are the
+ * allow-list.
+ */
+typedef enum {
+    EXT4B_POLICY_SUPPORTED,   /* mounts read-write */
+    EXT4B_POLICY_DOWNGRADED,  /* mounts read-only, with a reason */
+    EXT4B_POLICY_REFUSED,     /* does not mount, with a reason */
+} ext4b_policy;
 
-#define RO_COMPAT_SUPPORTED (0x0001 /* SPARSE_SUPER */ | \
-                             0x0002 /* LARGE_FILE   */ | \
-                             0x0008 /* HUGE_FILE    */ | \
-                             0x0010 /* GDT_CSUM     */ | \
-                             0x0020 /* DIR_NLINK    */ | \
-                             0x0040 /* EXTRA_ISIZE  */ | \
-                             0x0400 /* METADATA_CSUM*/)
+typedef struct {
+    char         set;      /* 'I' incompat, 'R' ro_compat */
+    uint32_t     bit;
+    const char  *name;     /* e2fsprogs' name for it */
+    ext4b_policy policy;
+    const char  *why;      /* the sentence a person sees, or "" for supported */
+} ext4b_feature_rule;
+
+static const ext4b_feature_rule ext4b_feature_rules[] = {
+    /* INCOMPAT: the on-disk layout. Unknown means refused. */
+    { 'I', 0x0001, "compression",     EXT4B_POLICY_REFUSED,    "filesystem uses compression" },
+    { 'I', 0x0002, "filetype",        EXT4B_POLICY_SUPPORTED,  "" },
+    { 'I', 0x0004, "needs_recovery",  EXT4B_POLICY_SUPPORTED,  "" },
+    { 'I', 0x0008, "journal_dev",     EXT4B_POLICY_REFUSED,    "this is an external journal device" },
+    { 'I', 0x0010, "meta_bg",         EXT4B_POLICY_REFUSED,    "filesystem uses meta_bg descriptor placement, which this driver reads incorrectly" },
+    { 'I', 0x0040, "extent",          EXT4B_POLICY_SUPPORTED,  "" },
+    { 'I', 0x0080, "64bit",           EXT4B_POLICY_SUPPORTED,  "" },
+    { 'I', 0x0100, "mmp",             EXT4B_POLICY_SUPPORTED,  "" },
+    { 'I', 0x0200, "flex_bg",         EXT4B_POLICY_SUPPORTED,  "" },
+    { 'I', 0x0400, "ea_inode",        EXT4B_POLICY_REFUSED,    "filesystem uses EA inodes" },
+    { 'I', 0x2000, "metadata_csum_seed", EXT4B_POLICY_SUPPORTED, "" },
+    { 'I', 0x4000, "large_dir",       EXT4B_POLICY_REFUSED,    "filesystem uses large directories" },
+    { 'I', 0x8000, "inline_data",     EXT4B_POLICY_REFUSED,    "filesystem uses inline data" },
+    { 'I', 0x10000, "encrypt",        EXT4B_POLICY_REFUSED,    "filesystem uses encryption (fscrypt)" },
+    { 'I', 0x20000, "casefold",       EXT4B_POLICY_REFUSED,    "filesystem uses case-folding" },
+    /* RO_COMPAT: safe to read regardless. Unknown means read-only. */
+    { 'R', 0x0001, "sparse_super",    EXT4B_POLICY_SUPPORTED,  "" },
+    { 'R', 0x0002, "large_file",      EXT4B_POLICY_SUPPORTED,  "" },
+    { 'R', 0x0008, "huge_file",       EXT4B_POLICY_SUPPORTED,  "" },
+    { 'R', 0x0010, "uninit_bg",       EXT4B_POLICY_SUPPORTED,  "" },
+    { 'R', 0x0020, "dir_nlink",       EXT4B_POLICY_SUPPORTED,  "" },
+    { 'R', 0x0040, "extra_isize",     EXT4B_POLICY_SUPPORTED,  "" },
+    { 'R', 0x0100, "quota",           EXT4B_POLICY_DOWNGRADED, "filesystem uses quotas" },
+    /* bigalloc is RO_COMPAT by ext4's rules and REFUSED by this driver's:
+     * lwext4 has no cluster concept and sizes bitmap checksums by
+     * blocks_per_group, which on a bigalloc volume is clusters x ratio -- a
+     * 64 KB read out of a 4 KB buffer at mount. The probe checks this bit
+     * before its geometry gate, which the same arithmetic would trip. */
+    { 'R', 0x0200, "bigalloc",        EXT4B_POLICY_REFUSED,    "bigalloc (clustered allocation) is not supported by this driver; the volume itself is fine" },
+    { 'R', 0x0400, "metadata_csum",   EXT4B_POLICY_SUPPORTED,  "" },
+    { 'R', 0x2000, "project",         EXT4B_POLICY_DOWNGRADED, "filesystem uses project quotas" },
+    { 'R', 0x8000, "verity",          EXT4B_POLICY_DOWNGRADED, "filesystem uses fs-verity" },
+};
+
+/* The allow-lists, derived from the table so they cannot disagree with it. */
+static uint32_t ext4b_supported_mask(char set)
+{
+    uint32_t m = 0;
+    for (size_t i = 0; i < sizeof ext4b_feature_rules / sizeof ext4b_feature_rules[0]; i++)
+        if (ext4b_feature_rules[i].set == set &&
+            ext4b_feature_rules[i].policy == EXT4B_POLICY_SUPPORTED)
+            m |= ext4b_feature_rules[i].bit;
+    return m;
+}
+
+/* The first rule in table order that names a bit in `bits` with `policy`,
+ * or NULL. Table order is the order a person is told about them. */
+static const ext4b_feature_rule *ext4b_rule_for(char set, uint32_t bits,
+                                                ext4b_policy policy)
+{
+    for (size_t i = 0; i < sizeof ext4b_feature_rules / sizeof ext4b_feature_rules[0]; i++)
+        if (ext4b_feature_rules[i].set == set &&
+            ext4b_feature_rules[i].policy == policy &&
+            (bits & ext4b_feature_rules[i].bit))
+            return &ext4b_feature_rules[i];
+    return NULL;
+}
+
+#define INCOMPAT_SUPPORTED  ext4b_supported_mask('I')
+#define RO_COMPAT_SUPPORTED ext4b_supported_mask('R')
 
 #define INCOMPAT_RECOVER 0x0004
 #define COMPAT_HAS_JOURNAL 0x0004
@@ -703,12 +777,12 @@ int ext4b_probe(ext4b_device *dev, ext4b_probe_info *out)
          * feature is not implemented.
          */
         if (bigalloc) {
-            /* Its own sentence, not the geometry wrapper's: the volume is not
-             * damaged and e2fsck is not the fix. */
+            /* Its own sentence, from the table, not the geometry wrapper's:
+             * the volume is not damaged and e2fsck is not the fix. */
+            const ext4b_feature_rule *r = ext4b_rule_for('R', 0x0200, EXT4B_POLICY_REFUSED);
             out->verdict = EXT4B_PROBE_UNSUPPORTED;
-            snprintf(out->unsupported, sizeof(out->unsupported),
-                     "bigalloc (clustered allocation) is not supported by "
-                     "this driver; the volume itself is fine");
+            snprintf(out->unsupported, sizeof(out->unsupported), "%s",
+                     r ? r->why : "bigalloc is not supported by this driver");
             return EOK;
         }
         uint64_t cluster_ratio = 1;
@@ -828,60 +902,34 @@ int ext4b_probe(ext4b_device *dev, ext4b_probe_info *out)
     uint32_t bad_incompat = out->feature_incompat & ~(uint32_t)INCOMPAT_SUPPORTED;
     if (bad_incompat) {
         out->verdict = EXT4B_PROBE_UNSUPPORTED;
-        /* Name the common ones so the user gets an actionable message. */
-        const char *why = "unsupported incompatible features";
-        if (bad_incompat & 0x10000) why = "filesystem uses encryption (fscrypt)";
-        else if (bad_incompat & 0x20000) why = "filesystem uses case-folding";
-        else if (bad_incompat & 0x8000) why = "filesystem uses inline data";
-        else if (bad_incompat & 0x0400) why = "filesystem uses EA inodes";
-        else if (bad_incompat & 0x4000) why = "filesystem uses large directories";
-        else if (bad_incompat & 0x0001) why = "filesystem uses compression";
-        else if (bad_incompat & 0x0008) why = "this is an external journal device";
         /*
-         * META_BG was on the supported list until it was measured.
+         * Name the one a person can act on. The table carries the sentence
+         * for every bit this driver has looked at; a bit it has not is the
+         * generic case, which is the allow-list doing its job.
          *
-         * On a meta_bg volume e2fsck calls clean -- 320 files, no errors --
-         * this driver fails the group descriptor checksum for group 2, cannot
-         * read inode 209 at all, and reports 137 GB of file data from an `ls`
-         * of a 5 MiB volume. Writing to one is worse: 150 files created leave
-         * 59 inodes in groups still flagged INODE_UNINIT, which e2fsck reports
-         * as damage. The identical volume without meta_bg is clean both ways,
-         * so it is the feature and not the allocator.
-         *
-         * Under meta_bg the group descriptors are scattered through the volume
-         * instead of following the superblock, and lwext4's placement
-         * arithmetic does not agree with e2fsprogs about where they are past
-         * the first meta block group. Both shim helpers that read descriptors
-         * directly already returned ENOTSUP on such a volume, which was the
-         * standing hint that nobody had checked the rest of it.
-         *
-         * Refused rather than downgraded to read-only, deliberately: a driver
-         * that returns the wrong bytes is worse than one that declines. The
-         * first version of this fix WAS a read-only downgrade, until `check`
-         * on the seed reported an inode it could not read and the reads turned
-         * out to be wrong as well.
-         *
-         * Found while building the fuzzing seed corpus, on a volume nothing
-         * had mutated. The fuzzing only got as far as making us write to one.
+         * META_BG is in the table as refused because it was measured: on a
+         * meta_bg volume e2fsck calls clean, this driver fails a group
+         * descriptor checksum, cannot read an inode, and reports 137 GB of
+         * data from an `ls` of a 5 MiB volume; writing leaves inodes in
+         * groups still flagged INODE_UNINIT. lwext4's descriptor placement
+         * does not agree with e2fsprogs past the first meta block group.
+         * Refused rather than downgraded: a driver that returns the wrong
+         * bytes is worse than one that declines.
          */
-        else if (bad_incompat & 0x0010)
-            why = "filesystem uses meta_bg descriptor placement, which this "
-                  "driver reads incorrectly";
+        const ext4b_feature_rule *r = ext4b_rule_for('I', bad_incompat, EXT4B_POLICY_REFUSED);
         snprintf(out->unsupported, sizeof(out->unsupported),
-                 "%s (incompat 0x%08x)", why, bad_incompat);
+                 "%s (incompat 0x%08x)",
+                 r ? r->why : "unsupported incompatible features", bad_incompat);
         return EOK;
     }
 
     uint32_t bad_ro = out->feature_ro_compat & ~(uint32_t)RO_COMPAT_SUPPORTED;
     if (bad_ro) {
         out->verdict = EXT4B_PROBE_READ_ONLY;
-        const char *why = "unsupported read-only features";
-        if (bad_ro & 0x8000) why = "filesystem uses fs-verity";
-        else if (bad_ro & 0x0200) why = "filesystem uses bigalloc";
-        else if (bad_ro & 0x0100) why = "filesystem uses quotas";
-        else if (bad_ro & 0x2000) why = "filesystem uses project quotas";
+        const ext4b_feature_rule *r = ext4b_rule_for('R', bad_ro, EXT4B_POLICY_DOWNGRADED);
         snprintf(out->unsupported, sizeof(out->unsupported),
-                 "%s (ro_compat 0x%08x)", why, bad_ro);
+                 "%s (ro_compat 0x%08x)",
+                 r ? r->why : "unsupported read-only features", bad_ro);
         return EOK;
     }
 
@@ -904,6 +952,25 @@ int ext4b_probe(ext4b_device *dev, ext4b_probe_info *out)
     out->verdict = EXT4B_PROBE_USABLE;
     return EOK;
 }
+
+#ifdef EXT4B_TEST_HOOKS
+/*
+ * Hand every policy row to the caller, in table order. Test builds only: this
+ * is how `ext4dump policy` prints the table and how the envelope suite proves
+ * docs/ENVELOPE.md still describes the code.
+ */
+void ext4b_feature_policy(void (*cb)(void *ctx, char set, uint32_t bit,
+                                     const char *name, const char *policy,
+                                     const char *why),
+                          void *ctx)
+{
+    static const char *const names[] = { "supported", "read-only", "refused" };
+    for (size_t i = 0; i < sizeof ext4b_feature_rules / sizeof ext4b_feature_rules[0]; i++) {
+        const ext4b_feature_rule *r = &ext4b_feature_rules[i];
+        cb(ctx, r->set, r->bit, r->name, names[r->policy], r->why);
+    }
+}
+#endif
 
 /* =============================================================== format == */
 

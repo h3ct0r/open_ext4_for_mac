@@ -505,6 +505,15 @@ void ext4b_set_orphan_cleanup(ext4b_device *dev, bool enabled);
 /// deferred delete must show up here, and a clean unmount must leave it empty.
 /// Test-only; see the note on ext4b_set_orphan_cleanup.
 int ext4b_orphan_head(ext4b_device *dev, uint32_t *out_head);
+
+/// Every feature-policy row the probe decides by, in table order: set ('I'
+/// incompat, 'R' ro_compat), bit, e2fsprogs' name, "supported" / "read-only"
+/// / "refused", and the sentence a person sees. Test-only: `ext4dump policy`
+/// prints it and Tests/run_envelope_tests.sh diffs docs/ENVELOPE.md against it.
+void ext4b_feature_policy(void (*cb)(void *ctx, char set, uint32_t bit,
+                                     const char *name, const char *policy,
+                                     const char *why),
+                          void *ctx);
 #endif /* EXT4B_TEST_HOOKS */
 
 /// Move/rename an entry, optionally between directories. If a plain file

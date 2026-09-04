@@ -187,6 +187,10 @@ stage "0. patches reproduce lwext4" bash scripts/check_patches.sh
 make core >/dev/null 2>&1
 stage "0b. shipping core surface" bash scripts/check_ship_surface.sh
 
+# The operating envelope, as documented, against the operating envelope, as
+# coded: one table in docs/ENVELOPE.md, one table in the shim, one diff.
+stage "0c. envelope matches the shim" bash Tests/run_envelope_tests.sh
+
 stage "1. read suite"  bash Tests/run_tests.sh
 stage "2. write suite" bash Tests/run_write_tests.sh
 

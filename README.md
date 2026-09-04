@@ -20,8 +20,15 @@ appears in Finder like any native volume:
 
 Through a real mount: nested `mkdir`, create and write, multi-MB files, `cp`,
 symlinks, hard links, rename, `rm`, `rmdir`, extended attributes, and a clean
-unmount that closes the journal. Volumes written entirely on macOS are read
-back byte-for-byte by the real Linux kernel, with nothing in its log.
+unmount that commits the metadata journal. Volumes written entirely on macOS
+are read back byte-for-byte by the real Linux kernel, with nothing in its log.
+
+"Journaled" here means ext4's metadata journal, kept by this driver. What it
+does not mean is a device flush: FSKit gives this module no way to ask the
+drive to commit its cache, so the journal's ordering guarantee stops at the
+drive's write cache. What that costs, how it was measured, and what to do
+about it are in [docs/ENVELOPE.md](docs/ENVELOPE.md); the hardware sessions
+behind the numbers are in [docs/HARDWARE.md](docs/HARDWARE.md).
 
 It can also create and rename volumes. Formatting goes through the
 module-agnostic driver macOS ships:
@@ -104,8 +111,8 @@ instead of failing — plus several of our own. See
 ## Requirements
 
 - macOS 15.4 or later (developed and tested on macOS 26)
-- Apple Silicon (the build targets `arm64`; an Intel or universal build is not
-  produced or tested)
+- **Apple Silicon only.** Intel Macs are not supported: the build targets
+  `arm64`, and no Intel or universal build is produced or tested.
 - Xcode Command Line Tools (full Xcode is **not** required)
 
 To *mount* volumes, additionally:
