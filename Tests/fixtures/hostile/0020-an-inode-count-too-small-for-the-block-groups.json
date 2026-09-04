@@ -1,0 +1,12 @@
+{
+  "id": "0020",
+  "slug": "an-inode-count-too-small-for-the-block-groups",
+  "found_by": "the read-write fuzzer (nightly, an hour of fuzz-rw): AddressSanitizer heap-buffer-overflow, READ of size 1 in ext4_bmap_bit_find_clr (ext4_bitmap.c:136), reached from ext4_ialloc_alloc_inode -> ext4_fs_alloc_inode -> ext4b_create",
+  "base": "mke2fs -t ext4 -b 1024 -g 1024 (5 block groups, 256 inodes/group, ^metadata_csum so no checksum to re-stamp)",
+  "edits": [
+    { "what": "superblock s_inodes_count (offset 0x00)", "from": 1280, "to": 256 }
+  ],
+  "symptom": "The blocks geometry implies 5 groups; the inode count now covers only 1. ext4_inodes_in_group_cnt sizes the last group as inode_count - (groups-1) x inodes_per_group = 256 - 4 x 256, which underflows to about four billion. Once the early groups fill, the next create scans a one-block inode bitmap for that many bits and reads straight off the end of the block. The minimised fuzzer reproducer needs an evolved allocator state to reach the last group; this crafted image trips the same geometry deterministically at probe.",
+  "fixed_by": "the geometry gate refuses a superblock whose inode count does not cover every block group but the last: inodes_per_group x (groups - 1) >= inode_count (Core/shim/ext4_bridge.c)",
+  "reproduce": "build/bin/ext4dump <img> probe   # must be UNSUPPORTED, naming the inode count"
+}

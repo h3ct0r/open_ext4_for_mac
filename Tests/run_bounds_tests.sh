@@ -320,6 +320,45 @@ else
   echo "  (this mke2fs cannot make a bigalloc volume; cell skipped)"
 fi
 
+# --- an inode count too small for its groups is refused ----------------------
+echo
+echo "an inode count that does not cover the groups"
+# The blocks geometry decides how many groups a volume has; the inode count has
+# to reach every one of them. ext4_inodes_in_group_cnt sizes the LAST group as
+# inode_count - (groups - 1) x inodes_per_group, and when the inode count does
+# not cover all but the last group that subtraction underflows to about four
+# billion. The first create that reaches the last group then scans a one-block
+# inode bitmap for that many bits -- a heap read straight off the end of the
+# block, which the read-write fuzzer found as a heap-buffer-overflow in
+# ext4_bmap_bit_find_clr on a nightly run. ^metadata_csum so lowering the count
+# needs no re-stamp; this exact geometry is hostile fixture 0020.
+GEOIMG="$WORK/inode-count-short.img"; rm -f "$GEOIMG"
+dd if=/dev/zero of="$GEOIMG" bs=1024 count=5120 2>/dev/null
+if mke2fs -q -F -t ext4 -b 1024 -O ^metadata_csum -O ^64bit -g 1024 "$GEOIMG" >/dev/null 2>&1; then
+  before=$("$DUMP" "$GEOIMG" probe 2>&1 | awk '/^verdict:/{print $2}')
+  # A healthy volume: mke2fs makes inode_count = inodes_per_group x groups, so
+  # it must probe USABLE before the edit -- otherwise the cell proves nothing.
+  [ "$before" = "USABLE" ] && ok "the healthy volume probes USABLE before the edit" \
+                           || bad "the healthy volume probes USABLE before the edit" "verdict=$before"
+  python3 - "$GEOIMG" <<'EOF'
+import sys, struct
+f = open(sys.argv[1], 'r+b'); f.seek(1024); sb = bytearray(f.read(1024))
+ipg = struct.unpack_from('<I', sb, 0x28)[0]
+# One group's worth of inodes on a five-group volume: the last group underflows.
+struct.pack_into('<I', sb, 0, ipg)
+f.seek(1024); f.write(sb); f.close()
+EOF
+  v=$("$DUMP" "$GEOIMG" probe 2>&1 | awk '/^verdict:/{print $2}')
+  n=$("$DUMP" "$GEOIMG" probe 2>&1 | sed -n 's/^note: *//p' | head -1)
+  case "$v:$n" in
+    UNSUPPORTED:*cover*) ok "an inode count that leaves a group unreachable is refused ($n)" ;;
+    UNSUPPORTED:*)       bad "an inode count too small for its groups is refused for the right reason" "verdict=$v: $n" ;;
+    *)                   bad "an inode count too small for its groups is refused" "verdict=$v: $n" ;;
+  esac
+else
+  echo "  (this mke2fs cannot make the geometry; cell skipped)"
+fi
+
 # --- pre-recovery totals are labelled as such -------------------------------
 echo
 echo "unreplayed journal in the audit"

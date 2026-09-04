@@ -869,6 +869,21 @@ int ext4b_probe(ext4b_device *dev, ext4b_probe_info *out)
                                blocks_per_group - 1) / blocks_per_group;
             if (groups == 0 || groups > 0xFFFFFFFFull)
                 why = "the volume needs more block groups than ext4 can address";
+            /*
+             * The inode table has to reach every group. ext4 lays the same
+             * number of groups over the inodes as over the blocks, and
+             * ext4_inodes_in_group_cnt() sizes the LAST group as
+             * inode_count - (groups - 1) x inodes_per_group. When the inode
+             * count does not cover all but the last group that subtraction
+             * underflows to a few billion, and the very first create scans a
+             * one-block inode bitmap for that many bits -- a heap read straight
+             * off the end of the block (ext4_bmap_bit_find_clr, found by the
+             * read-write fuzzer, fixture 0020). A blocks geometry that implies
+             * more groups than the inodes can fill is not a filesystem we can
+             * mount; e2fsck is the fix.
+             */
+            else if ((uint64_t)inodes_per_group * (groups - 1) >= out->inode_count)
+                why = "inode count does not cover every block group";
         }
 
         if (why) {
