@@ -192,6 +192,22 @@ fuzz_interlude() {
     local before after new
     before=$(find "$ROOT/.fuzz/crashes" -type f -size +0 2>/dev/null | wc -l | tr -d " ")
 
+    # A corpus is a memory budget: libFuzzer holds every accepted unit in
+    # memory, and four jobs each loading gigabytes end the pass in "oom-"
+    # artifacts that are not findings. Distil before the pass whenever either
+    # corpus is over its budget on disk, rather than every tenth round --
+    # round 2 of the first --fuzz soak died this way with the tenth still
+    # eight rounds off.
+    local mode_dir over=0
+    for mode_dir in ro rw; do
+        [ "$(du -sm "$ROOT/.fuzz/corpus/$mode_dir" 2>/dev/null | cut -f1)" -gt "${FUZZ_CORPUS_BUDGET_MB:-1024}" ] && over=1
+    done
+    if [ "$over" = 1 ]; then
+        printf "      merging the corpus (over budget)  "
+        make -C "$ROOT" fuzz-merge > "$ROOT/.fuzz/logs/round-$round-merge.txt" 2>&1
+        grep -o "merged corpus.*" "$ROOT/.fuzz/logs/round-$round-merge.txt" | tr '\n' ' '; echo
+    fi
+
     local secs=$(( FUZZ_MIN * 60 ))
     local mode
     for mode in fuzz fuzz-rw; do
@@ -212,9 +228,15 @@ fuzz_interlude() {
             | tail -1 || echo ""
     fi
 
-    # Count only artifacts that carry an input. A zero-byte one means
-    # libFuzzer ran out of room for the corpus, which is a reason to merge and
-    # not a reason to stop a soak that is otherwise doing its job.
+    # Count only artifacts that carry an input, and among "oom-" ones only
+    # those that reproduce alone: libFuzzer names the unit it was mutating
+    # when the PROCESS crossed the RSS limit, which a corpus-heavy process
+    # does on any unit. Six of those ended the first --fuzz soak; none was a
+    # finding. The triage re-runs each and keeps the real ones.
+    if ls "$ROOT/.fuzz/crashes"/oom-* >/dev/null 2>&1; then
+        make -C "$ROOT" fuzz-triage-oom > "$ROOT/.fuzz/logs/round-$round-triage.txt" 2>&1 || true
+        sed 's/^/      /' "$ROOT/.fuzz/logs/round-$round-triage.txt"
+    fi
     after=$(find "$ROOT/.fuzz/crashes" -type f -size +0 2>/dev/null | wc -l | tr -d " ")
     if [ "$after" -gt "$before" ]; then
         echo ""

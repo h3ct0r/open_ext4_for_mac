@@ -216,7 +216,7 @@ ARGON2_CFLAGS := $(CFLAGS) $(NO_WARN) -I$(ARGON2_DIR)
 CORE_LIB      := $(BUILD)/lib/$(CONFIG)/libext4core.a
 CORE_TEST_LIB := $(BUILD)/lib/$(CONFIG)/libext4core-test.a
 
-.PHONY: help all core test-docs verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-fuzz test-fuzz-regressions test-reorder test-crypto test-events test-envelope test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline ci-linux release changelog-draft check-release uninstall test-uninstall print-fuzz-flags fuzz-build fuzz fuzz-rw fuzz-repro fuzz-minimize fuzz-merge fuzz-check fuzz-cov fuzz-cov-gate
+.PHONY: help all core test-docs fuzz-triage-oom verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-fuzz test-fuzz-regressions test-reorder test-crypto test-events test-envelope test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline ci-linux release changelog-draft check-release uninstall test-uninstall print-fuzz-flags fuzz-build fuzz fuzz-rw fuzz-repro fuzz-minimize fuzz-merge fuzz-check fuzz-cov fuzz-cov-gate
 
 all: app  ## build Ext4Mac.app with the FSKit extension inside (same as app)
 
@@ -901,13 +901,46 @@ fuzz-check:
 	fi; \
 	echo "no artifacts with an input"
 
-fuzz-merge: fuzz-build
-	@mkdir -p $(FUZZ_DIR)/corpus/ro $(FUZZ_DIR)/corpus/rw $(FUZZ_DIR)/merged
-	@rm -rf $(FUZZ_DIR)/merged && mkdir -p $(FUZZ_DIR)/merged
-	@EXT4_FUZZ_MODE=ro $(FUZZ_BIN) -merge=1 \
-	  $(FUZZ_DIR)/merged $(FUZZ_DIR)/corpus/ro $(FUZZ_DIR)/seeds
-	@echo "merged corpus: $$(ls $(FUZZ_DIR)/merged | wc -l | tr -d ' ') inputs"
-	@rm -rf $(FUZZ_DIR)/corpus/ro && mv $(FUZZ_DIR)/merged $(FUZZ_DIR)/corpus/ro
+# Both corpora, and bounded. libFuzzer keeps every unit it accepts in memory,
+# so a corpus is a memory budget as much as a coverage set: loading the
+# read-only corpus alone -- no fuzzing -- reached 3 GB of a 4 GB limit, and
+# four jobs doing that at once ended a soak with six "oom-" artifacts none
+# of which reproduced (2026-09-05). The merge keeps units up to
+# FUZZ_MERGE_MAX_LEN only; the seeds, up to 8 MiB, are still handed to every
+# run separately, so nothing a large geometry reaches is lost -- only its
+# thousand mutated copies. The rw corpus was never merged before this.
+FUZZ_MERGE_MAX_LEN ?= 2097152
+fuzz-merge: fuzz-build  ## distil both corpora to their smallest covering set (units <= FUZZ_MERGE_MAX_LEN)
+	@for mode in ro rw; do \
+	  mkdir -p $(FUZZ_DIR)/corpus/$$mode; \
+	  rm -rf $(FUZZ_DIR)/merged && mkdir -p $(FUZZ_DIR)/merged; \
+	  before=$$(du -sm $(FUZZ_DIR)/corpus/$$mode | cut -f1); \
+	  EXT4_FUZZ_MODE=$$mode $(FUZZ_BIN) -merge=1 -max_len=$(FUZZ_MERGE_MAX_LEN) \
+	    -rss_limit_mb=8192 $(FUZZ_DIR)/merged $(FUZZ_DIR)/corpus/$$mode $(FUZZ_DIR)/seeds \
+	    > $(FUZZ_DIR)/logs/merge-$$mode.txt 2>&1 || { echo "merge ($$mode) failed; see $(FUZZ_DIR)/logs/merge-$$mode.txt"; exit 1; }; \
+	  rm -rf $(FUZZ_DIR)/corpus/$$mode && mv $(FUZZ_DIR)/merged $(FUZZ_DIR)/corpus/$$mode; \
+	  echo "merged corpus ($$mode): $$(ls $(FUZZ_DIR)/corpus/$$mode | wc -l | tr -d ' ') inputs, $${before} MB -> $$(du -sm $(FUZZ_DIR)/corpus/$$mode | cut -f1) MB"; \
+	done
+
+# An "oom-" artifact is a finding only if the input reproduces it alone.
+# libFuzzer writes the unit it was mutating when the PROCESS crossed the RSS
+# limit, and a process loaded with gigabytes of corpus crosses it on any
+# unit. Re-run each one by itself: reproduces -> a real allocation the
+# driver was talked into, keep it; does not -> corpus pressure, say so, and
+# drop it. Prints one line per artifact; exits 1 only for the real ones.
+fuzz-triage-oom: fuzz-build  ## re-run each oom- artifact alone; keep only the ones that reproduce
+	@real=0; \
+	for f in $(FUZZ_DIR)/crashes/oom-*; do \
+	  [ -e "$$f" ] || continue; \
+	  if [ ! -s "$$f" ]; then echo "  $$f: empty (corpus pressure), removed"; rm -f "$$f"; continue; fi; \
+	  if EXT4_FUZZ_MODE=both $(FUZZ_BIN) -rss_limit_mb=4096 -malloc_limit_mb=512 "$$f" > "$$f.repro" 2>&1 \
+	     && ! grep -q "out-of-memory\|ERROR:" "$$f.repro"; then \
+	    echo "  $$f: does not reproduce alone (corpus pressure), removed"; rm -f "$$f" "$$f.repro"; \
+	  else \
+	    echo "  $$f: REPRODUCES -- a real finding; log in $$f.repro"; real=$$((real+1)); \
+	  fi; \
+	done; \
+	[ "$$real" -eq 0 ]
 
 # --- FSKit extension ---------------------------------------------------------
 

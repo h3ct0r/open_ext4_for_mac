@@ -66,6 +66,14 @@ gate is code too.
 ## The triage loop
 
 1. `make fuzz` (or `make fuzz-rw`) until something lands in `.fuzz/crashes/`.
+   An `oom-` artifact first goes through `make fuzz-triage-oom`, which re-runs
+   it alone: libFuzzer names the unit it was mutating when the *process*
+   crossed the RSS limit, and a process holding gigabytes of corpus crosses
+   it on any unit. Six of those ended a soak on 2026-09-05; none reproduced.
+   The corpus is a memory budget -- every accepted unit stays in memory --
+   so `make fuzz-merge` (units up to `FUZZ_MERGE_MAX_LEN`, 2 MiB) is what an
+   OOM that does not reproduce is asking for, and the soak now merges before
+   any pass whose corpus is over `FUZZ_CORPUS_BUDGET_MB` (1 GiB) on disk.
 2. `make fuzz-repro FILE=.fuzz/crashes/crash-...` — symbolised, both modes.
 3. Minimize. **Not** with `-minimize_crash=1`: libFuzzer's random shrink gets
    nowhere on a structured multi-megabyte image ("failed to minimize beyond

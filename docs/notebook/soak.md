@@ -49,6 +49,7 @@ does not count a round that skipped anything.
 | 2026-09-02 | 6 | stopped in round 7 by an unchecked unmount in the newfs suite (`66fabc1`); the fourth harness fault, and the last one found |
 | 2026-09-02 | **17** | 20 rounds requested, none failed. Three spanned a lid-close and were excluded by the sleep detection although each also passed. Every counted round 631–647 s: the full set, every time. First run with all four harness faults fixed. |
 | 2026-09-01 | 7 | then **round 8 wedged** — see below |
+| 2026-09-05 | 2 (+fuzz) | first run with `--fuzz 10`: two clean rounds of the full set, then round 2's fuzz pass stopped it with six `oom-` artifacts. None reproduced alone; the read-only corpus had grown to 13 GB on disk and 2.2 GB in memory (`-runs=0`: rss 3,029 MB against a 4,096 MB limit), and four jobs load it at once. The harness's fault: the rw corpus had never been merged, the ro one only every tenth round, and an `oom-` naming a unit was counted as a finding. Fixed: both corpora merged to a 2 MiB unit bound whenever over 1 GiB on disk, and OOM artifacts triaged by re-running each alone. Count restarted. |
 
 ## What the first long soak found
 
