@@ -1,0 +1,12 @@
+{
+  "id": "0021",
+  "slug": "two-extended-attributes-on-one-inode",
+  "found_by": "the soak's fuzzer, round 5 of the first --fuzz soak (2026-09-05): UndefinedBehaviorSanitizer, member access within misaligned address for struct ext4_xattr_list_entry, in ext4_xattr_list from ext4b_listxattr",
+  "base": "a healthy 2 MiB volume from this driver's own format (ext4, 1 KiB blocks), one file with two extended attributes",
+  "edits": [
+    { "what": "setxattr /f user.a 1; setxattr /f user.bc 2", "from": "no attributes", "to": "two, with names whose length plus NUL is not a multiple of eight" }
+  ],
+  "symptom": "ext4_xattr_list lays each list entry -- a struct holding pointers -- directly after the previous entry's NUL-terminated name, so the second entry starts on an odd address. ARM64 tolerates the misaligned loads, which is why no mount ever crashed; it is undefined behaviour and UBSan reports it on any listxattr of an inode with two attributes. The fuzzer's own artifact was a corrupt 1.5 MB image; this crafted healthy volume shows the same report, which is the point: it is not a hostile-input bug.",
+  "fixed_by": "patch 0079: the stride from one list entry to the next is padded to the entry's alignment, in the size pass and the fill pass alike",
+  "reproduce": "make test-asan, or build/bin/ext4dump <img> xattr /f on a sanitizer build   # must print both names and no 'runtime error'"
+}

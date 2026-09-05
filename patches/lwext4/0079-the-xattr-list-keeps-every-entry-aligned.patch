@@ -1,0 +1,91 @@
+Subject: the xattr list keeps every entry aligned
+
+ext4_xattr_list writes a linked list into a caller-sized buffer: an entry
+struct, then the name and its NUL, then the next entry immediately after.
+The struct holds pointers, so it needs pointer alignment, and a name whose
+length plus NUL is not a multiple of eight leaves the next entry on an odd
+address. Every load through that entry is undefined behaviour. ARM64
+tolerates misaligned loads, which is why no mount ever crashed and why the
+suites never noticed; UndefinedBehaviorSanitizer reports it as "member
+access within misaligned address ... for type 'struct
+ext4_xattr_list_entry'" from any listxattr of an inode with two
+attributes -- which, on a volume macOS has written to, is nearly every
+file (com.apple.quarantine, com.apple.provenance, FinderInfo).
+
+Found by the fuzzer on the fifth round of the first --fuzz soak
+(2026-09-05), on a corrupt image; reproduced on a healthy volume of this
+driver's own format with two attributes named user.a and user.bc, which
+is fixture 0021 and the bounds cell "two short-named xattrs on one inode
+list cleanly". Red-first under make test-asan: the cell prints the UBSan
+line before this patch and both names after it.
+
+The fix is one stride, EXT4_XATTR_LIST_STRIDE(name_len): entry plus name
+plus NUL, rounded up to pointer alignment, used by the size pass and the
+fill pass alike so the buffer the caller allocates is the buffer the fill
+writes. Both loops -- the in-inode area and the xattr block -- advance by
+it. Readers walk the list through ->next and see no difference.
+
+diff --git a/src/ext4_xattr.c b/src/ext4_xattr.c
+--- a/src/ext4_xattr.c
++++ b/src/ext4_xattr.c
+@@ -938,6 +938,19 @@
+ 		inode_ref->dirty = true;
+ 	}
+ }
++
++/*
++ * Bytes from one list entry to the next: the entry, the name, its NUL, and
++ * padding up to the entry's own alignment. Entries hold pointers, so packing
++ * the next one straight after a name of arbitrary length put it on an odd
++ * address -- undefined behaviour that ARM64 happens to tolerate and UBSan
++ * reports as misaligned member access from any listxattr of an inode with
++ * two attributes. The stride is used for the size pass and the fill pass
++ * alike, so the buffer the caller sizes is the buffer the fill writes.
++ */
++#define EXT4_XATTR_LIST_STRIDE(name_len)                                    \
++	((sizeof(struct ext4_xattr_list_entry) + (name_len) + 1 +               \
++	  (sizeof(void *) - 1)) & ~(sizeof(void *) - 1))
+ 
+ /**
+  * @brief Put a list of EA entries into a caller-provided buffer
+@@ -982,7 +995,9 @@
+ 		 * of the EA entry. The string is null-terminated.
+ 		 *
+ 		 * list->name => (char *)(list + 1);
+-		 * list->next => (void *)((char *)(list + 1) + name_len + 1);
++		 * list->next => the next entry, at the stride below: the
++		 *               name is padded so that every entry, which
++		 *               holds pointers, starts where a pointer may.
+ 		 */
+ 		for (; !EXT4_XATTR_IS_LAST_ENTRY(entry);
+ 		     entry = EXT4_XATTR_NEXT(entry)) {
+@@ -999,11 +1014,11 @@
+ 
+ 				list_prev = list;
+ 				list = (struct ext4_xattr_list_entry
+-					    *)(list->name + name_len + 1);
++					    *)((char *)list +
++					       EXT4_XATTR_LIST_STRIDE(name_len));
+ 			}
+ 
+-			buf_len += sizeof(struct ext4_xattr_list_entry) +
+-				   name_len + 1;
++			buf_len += EXT4_XATTR_LIST_STRIDE(name_len);
+ 		}
+ 	}
+ 
+@@ -1054,11 +1069,11 @@
+ 
+ 				list_prev = list;
+ 				list = (struct ext4_xattr_list_entry
+-					    *)(list->name + name_len + 1);
++					    *)((char *)list +
++					       EXT4_XATTR_LIST_STRIDE(name_len));
+ 			}
+ 
+-			buf_len += sizeof(struct ext4_xattr_list_entry) +
+-				   name_len + 1;
++			buf_len += EXT4_XATTR_LIST_STRIDE(name_len);
+ 		}
+ 	}
+ 	if (list_prev)

@@ -359,6 +359,31 @@ else
   echo "  (this mke2fs cannot make the geometry; cell skipped)"
 fi
 
+# --- two xattrs on one inode list cleanly -------------------------------------
+echo
+echo "two extended attributes on one inode"
+# ext4_xattr_list packs each list entry -- a struct that holds pointers --
+# straight after the previous entry's name, so any name whose length plus its
+# NUL is not a multiple of eight lands the next entry on an odd address:
+# undefined behaviour ARM64 tolerates, which is why nothing ever crashed, and
+# which UBSan reports from any listxattr of an inode with two attributes.
+# macOS gives nearly every file two or three. Found by the soak's fuzzer on
+# its fifth round (2026-09-05); fixture 0021 is this exact volume. Red under
+# `make test-asan` before patch 0079: "runtime error: member access within
+# misaligned address".
+XAIMG="$WORK/two-xattrs.img"; new_vol "$XAIMG" 4 1024
+"$DUMP" "$XAIMG" create /f 0644        >/dev/null 2>&1
+"$DUMP" "$XAIMG" setxattr /f user.a 1  >/dev/null 2>&1
+"$DUMP" "$XAIMG" setxattr /f user.bc 2 >/dev/null 2>&1
+xaout=$(run_deadline 20 "$DUMP" "$XAIMG" xattr /f 2>&1); xarc=$?
+if [ "$xarc" = 0 ] && grep -q "user.a" <<<"$xaout" && grep -q "user.bc" <<<"$xaout" \
+   && ! grep -qE "runtime error|AddressSanitizer" <<<"$xaout"; then
+  ok "two short-named xattrs on one inode list cleanly, every entry aligned"
+else
+  bad "two short-named xattrs on one inode list cleanly, every entry aligned" \
+      "rc=$xarc: $(grep -m1 -E 'runtime error|AddressSanitizer' <<<"$xaout" || tail -1 <<<"$xaout")"
+fi
+
 # --- pre-recovery totals are labelled as such -------------------------------
 echo
 echo "unreplayed journal in the audit"

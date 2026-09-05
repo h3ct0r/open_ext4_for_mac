@@ -24,7 +24,7 @@ Two rules follow from `git apply` being all-or-nothing:
   present, the patch failed as a unit, and the build skipped it with a note —
   a clone got a driver with no write barrier and no visible error.
 
-There are 78 patches; `Tests/run_docs_tests.sh` checks that every file has
+There are 79 patches; `Tests/run_docs_tests.sh` checks that every file has
 a row here and that the README's count matches. The bold tag on each row is
 its severity: **Bug fix, corruption** and **data loss** wrote or replayed
 wrong bytes onto a volume; **memory safety** and **use-after-free** are
@@ -113,6 +113,7 @@ build and logging. Untagged rows are plumbing the shim needed.
 | `0076-the-in-inode-xattr-header-is-bounded-before-its-magic-is-read` | **Bug fix, memory safety.** The in-inode xattr walk read the header's magic before checking that the header itself fit inside the inode, so an `extra_isize` placing the header past the inode read off its end. 0013 had moved the read ahead of the check for a good reason and 0065 later strengthened the check; the moved read stayed outside it. Read-only, from a getxattr; pinned by fixture 0015. |
 | `0077-the-htree-leaf-walk-puts-back-only-the-blocks-it-took` | **Bug fix.** On an htree lookup's error path `dx_get_leaf` put the root block back and so did its caller, and the block cache asserted on the double release — a crash from a lookup on a corrupt index. The walk now releases only the blocks it took; pinned by fixture 0016. |
 | `0078-the-in-inode-xattr-area-is-not-initialised-over-corruption` | **Bug fix, memory safety.** With `want_extra_isize` larger than the inode can hold, every new inode is born with an in-body xattr area that cannot fit, and the first setxattr initialised it with a memset whose unsigned size wrapped. `ext4_xattr_set` now fails on a finder error instead of proceeding, the in-body initialiser refuses an area that does not fit, and inode creation clamps `want_extra_isize` to what fits. Pinned by fixture 0017, crafted from CI's fifth smoke run. |
+| `0079-the-xattr-list-keeps-every-entry-aligned` | **Bug fix, undefined behaviour.** `ext4_xattr_list` packed each list entry — a struct holding pointers — straight after the previous entry's NUL-terminated name, so a name whose length plus NUL is not a multiple of eight put the next entry on an odd address. ARM64 tolerates the misaligned loads, which is why nothing ever crashed; UBSan reports it from any listxattr of an inode with two attributes, which on a volume macOS has touched is nearly every file. One stride, padded to pointer alignment, used by the size pass and the fill pass alike. Found by the first `--fuzz` soak, round 5; pinned by fixture 0021, a healthy volume with two short-named attributes. |
 
 Everything except 0001, 0003, 0010 and 0016 is a genuine upstream defect and worth
 sending upstream — with two honest exceptions: 0043 and 0044 fix regressions that 0041
@@ -188,3 +189,11 @@ whose unsigned size wrapped when the set path initialised an in-body area
 over the corruption 0076 had just learned to refuse. The second one is
 what a fix can do: close one read and open the next path along -- which is
 what the smoke job is for.
+
+0079 is the first finding from a soak's fuzz pass rather than CI's, and the
+first that is not a hostile-input bug at all: a healthy volume with two
+extended attributes on one file trips it. It went unnoticed for the
+project's whole life because ARM64 does not fault on a misaligned pointer
+load and no offline suite ran a listxattr of a two-attribute inode under
+UBSan. Fixture 0021 is that healthy volume, and the bounds suite builds the
+same one on every run.
