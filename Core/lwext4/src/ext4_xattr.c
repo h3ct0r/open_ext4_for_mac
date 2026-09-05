@@ -939,6 +939,19 @@ static void ext4_xattr_try_free_block(struct ext4_inode_ref *inode_ref)
 	}
 }
 
+/*
+ * Bytes from one list entry to the next: the entry, the name, its NUL, and
+ * padding up to the entry's own alignment. Entries hold pointers, so packing
+ * the next one straight after a name of arbitrary length put it on an odd
+ * address -- undefined behaviour that ARM64 happens to tolerate and UBSan
+ * reports as misaligned member access from any listxattr of an inode with
+ * two attributes. The stride is used for the size pass and the fill pass
+ * alike, so the buffer the caller sizes is the buffer the fill writes.
+ */
+#define EXT4_XATTR_LIST_STRIDE(name_len)                                    \
+	((sizeof(struct ext4_xattr_list_entry) + (name_len) + 1 +               \
+	  (sizeof(void *) - 1)) & ~(sizeof(void *) - 1))
+
 /**
  * @brief Put a list of EA entries into a caller-provided buffer
  * 	  In order to make sure that @list buffer can fit in the data,
@@ -982,7 +995,9 @@ int ext4_xattr_list(struct ext4_inode_ref *inode_ref,
 		 * of the EA entry. The string is null-terminated.
 		 *
 		 * list->name => (char *)(list + 1);
-		 * list->next => (void *)((char *)(list + 1) + name_len + 1);
+		 * list->next => the next entry, at the stride below: the
+		 *               name is padded so that every entry, which
+		 *               holds pointers, starts where a pointer may.
 		 */
 		for (; !EXT4_XATTR_IS_LAST_ENTRY(entry);
 		     entry = EXT4_XATTR_NEXT(entry)) {
@@ -999,11 +1014,11 @@ int ext4_xattr_list(struct ext4_inode_ref *inode_ref,
 
 				list_prev = list;
 				list = (struct ext4_xattr_list_entry
-					    *)(list->name + name_len + 1);
+					    *)((char *)list +
+					       EXT4_XATTR_LIST_STRIDE(name_len));
 			}
 
-			buf_len += sizeof(struct ext4_xattr_list_entry) +
-				   name_len + 1;
+			buf_len += EXT4_XATTR_LIST_STRIDE(name_len);
 		}
 	}
 
@@ -1054,11 +1069,11 @@ int ext4_xattr_list(struct ext4_inode_ref *inode_ref,
 
 				list_prev = list;
 				list = (struct ext4_xattr_list_entry
-					    *)(list->name + name_len + 1);
+					    *)((char *)list +
+					       EXT4_XATTR_LIST_STRIDE(name_len));
 			}
 
-			buf_len += sizeof(struct ext4_xattr_list_entry) +
-				   name_len + 1;
+			buf_len += EXT4_XATTR_LIST_STRIDE(name_len);
 		}
 	}
 	if (list_prev)
