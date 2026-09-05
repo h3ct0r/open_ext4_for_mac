@@ -870,20 +870,23 @@ int ext4b_probe(ext4b_device *dev, ext4b_probe_info *out)
             if (groups == 0 || groups > 0xFFFFFFFFull)
                 why = "the volume needs more block groups than ext4 can address";
             /*
-             * The inode table has to reach every group. ext4 lays the same
-             * number of groups over the inodes as over the blocks, and
+             * The inode count is groups x inodes_per_group, exactly. That is
+             * the Linux kernel's rule ("inodes count not valid: N vs M",
+             * ext4_fill_super) and e2fsck's ("Inode count in superblock is N,
+             * should be M"), and lwext4 leans on it from both sides:
              * ext4_inodes_in_group_cnt() sizes the LAST group as
-             * inode_count - (groups - 1) x inodes_per_group. When the inode
-             * count does not cover all but the last group that subtraction
-             * underflows to a few billion, and the very first create scans a
-             * one-block inode bitmap for that many bits -- a heap read straight
-             * off the end of the block (ext4_bmap_bit_find_clr, found by the
-             * read-write fuzzer, fixture 0020). A blocks geometry that implies
-             * more groups than the inodes can fill is not a filesystem we can
-             * mount; e2fsck is the fix.
+             * inode_count - (groups - 1) x inodes_per_group, so too few
+             * inodes underflow that to a few billion and the first create
+             * scans a one-block bitmap that far past its end (fixture 0020,
+             * the read-write fuzzer), and too many make the last group claim
+             * billions of inodes on a twelve-block volume, which every walk
+             * then believes (fixture 0022, the soak's fuzzer: a 4,294,967,295
+             * inode count and a 52-second read-only walk). The first version
+             * of this gate refused only the first direction. e2fsck is the
+             * fix.
              */
-            else if ((uint64_t)inodes_per_group * (groups - 1) >= out->inode_count)
-                why = "inode count does not cover every block group";
+            else if ((uint64_t)inodes_per_group * groups != out->inode_count)
+                why = "inode count is not block groups x inodes per group";
         }
 
         if (why) {

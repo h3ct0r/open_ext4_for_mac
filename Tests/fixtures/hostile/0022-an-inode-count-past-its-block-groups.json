@@ -1,0 +1,12 @@
+{
+  "id": "0022",
+  "slug": "an-inode-count-past-its-block-groups",
+  "found_by": "the soak's fuzzer, round 2 of the third --fuzz soak (2026-09-05): a timeout artifact -- a read-only walk that took 52 s under the sanitizer on a volume whose superblock claims 4,294,967,295 inodes in one group of 176",
+  "base": "mke2fs -t ext4 -b 4096 on 8 MiB (^metadata_csum so no re-stamp), 2048 inodes in one group",
+  "edits": [
+    { "what": "superblock s_inodes_count (offset 0x00)", "from": 2048, "to": 2056 }
+  ],
+  "symptom": "The Linux kernel refuses this at mount (\"inodes count not valid: 2056 vs 2048\") and e2fsck reports \"Inode count in superblock is 2056, should be 2048\"; the driver's gate accepted it, because the first version (fixture 0020) checked only that the count was not too small. Too large, the last group claims every excess inode and every walk believes it -- the fuzzer's 4-billion version turned a read-only walk into a 52-second one. Eight extra is the same defect at the smallest size.",
+  "fixed_by": "the geometry gate requires inode_count == block groups x inodes_per_group, exactly (Core/shim/ext4_bridge.c); the fuzz harness also bounds its whole-file extent walk to 16 MiB at each end",
+  "reproduce": "build/bin/ext4dump <img> probe   # must be UNSUPPORTED, naming groups x inodes per group"
+}

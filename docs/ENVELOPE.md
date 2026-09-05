@@ -167,7 +167,7 @@ Macs are not supported: no Intel or universal build is produced or tested.
   macOS 26; the same core built with AddressSanitizer and UBSan; a five-minute
   fuzz smoke each way with a coverage gate; and the five oracle suites on an
   Ubuntu runner where the Linux kernel's own ext4 judges every crash cut,
-  reordered write, differential round trip and LUKS container. 21 hostile
+  reordered write, differential round trip and LUKS container. 22 hostile
   fixtures, one per finding, each proven red before its fix and green after.
 - **Nightly** (`nightly.yml`): an hour of fuzzing each way with the corpus
   that has been growing across runs, and an offline soak.

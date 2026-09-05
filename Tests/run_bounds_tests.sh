@@ -351,10 +351,26 @@ EOF
   v=$("$DUMP" "$GEOIMG" probe 2>&1 | awk '/^verdict:/{print $2}')
   n=$("$DUMP" "$GEOIMG" probe 2>&1 | sed -n 's/^note: *//p' | head -1)
   case "$v:$n" in
-    UNSUPPORTED:*cover*) ok "an inode count that leaves a group unreachable is refused ($n)" ;;
-    UNSUPPORTED:*)       bad "an inode count too small for its groups is refused for the right reason" "verdict=$v: $n" ;;
-    *)                   bad "an inode count too small for its groups is refused" "verdict=$v: $n" ;;
+    UNSUPPORTED:*"groups x inodes per group"*) ok "an inode count too small for its groups is refused ($n)" ;;
+    UNSUPPORTED:*) bad "an inode count too small for its groups is refused for the right reason" "verdict=$v: $n" ;;
+    *)             bad "an inode count too small for its groups is refused" "verdict=$v: $n" ;;
   esac
+  # And too LARGE. The rule is equality -- the Linux kernel refuses "inodes
+  # count not valid: 2056 vs 2048" and e2fsck says "should be 2048" -- and
+  # the first gate checked only the small side. The soak's fuzzer found the
+  # other: 4,294,967,295 inodes on a twelve-block volume, which the last
+  # group then claims and every walk believes; a read-only walk of it took
+  # 52 s and read as a hang. Fixture 0022. Eight extra inodes is enough.
+  mke2fs -q -F -t ext4 -b 1024 -O ^metadata_csum -O ^64bit -g 1024 "$GEOIMG" >/dev/null 2>&1
+  python3 - "$GEOIMG" <<'EOF'
+import sys, struct
+f = open(sys.argv[1], 'r+b'); f.seek(1024); sb = bytearray(f.read(1024))
+struct.pack_into('<I', sb, 0, struct.unpack_from('<I', sb, 0)[0] + 8)
+f.seek(1024); f.write(sb); f.close()
+EOF
+  v=$("$DUMP" "$GEOIMG" probe 2>&1 | awk '/^verdict:/{print $2}')
+  [ "$v" = "UNSUPPORTED" ] && ok "an inode count eight past groups x inodes per group is refused too (the kernel's rule)" \
+                           || bad "an inode count eight past groups x inodes per group is refused too" "verdict=$v"
 else
   echo "  (this mke2fs cannot make the geometry; cell skipped)"
 fi

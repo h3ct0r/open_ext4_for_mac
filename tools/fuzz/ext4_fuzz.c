@@ -259,10 +259,22 @@ static void fz_visit_file(ext4b_device *dev, uint32_t ino,
     if (a->size > 131072)
         (void)ext4b_read(dev, ino, a->size - 4096, scratch, 4096, &got);
 
+    /* Bounded, like the reads above. i_size is the attacker's number, and
+     * on an indirect-block inode the mapper asks for every logical block of
+     * the range one lookup at a time: a fuzzed multi-gigabyte size took a
+     * healthy-looking walk 52 seconds under the sanitizer and the soak
+     * called it a hang (2026-09-05). The head reaches the extent root or the
+     * direct entries; the tail reaches the deep end of the tree. Sixteen
+     * MiB of each is every shape a mapping can have. */
     ext4b_extent ex[FZ_MAX_EXTENTS];
     size_t nex = 0;
-    (void)ext4b_map_extents(dev, ino, 0, a->size ? a->size : 4096,
+    const uint64_t span = 16u << 20;
+    uint64_t total = a->size ? a->size : 4096;
+    (void)ext4b_map_extents(dev, ino, 0, total < span ? total : span,
                             ex, FZ_MAX_EXTENTS, &nex);
+    if (total > span)
+        (void)ext4b_map_extents(dev, ino, total - span, span,
+                                ex, FZ_MAX_EXTENTS, &nex);
 }
 
 /*
