@@ -113,6 +113,7 @@ stage app            make app
 # Ext4Mac binary, and having it build the bundle first would turn the stage
 # above into a cache hit that proves nothing.
 stage events         bash Tests/run_events_tests.sh
+stage setup          bash Tests/run_setup_tests.sh
 
 # What this build can check about itself. Today: whether key material is
 # actually locked into memory on this machine, which mlock only promises

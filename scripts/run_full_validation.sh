@@ -252,6 +252,10 @@ stage "5f. this build checks itself" "$ROOT/build/Ext4Mac.app/Contents/MacOS/Ext
 stage "5g. uninstall names everything" bash Tests/run_uninstall_tests.sh
 stage "5h. the build is the version it says" bash scripts/check_release.sh
 
+# The Setup Assistant's checklist from explicit inputs and the bundle's own
+# artefacts; the sample-volume mount runs when the extension is approved.
+stage "5i. setup assistant" bash Tests/run_setup_tests.sh
+
 if docker info >/dev/null 2>&1; then
   stage "6. LUKS containers" bash Tests/run_luks_tests.sh
   stage "7. crash consistency" bash Tests/run_crash_tests.sh
