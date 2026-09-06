@@ -9,14 +9,28 @@ headings to be edited into one.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-05
+
+The first release. Everything below is in it.
+
 ### Added
+- Reads and writes ext2, ext3 and ext4 through a real FSKit mount, with
+  automatic mounting on attach.
+- Journal replay on read-write mount; refusal to write over an unreplayed log.
+- LUKS1 and LUKS2 containers (aes-xts-plain64; PBKDF2 and Argon2), unlocked
+  from the menu bar or `Ext4Mac unlock`, keys kept in the login keychain.
+- Formatting (`newfs_ext4`) and a mountability check.
+- Crash-consistency, reordered-write, differential-vs-Linux, replay-speed and
+  mounted-driver suites; the pull test on real hardware.
 - Continuous integration on GitHub Actions: the offline suites on macOS 26, the
   same core under AddressSanitizer and UBSan, a five-minute fuzz smoke with a
   coverage gate, and the five oracle suites judged by the Linux kernel's own
   ext4 on an Ubuntu runner.
 - In-process libFuzzer harness with a structure-aware mutator and checksum
-  stamper; a mutation campaign that runs inside `make validate`; twenty
-  hostile fixtures, one per finding, each proven red before its fix.
+  stamper; a mutation campaign that runs inside `make validate`; 22
+  hostile fixtures, one per finding, each proven red before its fix; a
+  twenty-round soak with fuzzing between rounds, and a hardware
+  re-verification on a real USB stick, both recorded in the docs.
 - `Ext4Mac last-error` and `Ext4Mac events`: the extension records why it
   refused, degraded, locked or could not mount a volume, and the app reads it
   back with advice. The menu-bar agent turns a new record into a
@@ -39,10 +53,18 @@ headings to be edited into one.
 
 ### Fixed
 - Twelve memory-safety and logic bugs in the vendored lwext4 found by fuzzing,
-  and five more found by CI's first runs, as patches 0062 through 0078.
-- A superblock whose inode count does not cover every block group is refused
-  at probe: the last group's inode count underflowed and the first create
-  read past the end of a one-block bitmap (found by the nightly fuzzer).
+  five more found by CI's first runs, and one by the soak, as patches 0062
+  through 0079 -- the last an xattr list that put every second entry on a
+  misaligned address on any healthy volume with two attributes on one file.
+- Listed extended-attribute names carried the on-disk `user.` namespace
+  (`user.com.apple.provenance`), so a file copied off a volume came home with
+  its metadata renamed; names are now the ones macOS set.
+- `Ext4Mac last-error <disk>` finds a record keyed by the volume's UUID --
+  what a pulled stick leaves -- by the disk name a person types.
+- A superblock whose inode count is not block groups x inodes per group is
+  refused at probe, in either direction -- the Linux kernel's own rule. Too
+  few underflowed the last group's count and the first create read past a
+  one-block bitmap; too many made a read-only walk take 52 seconds.
 - A volume this driver declined could not be ejected until the idle probe
   process exited: the declined resource was kept, and with it the device.
 - A read-only "degraded" record was written for every normal mount of a
@@ -55,15 +77,3 @@ headings to be edited into one.
   bitmap disagree; a use-after-free in the journal's block records after an
   aborted transaction; the read-only mount of a dirty journal now says so at
   the error level.
-
-## [0.1.0] - 2026-08-29
-
-### Added
-- Reads and writes ext2, ext3 and ext4 through a real FSKit mount, with
-  automatic mounting on attach.
-- Journal replay on read-write mount; refusal to write over an unreplayed log.
-- LUKS1 and LUKS2 containers (aes-xts-plain64; PBKDF2 and Argon2), unlocked
-  from the menu bar or `Ext4Mac unlock`, keys kept in the login keychain.
-- Formatting (`newfs_ext4`) and a mountability check.
-- Crash-consistency, reordered-write, differential-vs-Linux, replay-speed and
-  mounted-driver suites; the pull test on real hardware.

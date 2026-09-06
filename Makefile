@@ -1122,7 +1122,10 @@ release:  ## cut a release: make release VERSION=x.y.z
 	  || { git checkout -q -- VERSION; echo "release aborted; nothing committed, nothing tagged"; exit 1; }
 	@bash scripts/check_release.sh \
 	  || { git checkout -q -- VERSION; echo "release aborted; nothing committed, nothing tagged"; exit 1; }
-	@git add VERSION CHANGELOG.md && git commit -q -m "Release $(RELEASE_VERSION)"
+	@# Nothing to commit is not a failure: when the file already said this
+	@# version and the changelog section was committed ahead, the tag simply
+	@# lands on HEAD.
+	@git add VERSION CHANGELOG.md && { git diff --cached --quiet || git commit -q -m "Release $(RELEASE_VERSION)"; }
 	@git tag -a "v$(RELEASE_VERSION)" -m "Release $(RELEASE_VERSION)"
 	@echo ""
 	@echo "released $(RELEASE_VERSION) locally: $(DMG)"
@@ -1133,7 +1136,11 @@ release:  ## cut a release: make release VERSION=x.y.z
 # including the plist stamping of a tree that has not been re-versioned yet.
 # So the target reads its argument under another name, and the build keeps
 # reading the file.
-RELEASE_VERSION := $(if $(filter-out $(strip $(shell cat VERSION 2>/dev/null)),$(VERSION)),$(VERSION),)
+# By ORIGIN, not by value: the first version compared the command-line value
+# with the file's and treated "the same" as "not given", so the very first
+# release -- VERSION already 0.1.0 in the file, `make release VERSION=0.1.0`
+# -- printed the usage line and stopped.
+RELEASE_VERSION := $(if $(findstring command line,$(origin VERSION)),$(VERSION),)
 
 # The commits since the last tag, sorted into Keep-a-Changelog headings by
 # their first word, for editing into CHANGELOG.md. A draft, not a section: the

@@ -1,6 +1,7 @@
 # open_ext4_for_mac
 
 [![ci](https://github.com/h3ct0r/open_ext4_for_mac/actions/workflows/ci.yml/badge.svg)](https://github.com/h3ct0r/open_ext4_for_mac/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/h3ct0r/open_ext4_for_mac)](https://github.com/h3ct0r/open_ext4_for_mac/releases)
 [![licence](https://img.shields.io/github/license/h3ct0r/open_ext4_for_mac)](LICENSE)
 [![platform](https://img.shields.io/badge/macOS-15.4%2B%20%C2%B7%20Apple%20Silicon-black)](#three-things-to-know)
 
@@ -20,8 +21,7 @@ containers included, which macOS otherwise cannot open at all.
 ## Install
 
 1. Download `Ext4Mac-x.y.z.dmg` from [Releases](https://github.com/h3ct0r/open_ext4_for_mac/releases)
-   and drag **Ext4Mac** to `/Applications`. *(The first release is in
-   preparation; until it is published, [build from source](#building-from-source).)*
+   and drag **Ext4Mac** to `/Applications`.
 2. Open Ext4Mac once. It registers the filesystem extension and asks you to
    approve it.
 3. Approve it in **System Settings → General → Login Items & Extensions →

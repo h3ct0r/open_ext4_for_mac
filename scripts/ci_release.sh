@@ -148,5 +148,21 @@ version="$(cat VERSION)"
 notes="$(mktemp)"
 # The changelog section for this version, verbatim, as the release notes.
 awk -v v="$version" '$0 ~ "^## \\["v"\\]"{p=1; next} /^## \[/{p=0} p' CHANGELOG.md > "$notes"
+# Then the two things a changelog will not tell a new user and every release
+# must (docs/RELEASING.md), the hash a person can check the download against,
+# and where the limits are written down.
+sha="$(shasum -a 256 "$DMG" | cut -d' ' -f1)"
+cat >> "$notes" <<EOF
+
+---
+
+**Eject before unplugging.** FSKit gives this driver no way to flush a drive's cache, so the journal's ordering guarantee stops at the drive. Twenty mid-write pulls across five drives recovered cleanly, but a pull mid-write can also panic macOS itself. What was measured: [docs/ENVELOPE.md](https://github.com/h3ct0r/open_ext4_for_mac/blob/v$version/docs/ENVELOPE.md#the-barrier-what-this-driver-cannot-promise).
+
+**After installing or upgrading, approve the extension** in System Settings → General → Login Items & Extensions → File System Extensions. macOS grants this by hand only. Step by step, with what to do when it looks broken: [docs/INSTALL.md](https://github.com/h3ct0r/open_ext4_for_mac/blob/v$version/docs/INSTALL.md).
+
+**Known limitations** — what is refused, read-only, and not yet done: [docs/ENVELOPE.md](https://github.com/h3ct0r/open_ext4_for_mac/blob/v$version/docs/ENVELOPE.md). Apple Silicon and macOS 15.4 or later only.
+
+\`$(basename "$DMG")\` SHA-256: \`$sha\`
+EOF
 gh release create "v$version" "$DMG" --title "v$version" --notes-file "$notes"
 echo "release: published v$version"
