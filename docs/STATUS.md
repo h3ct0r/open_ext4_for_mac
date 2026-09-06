@@ -83,7 +83,7 @@ The oracle is never this driver. `make validate` runs 29 stages unattended
 in about ten minutes: every read against `debugfs`, `e2fsck` after every
 write, crash cuts and reordered writes replayed by the Linux kernel, both
 directions of a differential round trip, LUKS containers judged by real
-`cryptsetup`, a mutation campaign and 20 hostile fixtures, and — with the
+`cryptsetup`, a mutation campaign and 22 hostile fixtures, and — with the
 extension approved — the live mount: crash snapshots by `SIGSTOP`, kill
 recovery with a timed remount, encrypted volumes, newfs, user-visible
 events. CI runs the offline set on macOS, the sanitizer build, a fuzz smoke
