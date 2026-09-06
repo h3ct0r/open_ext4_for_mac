@@ -32,11 +32,46 @@ containers included, which macOS otherwise cannot open at all.
 4. Plug in an ext4 disk. It mounts. Encrypted ones ask for a passphrase from
    the menu bar.
 
-Reopen the assistant any time from the menu-bar icon → **Setup Assistant…**,
-or check the same things from a script with `Ext4Mac setup --check`.
-
 The step-by-step with screenshots, and what to do when it looks broken but
 is not, is in [docs/INSTALL.md](docs/INSTALL.md).
+
+## The Setup Assistant
+
+macOS will not let any app approve its own file system extension, so a fresh
+install has switches only a person can flip. The Setup Assistant is one window
+that walks them, and then proves the result on a real volume.
+
+<!-- screenshot: docs/images/setup-assistant.png -->
+
+| step | what it does |
+|---|---|
+| **Approve the extension** | opens the right pane, then watches for the switch and says the moment it lands. It also tells apart the two ways it can be unset: an unlit switch, and a File System Extensions list that is empty because macOS has not registered the module at all |
+| **Keep it working after a restart** | starts Ext4Mac at login, which is what keeps the extension registered |
+| **Let Ext4Mac tell you things** | notification permission, so a locked or refused volume is reported when it happens rather than only by `Ext4Mac status` |
+| **Disk Utility** *(optional)* | adds ext2/3/4 to the Erase menu, behind the standard administrator prompt |
+| **Try it on a real volume** | mounts a small ext4 volume that ships inside the app, through the same path a plugged-in disk takes, and ejects it again |
+| **Where Ext4Mac lives** | points at the menu-bar icon and opens its menu |
+
+Only the approval matters — nothing mounts without it — and every other step
+can be skipped. Closing the window before you have finished asks first. It opens by itself only
+when the extension is not approved, and never twice for the same build.
+
+From the menu bar it is **Setup Assistant…**. From a terminal:
+
+```bash
+Ext4Mac setup           # open the window (hands it to the running agent)
+Ext4Mac setup --check   # the checklist as text, exit 1 if something is missing
+Ext4Mac setup --check --json
+Ext4Mac selftest --mount   # mount the bundled sample volume, read it, eject it
+```
+
+`setup --check` is the scriptable form: one line per item as
+`<state> <id> <detail>`, exit 0 when nothing is missing, 1 when something is.
+`selftest --mount` exits 0 when the install works end to end and 77 when the
+extension is not approved yet.
+
+Walking it on a fresh user account, which no test suite can do, is
+[docs/QA-SETUP.md](docs/QA-SETUP.md).
 
 ## What it does
 
@@ -75,6 +110,9 @@ against the driver's own table on every test run, so it cannot drift.
 | verb | what it does |
 |---|---|
 | `status` | is the extension enabled, and every volume with something to report |
+| `setup` | open the Setup Assistant |
+| `setup --check` | the first-run checklist as text or `--json`; exit 1 if something is missing |
+| `selftest --mount` | mount the bundled sample volume, read it and eject it |
 | `last-error /dev/diskN` | why a disk did not mount, and what to do about it |
 | `events [n]` | the last *n* volume events |
 | `unlock /dev/diskN` | prompt for a passphrase, derive the master key, keep it in the keychain |
