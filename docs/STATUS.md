@@ -6,7 +6,7 @@ measurements — lives in [the notebook](notebook/README.md); this page is the
 summary. What the driver will and will not mount is [ENVELOPE.md](ENVELOPE.md),
 which is checked against the code on every test run.
 
-Last updated 2026-09-04, at the first release's candidate build.
+Last updated 2026-09-05, after the first twenty-round soak with fuzzing.
 
 | phase | state |
 |---|---|
@@ -95,12 +95,12 @@ how each suite came to exist is in the notebook.
 
 | what | latest | where |
 |---|---|---|
-| full validation | 2026-09-04: 29 stages green, 580 s | `make validate` |
-| soak | 2026-09-02: **17** clean rounds of the full set (20 requested; three spanned a lid-close and were excluded although each passed) | [notebook/soak.md](notebook/soak.md) |
+| full validation | 2026-09-05: 29 stages green, ~590 s, twenty times over in the soak | `make validate` |
+| soak | 2026-09-05: **20** clean rounds of the full set with 10 min of fuzzing each way between rounds, on `ba71e40`; the three attempts before it each stopped on a finding, fixed red-first | [notebook/soak.md](notebook/soak.md) |
 | pull test | twenty mid-write pulls across five drives, USB-2 sticks to an NVMe SSD behind a bridge; every one `e2fsck`-clean, no synced file lost | [the five-drive verdict](notebook/write-ordering-and-the-barrier.md#the-barrier-daemon-is-retired-a-five-drive-verdict) |
 | hardware loop | the runbook and its last session | [HARDWARE.md](HARDWARE.md) |
-| fuzzing | 20 hostile fixtures, one per finding; the nightly's latest (an inode count that could not cover its groups) fixed 2026-09-04 | `Tests/fixtures/hostile/MANIFEST` |
-| bugs found in lwext4 | 78 numbered patches, each with its reason | [patches/lwext4/README.md](../patches/lwext4/README.md) |
+| fuzzing | 22 hostile fixtures, one per finding; the soak's latest two (the xattr list's alignment, an inode count past its groups) fixed 2026-09-05 | `Tests/fixtures/hostile/MANIFEST` |
+| bugs found in lwext4 | 79 numbered patches, each with its reason | [patches/lwext4/README.md](../patches/lwext4/README.md) |
 
 The counts on this page are checked against the tree by
 `Tests/run_docs_tests.sh` where they can be, and dated where they cannot.
