@@ -28,7 +28,7 @@ walks the whole thing:
 | Approve the extension | opens the right pane and then watches for the switch, telling you when it lands |
 | Keep it working after a restart | starts Ext4Mac at login, which is what keeps the extension registered |
 | Let Ext4Mac tell you things | notification permission, so a locked or refused volume is reported when it happens |
-| Disk Utility (optional) | adds ext2/3/4 to the Erase menu, with the standard administrator prompt |
+| Disk Utility (optional) | adds ext2/3/4 to the Erase menu, with the standard administrator prompt. See the note below on what it can and cannot erase |
 | Try it on a real volume | mounts a small ext4 volume that ships inside the app, so you see the driver working before risking a disk |
 | Where Ext4Mac lives | points at the menu-bar icon and opens its menu |
 
@@ -71,6 +71,31 @@ sentence it uses for a genuinely broken disk. Check with:
 
 which prints `status: enabled` when the switch is on and `registered but
 DISABLED` when it is not.
+
+### What Disk Utility can erase as ext4
+
+Disk images: yes. A physical disk: no, and no amount of authenticating
+changes it. The erase ends with
+
+```
+newfs_fskit: Operation ended with error: Permission denied
+File system formatter failed. : (-69832)
+```
+
+because macOS runs the formatter as the logged-in user while a physical
+disk's device node belongs to `root:operator` with mode 0640 — group members
+may read it, nobody but root may write it. `fskitd` refuses before this
+driver is ever asked, so there is nothing here to fix or grant.
+
+To put ext4 on a real disk today: format it on a Linux machine, or from a
+source checkout of this project, which writes the raw node directly as root:
+
+```bash
+sudo make prepare-device DEVICE=diskN
+```
+
+Then unplug the disk and plug it in again. DiskArbitration caches its verdict
+and will keep reporting "no file system" until the device reappears.
 
 ## 3a. Prove it without a disk
 

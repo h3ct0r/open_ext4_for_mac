@@ -609,10 +609,14 @@ struct SetupAssistantView: View {
                 `diskutil listFilesystems`. The formatting is still done by the \
                 extension; this only makes it selectable.
 
-                Worth knowing: erasing a physical disk as ext4 from Disk Utility needs \
-                an administrator — macOS refuses it for anyone else with error −69832 — \
-                and Disk Utility labels the result “EXT2”. You can remove this at any \
-                time from this window.
+                Worth knowing: this works for disk images, but erasing a PHYSICAL \
+                disk as ext4 fails with “File system formatter failed (−69832)”, and \
+                authenticating does not help. macOS runs the formatter as you, and a \
+                physical disk's device node belongs to root, so the write is refused \
+                before this driver is ever asked. Format real disks on Linux, or with \
+                `sudo make prepare-device` from a source checkout. Disk Utility also \
+                labels an ext4 volume “EXT2”. You can remove this at any time from \
+                this window.
                 """)
             if model.state(of: .diskUtility) == .ok {
                 Text("Installed in /Library/Filesystems/ext4.fs.").foregroundStyle(.secondary)
