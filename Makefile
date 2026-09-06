@@ -1044,12 +1044,18 @@ $(SAMPLE_IMG): $(BUILD)/bin/ext4dump Packaging/sample/README.txt
 
 # Copied in, not linked: codesign seals Contents/Resources, and a .fs bundle
 # with no executable is sealed as an ordinary resource tree.
+# The icon is a built artefact of Packaging/icon/make_icon.swift, committed so
+# that a build needs no rendering step, and copied in rather than referenced.
+$(APP_RESOURCES)/Ext4Mac.icns: App/Ext4Mac.icns
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
 $(APP_RESOURCES)/ext4.fs: $(shell find Packaging/ext4.fs -type f 2>/dev/null)
 	@mkdir -p $(dir $@)
 	@rm -rf $@
 	@cp -R Packaging/ext4.fs $@
 
-app: extension $(BUILD)/$(APP_NAME).app/Contents/Info.plist $(BUILD)/$(APP_NAME).app/Contents/MacOS/$(APP_NAME) $(SAMPLE_IMG) $(APP_RESOURCES)/ext4.fs  ## build Ext4Mac.app with the FSKit extension inside
+app: extension $(BUILD)/$(APP_NAME).app/Contents/Info.plist $(BUILD)/$(APP_NAME).app/Contents/MacOS/$(APP_NAME) $(SAMPLE_IMG) $(APP_RESOURCES)/ext4.fs $(APP_RESOURCES)/Ext4Mac.icns  ## build Ext4Mac.app with the FSKit extension inside
 
 # Stamping the plists has to notice a new commit even when no source file
 # changed, or the bundle keeps claiming the revision it was first built at --
@@ -1066,6 +1072,7 @@ $(BUILD)/$(APP_NAME).app/Contents/Info.plist: App/Info.plist $(BUILD)/.build-id
 	@plutil -replace Ext4BuildID -string "$(BUILD_ID)" $@
 	@plutil -replace CFBundleShortVersionString -string "$(VERSION)" $@
 	@plutil -replace CFBundleVersion -string "$(BUILD_NUMBER)" $@
+	@plutil -replace CFBundleIconFile -string "Ext4Mac" $@
 
 # The app links the core so it can read a LUKS header and run the key
 # derivation itself: a gigabyte of argon2id belongs in an ordinary application,
