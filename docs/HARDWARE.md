@@ -523,6 +523,35 @@ Known states, from mildest to worst (docs/notebook/write-ordering-and-the-barrie
   `fsck_fskit` can stay wedged (ENOTSUP) the same way. Re-run the mounted
   suite once before blaming a code change.
 
+## 5. Sessions
+
+The ladder, as climbed, with the numbers. Newest first.
+
+### 2026-09-05 — build `7bd5746`, Kingston DataTraveler Max 256 GB (USB)
+
+The re-verification after patches 0062–0079 touched the write path. Two
+findings on the way, both fixed and proven red-first before the ladder was
+called green.
+
+| rung | result |
+|---|---|
+| probe | the field volume from the last session (7 `.mcap` recordings, 5.8 GB, written on Linux) was claimed over Paragon's bundle and mounted read-write within seconds of insertion; a 917 MB file read through the mount in 5 s |
+| format | `partitionDisk … EXT4` failed as the console user (fskitd EACCES, `-69832`, see §1); `prepare-device`'s direct format on the raw node landed; DiskArbitration saw it only after a replug |
+| clean mount | after the replug: read-write, 1,920,357 × 4 KiB, no replay line, `free-space accounting agrees` |
+| flood | `cp -R` of a synthetic corpus shaped like the field one — 2,032 files, 1.56 GB, partial tails, spaces and unicode in names, three macOS xattrs per file — in 28 s (55 MB/s); the log carried only the preallocation meter |
+| timed eject | 1 s: `unmount()`, `volume closed` |
+| cold verify | replug, then `verify_copy.sh` first: **2,032 of 2,032 identical, 0 different, 0 missing, 0 wrong size**, 92 s |
+| e2fsck -fn | clean; 28 advisory "extent tree could be shorter" lines (0057's fold does not collapse depth; cosmetic) |
+| fragstat | 2,037 files, 3,982 extents, 2.0 per file, 383 KB per extent, `65+` bucket empty, worst 9 extents for 500 MB — the field shape (2.2 per file, worst 7) |
+| deep kill | `make test-kill-recovery EXT4_KILL_DEVICE=disk4s2`: 18 of 18; every remount including replay 1 s; the deep round replayed 88 transactions / 3,522 blocks in 126 ms |
+| pull | `make test-pull DEVICE=disk4`, three rounds: mount rw, remount rw, `e2fsck -fn` 0, `e2fsck -fy` 0, 18 / 19 / 18 synced files durable, 0 bad checksums |
+
+Findings:
+
+- **Listed xattr names carried the on-disk `user.` prefix** (`user.com.apple.provenance`): values were byte-exact and get/set/remove by the original name worked, so every mounted suite passed while anything that lists before it copies would have recreated the attribute on APFS under the wrong name. Fixed in the extension's list path (`7bd5746`), red-first on the mounted-data suite (76/2 → 78/0), and confirmed on the stick's own files.
+- **On a real pull the final write-back fails and the extension records `unmountFailed`** — three times in three rounds, which no disk-image experiment could provoke (a revoked image accepts writes). The event was then invisible to `Ext4Mac last-error disk4s2`, because the record is keyed by UUID and the reader looked up the literal name; fixed and red-first in the events suite the same evening.
+- `cp` onto the volume drops `com.apple.quarantine` while `ditto` keeps it and `cp` onto APFS keeps it, with nothing reaching the extension; a copyfile behaviour keyed on the volume, open as a follow-up, not a data-loss risk.
+
 ## Appendix: every knob
 
 The tool reads these (none ship in the appex — `scripts/check_ship_surface.sh`

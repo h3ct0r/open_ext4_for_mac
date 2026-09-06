@@ -70,3 +70,10 @@ no key, and reads what the installed extension wrote through the installed
 app with no directory argument. It runs only where the extension is enabled
 and says so where it is not. Against the extension before this work the
 mounted cells failed 11 of 11, with no file to read; after it, 36 of 36 pass.
+
+*Addendum, 2026-09-05, hardware loop:* on a real USB stick pulled mid-write
+the final write-back does fail and the extension records `unmountFailed` --
+three rounds, three records -- so the site the disk-image experiments could
+not reach is reached by the medium it was written for. The record was keyed
+by the volume's UUID and `Ext4Mac last-error disk4s2` did not find it by
+name; the reader now falls back to the newest record for that device.

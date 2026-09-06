@@ -6,7 +6,7 @@ measurements — lives in [the notebook](notebook/README.md); this page is the
 summary. What the driver will and will not mount is [ENVELOPE.md](ENVELOPE.md),
 which is checked against the code on every test run.
 
-Last updated 2026-09-05, after the first twenty-round soak with fuzzing.
+Last updated 2026-09-05, after the twenty-round soak and the hardware re-verification.
 
 | phase | state |
 |---|---|
@@ -98,7 +98,7 @@ how each suite came to exist is in the notebook.
 | full validation | 2026-09-05: 29 stages green, ~590 s, twenty times over in the soak | `make validate` |
 | soak | 2026-09-05: **20** clean rounds of the full set with 10 min of fuzzing each way between rounds, on `ba71e40`; the three attempts before it each stopped on a finding, fixed red-first | [notebook/soak.md](notebook/soak.md) |
 | pull test | twenty mid-write pulls across five drives, USB-2 sticks to an NVMe SSD behind a bridge; every one `e2fsck`-clean, no synced file lost | [the five-drive verdict](notebook/write-ordering-and-the-barrier.md#the-barrier-daemon-is-retired-a-five-drive-verdict) |
-| hardware loop | the runbook and its last session | [HARDWARE.md](HARDWARE.md) |
+| hardware loop | 2026-09-05 on `7bd5746`, a 256 GB USB stick: every rung green — 2,032-file copy byte-exact after a cold replug, e2fsck clean, kill-recovery 18/18 with 1 s remounts, three pulls with no synced file lost; two findings fixed red-first on the day | [HARDWARE.md §5](HARDWARE.md#5-sessions) |
 | fuzzing | 22 hostile fixtures, one per finding; the soak's latest two (the xattr list's alignment, an inode count past its groups) fixed 2026-09-05 | `Tests/fixtures/hostile/MANIFEST` |
 | bugs found in lwext4 | 79 numbered patches, each with its reason | [patches/lwext4/README.md](../patches/lwext4/README.md) |
 

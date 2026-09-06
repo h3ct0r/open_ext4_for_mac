@@ -35,7 +35,15 @@ enum Ext4Events {
         }
         // A UUID, a BSD name, or /dev/diskN -- people paste all three.
         let cleaned = key.hasPrefix("/dev/") ? String(key.dropFirst(5)) : key
-        guard let event = VolumeEventStore.latest(forKey: cleaned, in: dir) else {
+        // The record is keyed by the volume's UUID whenever the probe could
+        // read one -- it survives a replug into another port -- so the disk
+        // name a person types is the key only for a volume that had no UUID.
+        // Three pulls of a real stick recorded unmountFailed for disk4s2 and
+        // this printed "no event recorded" (2026-09-05). By name, then: the
+        // newest record whose device is this disk.
+        let event = VolumeEventStore.latest(forKey: cleaned, in: dir)
+            ?? VolumeEventStore.all(in: dir).first { $0.device == cleaned }
+        guard let event else {
             print("no event recorded for \(key)")
             return 1
         }

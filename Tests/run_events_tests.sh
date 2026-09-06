@@ -254,6 +254,21 @@ else
     bad "a /dev/diskN path finds the same record a bare name does"
   fi
 
+  # A record keyed by the volume's UUID -- every volume the probe could read
+  # -- must still be found by the disk name a person types. Three pulls of a
+  # real stick recorded unmountFailed for disk4s2 (2026-09-05) and
+  # `last-error disk4s2` said "no event recorded": the reader looked up the
+  # literal key, and the /dev/diskN cell above passed because its fixture had
+  # no UUID to be keyed by.
+  "$PROBE" write "$D" unmountFailed disk12s2 f0e1d2c3-0000-4000-8000-000000000042 \
+      "the final write-back failed" >/dev/null
+  if "$APP" last-error disk12s2 "$D" 2>&1 | grep -q "write-back failed"; then
+    ok "a disk name finds a record keyed by the volume's UUID (what a pulled stick leaves)"
+  else
+    bad "a disk name finds a record keyed by the volume's UUID (what a pulled stick leaves)" \
+        "$("$APP" last-error disk12s2 "$D" 2>&1 | head -1)"
+  fi
+
   # A volume nobody has had trouble with must not produce an invented answer.
   "$APP" last-error never-seen-before "$D" >/dev/null 2>&1
   rc=$?
