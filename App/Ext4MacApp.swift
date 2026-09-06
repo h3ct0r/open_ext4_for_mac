@@ -9,6 +9,7 @@
 //
 
 import Foundation
+import AppKit
 import ServiceManagement
 import FSKit
 
@@ -119,8 +120,22 @@ struct Ext4MacApp {
             // agent and asks it to open the assistant, rather than putting up
             // a window of its own beside a menu bar with nothing in it.
             if arguments.isEmpty || arguments == ["--open"] {
-                Ext4MenuBar.openAssistantOnLaunch = true
-                Ext4MenuBar.run()
+                // A second agent would be a second identical menu-bar icon
+                // watching the same disks, so an agent that is already there
+                // is asked to open the window instead.
+                let others = NSRunningApplication
+                    .runningApplications(withBundleIdentifier: Ext4Agent.bundleIdentifier)
+                    .filter { $0.processIdentifier != getpid() }
+                switch SetupChecklist.openRoute(otherInstances: others.count) {
+                case .askRunningAgent:
+                    Ext4Agent.requestSetupAssistant()
+                    others.first?.activate()
+                    print("asked the running Ext4Mac to open the Setup Assistant")
+                    exit(0)
+                case .startAgent:
+                    Ext4MenuBar.openAssistantOnLaunch = true
+                    Ext4MenuBar.run()
+                }
             }
             exit(setupCommand(arguments))
 
@@ -471,6 +486,12 @@ struct Ext4MacApp {
         check("closing while the sample volume is mounted asks too",
               SetupChecklist.closeDecision(ready, sampleMounted: true) != .close,
               "the volume would be ejected underneath the Finder without a word")
+
+        check("with no agent running, `setup` starts one",
+              SetupChecklist.openRoute(otherInstances: 0) == .startAgent)
+        check("with one already running, `setup` asks it instead of adding a second menu-bar icon",
+              SetupChecklist.openRoute(otherInstances: 1) == .askRunningAgent,
+              "two identical icons, and no way to tell which menu is which")
         print("")
         print("passed: \(passedCount)   failed: \(failed)")
         return failed == 0 ? 0 : 1

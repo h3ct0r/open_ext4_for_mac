@@ -305,3 +305,24 @@ extension SetupChecklist {
         return .confirm(missing: missing.map(\.id.rawValue), sampleMounted: sampleMounted)
     }
 }
+
+// MARK: - one agent, not two
+
+/// What `Ext4Mac setup` should do about the copy that may already be running.
+///
+/// The agent puts an icon in the menu bar, so a second one is not a harmless
+/// duplicate: it is a second identical icon, watching the same disks, with the
+/// user unable to tell which menu belongs to which. So a request to open the
+/// window is handed to the copy that is already there.
+enum SetupOpenRoute: Equatable {
+    /// No agent yet: this process becomes it, and opens the window.
+    case startAgent
+    /// One is running: ask it, and get out of the way.
+    case askRunningAgent
+}
+
+extension SetupChecklist {
+    static func openRoute(otherInstances: Int) -> SetupOpenRoute {
+        otherInstances > 0 ? .askRunningAgent : .startAgent
+    }
+}

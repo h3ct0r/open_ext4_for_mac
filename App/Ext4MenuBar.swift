@@ -27,6 +27,20 @@ import ServiceManagement
 /// Never logs key material, a passphrase, or anything derived from one.
 let appLog = Logger(subsystem: "dev.h3ct0r.ext4", category: "app")
 
+/// The one name the command line and the running agent share. A distributed
+/// notification rather than a socket or a file: it is a doorbell, it carries
+/// nothing, and the only thing that can go wrong is that nobody answers.
+enum Ext4Agent {
+    static let bundleIdentifier = "dev.h3ct0r.ext4mac"
+    static let openSetupAssistant = Notification.Name("dev.h3ct0r.ext4mac.openSetupAssistant")
+
+    static func requestSetupAssistant() {
+        DistributedNotificationCenter.default()
+            .postNotificationName(openSetupAssistant, object: nil, userInfo: nil,
+                                  deliverImmediately: true)
+    }
+}
+
 /// A LUKS container macOS currently knows about.
 private struct EncryptedVolume {
     let bsdName: String          // "disk6"
@@ -115,6 +129,10 @@ final class Ext4MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Task { @MainActor in me.diskChanged(snapshot) }
         }, context)
 
+        DistributedNotificationCenter.default().addObserver(
+            forName: Ext4Agent.openSetupAssistant, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.openAssistant() }
+        }
         rebuildMenu()
 
         // The order matters. The status item exists by now, so the wizard's

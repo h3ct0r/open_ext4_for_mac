@@ -338,7 +338,20 @@ final class SetupAssistantWindowController: NSObject, NSWindowDelegate {
         window.title = "Ext4Mac Setup"
         window.contentViewController = NSHostingController(rootView: SetupAssistantView(model: model))
         window.delegate = self
-        window.center()
+        // On the display the person is actually looking at. `center()` uses
+        // the main screen, which for an agent with no key window can be a
+        // different monitor entirely -- the first live test put the window on
+        // the display above this one, 1050 points off the top of the screen
+        // the menu had just been clicked on.
+        let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }
+                     ?? NSScreen.main
+        if let visible = screen?.visibleFrame {
+            let size = window.frame.size
+            window.setFrameOrigin(NSPoint(x: visible.midX - size.width / 2,
+                                          y: visible.midY - size.height / 2))
+        } else {
+            window.center()
+        }
         window.isReleasedWhenClosed = false
         self.window = window
         window.makeKeyAndOrderFront(nil)
