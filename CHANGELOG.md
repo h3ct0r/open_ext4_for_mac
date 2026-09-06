@@ -19,7 +19,12 @@ headings to be edited into one.
   and exits 1 when something is missing, so a script can ask.
 - `Ext4Mac selftest --mount` mounts the bundled sample volume, reads a file
   back through the driver and ejects it — the install proven end to end.
-- An application icon.
+- An application icon: a dark tile carrying the word `ext4`, drawn at three
+  levels of detail so it stays legible down to 16 px.
+- Closing the Setup Assistant before it is finished asks first, naming the
+  steps not seen yet, anything still missing, and a sample volume that would
+  be ejected. It stays quiet for skipped steps, warnings, the last screen, and
+  a setup already completed.
 
 ### Changed
 - The first run is no longer three NSAlerts. They fired before the menu-bar
@@ -29,6 +34,16 @@ headings to be edited into one.
 - The menu header asks FSKit what it thinks of the module when the menu opens,
   instead of checking that a file exists in /Applications — a bundle sitting
   there unapproved used to report itself as installed and ready.
+- `Ext4Mac setup` hands the request to the agent that is already running
+  instead of starting a second one, which would have been a second identical
+  menu-bar icon watching the same disks. The window also opens on the display
+  the pointer is on, rather than wherever `center()` decided.
+
+### Fixed
+- The app no longer records the Setup Assistant as completed just because the
+  extension is enabled. That key was written at launch for every working
+  install, so the app believed people had finished a window they had never
+  opened — and closing it halfway through therefore asked nothing.
 
 ## [0.1.0] - 2026-09-05
 
