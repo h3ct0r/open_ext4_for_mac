@@ -6,7 +6,7 @@ measurements — lives in [the notebook](notebook/README.md); this page is the
 summary. What the driver will and will not mount is [ENVELOPE.md](ENVELOPE.md),
 which is checked against the code on every test run.
 
-Last updated 2026-09-05, after the twenty-round soak and the hardware re-verification.
+Last updated 2026-09-06, at the first release.
 
 | phase | state |
 |---|---|
@@ -16,7 +16,7 @@ Last updated 2026-09-05, after the twenty-round soak and the hardware re-verific
 | kernel-offloaded I/O | **disabled** by design — see gaps |
 | correctness harness | complete: image suites, crash consistency, reordered writes, differential vs Linux, replay speed, fuzzing, mounted driver |
 | encrypted volumes | complete: LUKS1 and LUKS2, unlock from the menu bar or the command line |
-| distribution | complete: DMG, notarization, versioning, release workflow proven by dry run; first release in preparation |
+| distribution | complete: **v0.1.0 published 2026-09-06** — signed, notarized and stapled DMG on the Releases page, cut by `make release` and the release workflow |
 
 ## What works today
 
