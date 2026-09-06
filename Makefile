@@ -1015,7 +1015,41 @@ $(APPEX): $(SWIFT_SRCS) $(CORE_LIB) Extension/Info.plist $(BUILD)/.build-id
 # The container app exists only to host the extension: macOS discovers FSKit
 # modules through an installed application bundle, and the user enables it in
 # System Settings > General > Login Items & Extensions.
-app: extension $(BUILD)/$(APP_NAME).app/Contents/Info.plist $(BUILD)/$(APP_NAME).app/Contents/MacOS/$(APP_NAME)  ## build Ext4Mac.app with the FSKit extension inside
+# ------------------------------------------------------------- resources ----
+# What the app carries so the Setup Assistant can demonstrate rather than
+# describe: a real ext4 volume, and the Disk Utility bundle it can install
+# without the user finding a `sudo make` line in a text file.
+#
+# The sample is built by our own tool from an empty file, so it needs no
+# Homebrew e2fsprogs and no root: format, create, put, and then `check` walks
+# what was written -- a bundled image that does not pass our own reader would
+# be a demonstration of the wrong thing. 8 MiB is the smallest ext4 the .fs
+# plist already claims to support, and the label is under the 16 bytes the
+# superblock has for it.
+APP_RESOURCES := $(BUILD)/$(APP_NAME).app/Contents/Resources
+SAMPLE_IMG    := $(APP_RESOURCES)/Ext4Mac-Sample.img
+SAMPLE_MIB    ?= 8
+SAMPLE_LABEL  := Ext4Mac Sample
+
+$(SAMPLE_IMG): $(BUILD)/bin/ext4dump Packaging/sample/README.txt
+	@mkdir -p $(dir $@)
+	@rm -f $@.tmp
+	@dd if=/dev/zero of=$@.tmp bs=1m count=$(SAMPLE_MIB) 2>/dev/null
+	@$(BUILD)/bin/ext4dump $@.tmp format 4 4096 "$(SAMPLE_LABEL)" >/dev/null
+	@$(BUILD)/bin/ext4dump $@.tmp create /README.txt >/dev/null
+	@$(BUILD)/bin/ext4dump $@.tmp put /README.txt Packaging/sample/README.txt >/dev/null
+	@$(BUILD)/bin/ext4dump $@.tmp check >/dev/null
+	@mv $@.tmp $@
+	@echo "  sample volume: $(SAMPLE_MIB) MiB ext4, labelled $(SAMPLE_LABEL)"
+
+# Copied in, not linked: codesign seals Contents/Resources, and a .fs bundle
+# with no executable is sealed as an ordinary resource tree.
+$(APP_RESOURCES)/ext4.fs: $(shell find Packaging/ext4.fs -type f 2>/dev/null)
+	@mkdir -p $(dir $@)
+	@rm -rf $@
+	@cp -R Packaging/ext4.fs $@
+
+app: extension $(BUILD)/$(APP_NAME).app/Contents/Info.plist $(BUILD)/$(APP_NAME).app/Contents/MacOS/$(APP_NAME) $(SAMPLE_IMG) $(APP_RESOURCES)/ext4.fs  ## build Ext4Mac.app with the FSKit extension inside
 
 # Stamping the plists has to notice a new commit even when no source file
 # changed, or the bundle keeps claiming the revision it was first built at --
@@ -1042,6 +1076,7 @@ $(BUILD)/$(APP_NAME).app/Contents/MacOS/$(APP_NAME): $(APP_SRCS) $(CORE_LIB)
 	@mkdir -p $(dir $@)
 	swiftc $(APP_SRCS) -target arm64-apple-macos$(DEPLOY_TARGET) -O -parse-as-library \
 	    -I $(SHIM_DIR) $(EXTRA_SWIFTFLAGS) $(CORE_LIB) -o $@
+
 
 # --- signing -----------------------------------------------------------------
 # Requires a Developer ID Application certificate and a provisioning profile
