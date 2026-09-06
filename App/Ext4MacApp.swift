@@ -114,6 +114,14 @@ struct Ext4MacApp {
         // the suite produces states -- an unapproved extension, a second ext
         // driver -- that would otherwise mean breaking this Mac to see.
         case "setup":
+            // Without --check this opens the window, which needs the agent's
+            // status item to exist for the tour to point at -- so it runs the
+            // agent and asks it to open the assistant, rather than putting up
+            // a window of its own beside a menu bar with nothing in it.
+            if arguments.isEmpty || arguments == ["--open"] {
+                Ext4MenuBar.openAssistantOnLaunch = true
+                Ext4MenuBar.run()
+            }
             exit(setupCommand(arguments))
 
         // Checks this build can make about itself, with no disk, no volume
@@ -452,6 +460,7 @@ struct Ext4MacApp {
         Ext4Mac selftest            what this build can check about itself
         Ext4Mac selftest --mount    mount the bundled sample volume, read it and
                                     eject it — the install proven end to end
+        Ext4Mac setup               open the Setup Assistant
         Ext4Mac setup --check       the first-run checklist: what is still
                                     missing before ext4 volumes will mount
         Ext4Mac mount /dev/diskN    mount a volume whose key is stored

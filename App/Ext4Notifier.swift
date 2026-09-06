@@ -39,15 +39,28 @@ final class Ext4Notifier {
         self.shownUpTo = VolumeEventStore.all(in: directory).first?.time ?? 0
     }
 
-    func start() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
-            if let error {
-                appLog.error("notifications: \(error.localizedDescription, privacy: .public)")
-            } else if !granted {
-                appLog.info("notifications not granted; events are still in `Ext4Mac status`")
-            }
+    /// `requestAuthorization: false` when the Setup Assistant is about to
+    /// open. Two prompts arriving together -- macOS's own notification dialog
+    /// and a window explaining that it will -- is the interruption this whole
+    /// wizard exists to remove; there the wizard asks, on its own step.
+    func start(requestAuthorization: Bool = true) {
+        if requestAuthorization {
+            Task { _ = await Ext4Notifier.requestAuthorization() }
         }
         watch()
+    }
+
+    /// Ask for permission and say whether it was given. Used by the Setup
+    /// Assistant's notifications step, which shows the answer either way.
+    @discardableResult
+    static func requestAuthorization() async -> Bool {
+        do {
+            return try await UNUserNotificationCenter.current()
+                .requestAuthorization(options: [.alert, .sound])
+        } catch {
+            appLog.error("notifications: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
     }
 
     /// The directory may not exist yet -- an extension that has never had to

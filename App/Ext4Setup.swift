@@ -20,8 +20,13 @@
 //  read as a broken install. Starting at login is what makes the approval
 //  stick.
 //
-//  So this runs once at launch, asks for nothing that is already true, and
-//  says plainly which of the two is missing.
+//  This file is what the app KNOWS about those two switches, and about the
+//  rest of a first run: the probe, the persistence, and the watch that says
+//  when an approval lands. What it no longer holds is a user interface. The
+//  three NSAlerts that used to live here fired before the menu-bar icon
+//  existed, gave "registered but not approved" and "not registered at all"
+//  the same sentence, and gave up after two minutes in silence.
+//  Ext4SetupAssistant.swift is the window that replaced them.
 //
 
 import Foundation
@@ -34,7 +39,6 @@ import os
 enum Ext4Setup {
     private static let log = Logger(subsystem: "dev.h3ct0r.ext4", category: "setup")
     private static let modulePrefix = "dev.h3ct0r.ext4mac"
-    private static let declinedLoginItemKey = "Ext4SetupDeclinedLoginItem"
 
     /// The pane that holds File System Extensions, by its own identifier
     /// rather than a guessed URL: com.apple.LoginItems-Settings.extension is
@@ -53,126 +57,13 @@ enum Ext4Setup {
             return (false, false)
         }
     }
-
-    /// Called once at launch. Silent when both switches are already set.
-    static func runAtLaunch() {
-        Task { @MainActor in
-            let (registered, enabled) = await extensionState()
-
-            // Registration is this app's own doing: it happened by launching.
-            // Keeping it across reboots is what the login item buys, so offer
-            // it in the same breath as the approval rather than as a second
-            // interruption later.
-            let loginItemOn = SMAppService.mainApp.status == .enabled
-
-            if enabled && loginItemOn {
-                log.info("extension enabled and set to start at login; nothing to ask")
-                return
-            }
-            if enabled && !loginItemOn {
-                // Asked once. A person who declines has decided, and a
-                // question re-asked at every launch stops being a question
-                // and becomes a nag -- the surest way to have it dismissed
-                // without reading. The menu keeps the toggle for later.
-                if !UserDefaults.standard.bool(forKey: declinedLoginItemKey) {
-                    offerLoginItem()
-                }
-                return
-            }
-            offerApproval(registered: registered, loginItemOn: loginItemOn)
-        }
-    }
-
-    @MainActor
-    private static func offerApproval(registered: Bool, loginItemOn: Bool) {
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.messageText = "One step left before ext4 volumes will mount"
-        alert.informativeText = """
-            macOS needs you to approve the file system extension by hand — no \
-            app can do it for you, which is why nothing has prompted until now.
-
-            In the pane that opens, turn on “open_ext4 (ext2/3/4)” under \
-            File System Extensions.
-            """
-        alert.addButton(withTitle: "Open Settings")
-        alert.addButton(withTitle: "Later")
-
-        if !loginItemOn {
-            alert.showsSuppressionButton = true
-            alert.suppressionButton?.title = "Also start Ext4Mac at login (recommended)"
-            alert.suppressionButton?.state = .on
-        }
-
-        let choice = alert.runModal()
-        let wantsLoginItem = alert.suppressionButton?.state == .on
-
-        if !loginItemOn && wantsLoginItem { enableLoginItem() }
-
-        guard choice == .alertFirstButtonReturn, let pane = settingsPane else { return }
-        NSWorkspace.shared.open(pane)
-        waitForApproval()
-    }
-
-    @MainActor
-    private static func offerLoginItem() {
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.messageText = "Keep ext4 working after a restart?"
-        alert.informativeText = """
-            The extension is registered only while Ext4Mac has run. After a \
-            reboot it disappears from System Settings until the app is opened \
-            again — starting Ext4Mac at login keeps it available.
-
-            Without the agent running, a locked encrypted volume is reported \
-            only by `Ext4Mac status`, not as a notification.
-            """
-        alert.addButton(withTitle: "Start at Login")
-        alert.addButton(withTitle: "Not Now")
-        if alert.runModal() == .alertFirstButtonReturn {
-            enableLoginItem()
-        } else {
-            UserDefaults.standard.set(true, forKey: declinedLoginItemKey)
-        }
-    }
-
-    private static func enableLoginItem() {
-        do {
-            try SMAppService.mainApp.register()
-            log.info("registered as a login item")
-        } catch {
-            log.error("could not register a login item: \(error.localizedDescription, privacy: .public)")
-        }
-    }
-
-    /// Watch for the approval and confirm it, so the user is not left
-    /// wondering whether the switch they just flipped was the right one.
-    /// Gives up quietly: an unanswered question is not an error.
-    @MainActor
-    private static func waitForApproval() {
-        Task { @MainActor in
-            for _ in 0..<60 {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                if await extensionState().enabled {
-                    let done = NSAlert()
-                    done.alertStyle = .informational
-                    done.messageText = "ext4 is ready"
-                    done.informativeText =
-                        "Plug in an ext2, ext3 or ext4 drive and it will mount like any other disk."
-                    done.addButton(withTitle: "OK")
-                    done.runModal()
-                    return
-                }
-            }
-            log.info("approval not granted within the watch window")
-        }
-    }
 }
 
 // MARK: - the facts, from this machine
 //
 // One owner for probing and persistence. These were copied into three places
-// (the menu bar's toggle, the `login-item` verb, the alert flow above), and
+// (the menu bar's toggle, the `login-item` verb, the alerts that used to be
+// above), and
 // three copies of a rule is three chances to disagree about it.
 
 extension Ext4Setup {

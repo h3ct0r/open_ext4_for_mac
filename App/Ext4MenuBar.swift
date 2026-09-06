@@ -36,7 +36,11 @@ private struct EncryptedVolume {
 }
 
 @MainActor
-final class Ext4MenuBar: NSObject, NSApplicationDelegate {
+final class Ext4MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
+
+    /// Set by the `setup` verb: open the Setup Assistant as soon as there is
+    /// a status item for its tour to point at.
+    static var openAssistantOnLaunch = false
 
     private var statusItem: NSStatusItem!
     private var session: DASession!
@@ -52,6 +56,13 @@ final class Ext4MenuBar: NSObject, NSApplicationDelegate {
     /// mount. Started once the menu exists; its notifications are the only
     /// way "encrypted and locked, not broken" reaches a person in time.
     private var notifier: Ext4Notifier?
+    /// What FSKit last said about our module, refreshed when the menu opens.
+    /// The header used to read this off a file existing in /Applications,
+    /// which answers "was it installed" and not "does it work" -- a bundle
+    /// sitting there unapproved reported itself as ready.
+    private var extensionState: (registered: Bool, enabled: Bool)?
+    /// A tour is running: the menu was opened by the wizard, not by a person.
+    private var tourResume: (() -> Void)?
 
     static func run() -> Never {
         let app = NSApplication.shared
@@ -66,9 +77,6 @@ final class Ext4MenuBar: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         appLog.info("menu-bar agent started")
-        // Both switches a fresh install needs, asked for once and only when
-        // they are actually missing.
-        Ext4Setup.runAtLaunch()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: "externaldrive.badge.person.crop",
@@ -107,13 +115,77 @@ final class Ext4MenuBar: NSObject, NSApplicationDelegate {
             Task { @MainActor in me.diskChanged(snapshot) }
         }, context)
 
-        if let dir = VolumeEventStore.directory(insideSandbox: false) {
-            let n = Ext4Notifier(directory: dir)
-            n.onChange = { [weak self] in self?.rebuildMenu() }
-            n.start()
-            notifier = n
-        }
         rebuildMenu()
+
+        // The order matters. The status item exists by now, so the wizard's
+        // tour has something to point at -- the old flow put its alerts up
+        // before there was any menu bar icon at all, which is why the first
+        // thing a new user saw was a dialog about an interface they could not
+        // see. And when the wizard is about to open, the notifier does not ask
+        // for permission: its step does.
+        Task { @MainActor in
+            let decision = Ext4MenuBar.openAssistantOnLaunch
+                ? Ext4Setup.LaunchDecision.open(reason: "asked for")
+                : await Ext4Setup.launchDecision()
+            var willOpen = false
+            if case .open(let reason) = decision {
+                willOpen = true
+                appLog.info("opening the setup assistant: \(reason, privacy: .public)")
+            }
+            if let dir = VolumeEventStore.directory(insideSandbox: false) {
+                let n = Ext4Notifier(directory: dir)
+                n.onChange = { [weak self] in self?.rebuildMenu() }
+                n.start(requestAuthorization: !willOpen)
+                self.notifier = n
+            }
+            // Never on top of a passphrase prompt: an unlock the user is in
+            // the middle of answering outranks a first run.
+            if willOpen && !self.panelIsUp { self.openAssistant() }
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // Whatever the sample-volume step attached, gone before we are.
+        let done = DispatchSemaphore(value: 0)
+        Task { await Ext4SampleVolume.detachAll(); done.signal() }
+        _ = done.wait(timeout: .now() + 20)
+    }
+
+    // MARK: - Setup Assistant
+
+    @objc func openAssistant() {
+        SetupAssistantWindowController.shared.show { [weak self] resume in
+            self?.runTour(then: resume)
+        }
+    }
+
+    private func runTour(then resume: @escaping () -> Void) {
+        guard let button = statusItem.button else { resume(); return }
+        tourResume = resume
+        Ext4StatusItemTour.run(on: button) { [weak self] in
+            // Opening the menu nests the run loop, so it is asked for and not
+            // awaited; menuDidClose is what carries on from here.
+            self?.statusItem.button?.performClick(nil)
+        }
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        guard let resume = tourResume else { return }
+        tourResume = nil
+        Ext4StatusItemTour.finish(on: statusItem.button, then: resume)
+    }
+
+    /// The menu is where the truth about the extension is shown, so it is read
+    /// when the menu opens rather than cached from launch.
+    func menuWillOpen(_ menu: NSMenu) {
+        Task { @MainActor in
+            let state = await Ext4Setup.extensionState()
+            if state.registered != self.extensionState?.registered
+                || state.enabled != self.extensionState?.enabled {
+                self.extensionState = state
+                self.rebuildMenu()
+            }
+        }
     }
 
     // MARK: - DiskArbitration
@@ -286,11 +358,15 @@ final class Ext4MenuBar: NSObject, NSApplicationDelegate {
     private func rebuildMenu() {
         let menu = NSMenu()
 
-        let extensionReady = FileManager.default.fileExists(
-            atPath: "/Applications/Ext4Mac.app/Contents/Extensions/Ext4FS.appex")
-        menu.addItem(withTitle: extensionReady ? "ext4 extension installed"
-                                               : "ext4 extension NOT installed",
-                     action: nil, keyEquivalent: "").isEnabled = false
+        let header: String
+        if let state = extensionState {
+            header = state.enabled ? "ext4 extension: enabled"
+                   : (state.registered ? "ext4 extension: registered, not approved"
+                                       : "ext4 extension: not registered")
+        } else {
+            header = "ext4 extension: checking…"
+        }
+        menu.addItem(withTitle: header, action: nil, keyEquivalent: "").isEnabled = false
         menu.addItem(.separator())
 
         if volumes.isEmpty {
@@ -314,16 +390,22 @@ final class Ext4MenuBar: NSObject, NSApplicationDelegate {
         menu.addItem(issues)
 
         menu.addItem(.separator())
+        let assistant = NSMenuItem(title: "Setup Assistant…",
+                                   action: #selector(openAssistant), keyEquivalent: "")
+        assistant.target = self
+        menu.addItem(assistant)
+
         let login = NSMenuItem(title: "Open at Login",
                                action: #selector(toggleOpenAtLogin), keyEquivalent: "")
         login.target = self
-        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        login.state = Ext4Setup.loginItemEnabled() ? .on : .off
         menu.addItem(login)
 
         let quit = NSMenuItem(title: "Quit Ext4Mac", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
 
+        menu.delegate = self
         statusItem.menu = menu
     }
 
@@ -405,11 +487,7 @@ final class Ext4MenuBar: NSObject, NSApplicationDelegate {
 
     @objc private func toggleOpenAtLogin() {
         do {
-            if SMAppService.mainApp.status == .enabled {
-                try SMAppService.mainApp.unregister()
-            } else {
-                try SMAppService.mainApp.register()
-            }
+            try Ext4Setup.setLoginItem(!Ext4Setup.loginItemEnabled())
         } catch {
             report("Could not change the login item", "\(error.localizedDescription)")
         }
