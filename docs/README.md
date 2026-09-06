@@ -9,6 +9,7 @@
 | [SIGNING.md](SIGNING.md) | developers | certificates, entitlements, provisioning profiles, `errSecInternalComponent` |
 | [RELEASING.md](RELEASING.md) | the maintainer | the release pipeline, its secrets, the notes template |
 | [HARDWARE.md](HARDWARE.md) | the maintainer | the runbook for a day with real media |
+| [QA-SETUP.md](QA-SETUP.md) | the maintainer | walking the Setup Assistant on a fresh account, which no suite can do |
 | [notebook/](notebook/README.md) | the curious | the engineering record: every investigation, dated and unedited |
 | [feedback/](feedback/) | the maintainer | Apple Feedback drafts and their ids |
 | [../patches/lwext4/README.md](../patches/lwext4/README.md) | developers | every change to the vendored lwext4 and why |

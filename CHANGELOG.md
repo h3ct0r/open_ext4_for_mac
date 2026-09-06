@@ -9,6 +9,27 @@ headings to be edited into one.
 
 ## [Unreleased]
 
+### Added
+- **A Setup Assistant.** The first launch now opens one window that walks the
+  whole install: approve the extension, start at login, allow notifications,
+  add ext2/3/4 to Disk Utility with the standard administrator prompt, mount a
+  sample ext4 volume that ships inside the app, and a short tour of the
+  menu-bar icon. Reopen it from the menu, or with `Ext4Mac setup`.
+- `Ext4Mac setup --check [--json]` prints the same checklist without a window
+  and exits 1 when something is missing, so a script can ask.
+- `Ext4Mac selftest --mount` mounts the bundled sample volume, reads a file
+  back through the driver and ejects it — the install proven end to end.
+- An application icon.
+
+### Changed
+- The first run is no longer three NSAlerts. They fired before the menu-bar
+  icon existed, gave "registered but not approved" and "not registered at all"
+  the same sentence, and stopped watching for the approval after two minutes
+  in silence.
+- The menu header asks FSKit what it thinks of the module when the menu opens,
+  instead of checking that a file exists in /Applications — a bundle sitting
+  there unapproved used to report itself as installed and ready.
+
 ## [0.1.0] - 2026-09-05
 
 The first release. Everything below is in it.

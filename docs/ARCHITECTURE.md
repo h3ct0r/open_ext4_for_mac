@@ -12,7 +12,16 @@ Ext4Mac.app                          container app; macOS finds FSKit modules
 │   ├── Ext4MenuBar.swift            DiskArbitration watcher; asks for passphrases
 │   ├── Ext4Unlock.swift             derives a LUKS master key; keychain in, never out
 │   ├── Ext4Notifier.swift           watches the events directory; notifications
-│   └── Ext4Events.swift             reads what the extension wrote
+│   ├── Ext4Events.swift             reads what the extension wrote
+│   ├── Ext4Setup.swift              the probe, the preferences, the approval watch
+│   ├── Ext4SetupChecks.swift        the first-run checklist as a pure function
+│   ├── Ext4SetupAssistant.swift     the first-run window (SwiftUI)
+│   ├── Ext4StatusItemTour.swift     blinks the menu-bar icon and opens its menu
+│   ├── Ext4SampleVolume.swift       mounts the ext4 volume that ships in Resources
+│   └── Ext4DiskUtilityInstall.swift installs /Library/Filesystems/ext4.fs
+├── Resources/
+│   ├── Ext4Mac-Sample.img           an 8 MiB ext4 volume, built by ext4dump
+│   └── ext4.fs                      the Disk Utility bundle, installed on request
 ├── Shared/                          compiled into both bundles
 │   ├── LUKSKeychain.swift           the shared keychain group the key travels in
 │   ├── VolumeEvent.swift            one thing that happened to one volume

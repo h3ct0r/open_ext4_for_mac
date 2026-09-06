@@ -13,6 +13,8 @@ GitHub Release whose notes are the changelog section — produced by
 - The hostile-fixture and patch counts in the changelog match
   `Tests/fixtures/hostile/MANIFEST` and `patches/lwext4/` (the docs suite
   checks the README's; check the changelog's by eye).
+- When the first-run path changed, [QA-SETUP.md](QA-SETUP.md) has been walked
+  on a fresh user account: no suite can see the Setup Assistant's window.
 - The soak and, when lwext4's write path changed, the hardware loop have been
   run on this build and recorded in `docs/notebook/soak.md` / `docs/HARDWARE.md`, and `docs/STATUS.md`'s record table updated.
 

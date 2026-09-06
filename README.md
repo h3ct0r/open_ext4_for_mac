@@ -22,12 +22,18 @@ containers included, which macOS otherwise cannot open at all.
 
 1. Download `Ext4Mac-x.y.z.dmg` from [Releases](https://github.com/h3ct0r/open_ext4_for_mac/releases)
    and drag **Ext4Mac** to `/Applications`.
-2. Open Ext4Mac once. It registers the filesystem extension and asks you to
-   approve it.
-3. Approve it in **System Settings → General → Login Items & Extensions →
-   File System Extensions**. macOS grants this by hand only; no app can do it.
+2. Open Ext4Mac once. The **Setup Assistant** appears and walks the rest:
+   approval, start-at-login, notifications, Disk Utility, and a sample ext4
+   volume it mounts so you can see the driver working.
+3. Approve the extension when it asks, in **System Settings → General → Login
+   Items & Extensions → File System Extensions**. macOS grants this by hand
+   only; no app can do it, so the assistant opens the pane and watches for the
+   switch.
 4. Plug in an ext4 disk. It mounts. Encrypted ones ask for a passphrase from
    the menu bar.
+
+Reopen the assistant any time from the menu-bar icon → **Setup Assistant…**,
+or check the same things from a script with `Ext4Mac setup --check`.
 
 The step-by-step with screenshots, and what to do when it looks broken but
 is not, is in [docs/INSTALL.md](docs/INSTALL.md).

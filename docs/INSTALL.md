@@ -15,21 +15,39 @@ application bundle, and one run from `~/Downloads` is not installed.
 
 <!-- screenshot: docs/images/install-dmg.png -->
 
-## 2. Open it once
+## 2. Open it once, and let the Setup Assistant do the rest
 
-Open Ext4Mac. It has no window — it lives in the menu bar as a small drive
-icon — and on first launch it does two things: registers the filesystem
-extension with macOS, and asks whether to start at login.
+Open Ext4Mac. It has no window of its own — it lives in the menu bar as a
+small drive icon — and on first launch the **Setup Assistant** appears and
+walks the whole thing:
 
-Say yes to starting at login. The extension stays registered only while the
-app has run since boot; without the login item, ext4 disks stop mounting
-after a restart until you open Ext4Mac again. You can change it later with
-`Ext4Mac login-item on|off`.
+<!-- screenshot: docs/images/setup-assistant.png -->
+
+| step | what it does |
+|---|---|
+| Approve the extension | opens the right pane and then watches for the switch, telling you when it lands |
+| Keep it working after a restart | starts Ext4Mac at login, which is what keeps the extension registered |
+| Let Ext4Mac tell you things | notification permission, so a locked or refused volume is reported when it happens |
+| Disk Utility (optional) | adds ext2/3/4 to the Erase menu, with the standard administrator prompt |
+| Try it on a real volume | mounts a small ext4 volume that ships inside the app, so you see the driver working before risking a disk |
+| Where Ext4Mac lives | points at the menu-bar icon and opens its menu |
+
+Nothing in it is compulsory except the approval, and every step can be done
+later from the menu-bar icon → **Setup Assistant…**. From a terminal:
+
+```bash
+/Applications/Ext4Mac.app/Contents/MacOS/Ext4Mac setup           # open it
+/Applications/Ext4Mac.app/Contents/MacOS/Ext4Mac setup --check   # just the checklist
+```
+
+`setup --check` prints one line per item and exits 1 when something is
+missing, which makes it usable from a script.
 
 ## 3. Approve the extension
 
-macOS never lets an app approve its own filesystem extension. Ext4Mac opens
-the right pane for you; if it did not, go to
+macOS never lets an app approve its own filesystem extension. The Setup
+Assistant opens the right pane for you and watches for the switch; if it did
+not, go to
 
 **System Settings → General → Login Items & Extensions → File System
 Extensions**
@@ -37,6 +55,11 @@ Extensions**
 and turn on **open_ext4 (ext2/3/4)**.
 
 <!-- screenshot: docs/images/approve-extension.png -->
+
+If the list is EMPTY rather than showing an unlit switch, the extension is not
+registered at all: macOS registers it when the app runs, so open Ext4Mac from
+`/Applications` and look again. The assistant tells these two apart and says
+which one you have.
 
 Until this switch is on, every ext4 disk you plug in is reported by macOS as
 *"The disk you inserted was not readable by this computer."* — the same
@@ -48,6 +71,19 @@ sentence it uses for a genuinely broken disk. Check with:
 
 which prints `status: enabled` when the switch is on and `registered but
 DISABLED` when it is not.
+
+## 3a. Prove it without a disk
+
+The app carries a small ext4 volume of its own. The **Try it** step of the
+assistant mounts it, or from a terminal:
+
+```bash
+/Applications/Ext4Mac.app/Contents/MacOS/Ext4Mac selftest --mount
+```
+
+It attaches the image, lets macOS mount it through the extension, reads a file
+back and ejects it. Exit 0 means the install works end to end; 77 means the
+extension is not approved yet.
 
 ## 4. Plug in a disk
 
