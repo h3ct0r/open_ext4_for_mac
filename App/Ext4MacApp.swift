@@ -437,6 +437,40 @@ struct Ext4MacApp {
                   error.localizedDescription)
         }
 
+
+        // Closing the Setup Assistant before it is finished has to ask, and
+        // has to ask only when there is something to ask about. This is the
+        // decision behind that dialog, which is otherwise reachable only by
+        // clicking a red close button at the right moment.
+        let green = SetupEnvironment(bundlePath: "/Applications/Ext4Mac.app",
+                                     registered: true, enabled: true, loginItem: true,
+                                     notifications: .authorized, diskUtility: true,
+                                     otherDriver: nil, sample: true)
+        let ready = SetupChecklist.evaluate(green)
+        check("a finished setup closes without asking",
+              SetupChecklist.closeDecision(ready) == .close,
+              "\(SetupChecklist.closeDecision(ready))")
+
+        var unapproved = green
+        unapproved.enabled = false
+        let notReady = SetupChecklist.evaluate(unapproved)
+        if case .confirm(let missing, _) = SetupChecklist.closeDecision(notReady) {
+            check("closing with the extension unapproved asks first, naming what is missing",
+                  missing.contains("approve"), "named \(missing)")
+        } else {
+            check("closing with the extension unapproved asks first, naming what is missing",
+                  false, "it closed silently")
+        }
+
+        var noLogin = green
+        noLogin.loginItem = false
+        check("a step the user skipped is not unfinished",
+              SetupChecklist.closeDecision(
+                  SetupChecklist.evaluate(noLogin, skipped: [.loginItem])) == .close)
+
+        check("closing while the sample volume is mounted asks too",
+              SetupChecklist.closeDecision(ready, sampleMounted: true) != .close,
+              "the volume would be ejected underneath the Finder without a word")
         print("")
         print("passed: \(passedCount)   failed: \(failed)")
         return failed == 0 ? 0 : 1

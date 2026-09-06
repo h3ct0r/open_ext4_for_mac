@@ -279,3 +279,29 @@ enum SetupSample {
         Bundle.main.url(forResource: resourceName, withExtension: resourceExtension)?.path
     }
 }
+
+// MARK: - closing before it is finished
+
+/// What should happen when someone closes the Setup Assistant window.
+///
+/// The window is closable at any point, deliberately -- a wizard that traps a
+/// person is worse than one they abandon. But closing it while the extension
+/// is still unapproved silently leaves an app that mounts nothing, and closing
+/// it while the sample volume is mounted takes the volume away underneath the
+/// Finder. Both are worth one question.
+enum SetupCloseDecision: Equatable {
+    case close
+    case confirm(missing: [String], sampleMounted: Bool)
+}
+
+extension SetupChecklist {
+    /// Confirm only when something is actually unfinished. A step the person
+    /// chose to skip is finished as far as they are concerned, and a warning
+    /// is something said, not something owed -- neither earns a dialog.
+    static func closeDecision(_ checks: [SetupCheck],
+                              sampleMounted: Bool = false) -> SetupCloseDecision {
+        let missing = checks.filter { $0.state == .missing }
+        if missing.isEmpty && !sampleMounted { return .close }
+        return .confirm(missing: missing.map(\.id.rawValue), sampleMounted: sampleMounted)
+    }
+}

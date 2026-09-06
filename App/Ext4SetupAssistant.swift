@@ -146,6 +146,16 @@ final class SetupAssistantModel: ObservableObject {
         UserDefaults.standard.set(version, forKey: Ext4Setup.Prefs.completedVersion)
     }
 
+    /// What to do when the window's close button is clicked.
+    ///
+    /// The last step is exempt: it already lists everything still outstanding
+    /// and says where to come back to, so asking again on the way out of a
+    /// screen the person has just read would be the wizard arguing with them.
+    func closeDecision() -> SetupCloseDecision {
+        if step == .done { return .close }
+        return SetupChecklist.closeDecision(checks, sampleMounted: sample != nil)
+    }
+
     /// Closing while the extension is still unapproved is an answer too: this
     /// build stops opening the window by itself, and the menu keeps the way
     /// back. Without this the wizard would greet every launch of a machine
@@ -337,6 +347,46 @@ final class SetupAssistantWindowController: NSObject, NSWindowDelegate {
     }
 
     var isOpen: Bool { window?.isVisible ?? false }
+
+    /// Ask before closing an unfinished setup. The window stays closable --
+    /// trapping someone in a wizard is worse than letting them leave -- but
+    /// leaving it half done means an app that mounts nothing, or a sample
+    /// volume that vanishes from under the Finder, and neither should happen
+    /// without a word.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard let model else { return true }
+        guard case .confirm(let missing, let sampleMounted) = model.closeDecision() else {
+            return true
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = missing.contains(SetupCheckID.approve.rawValue)
+            ? "Ext4Mac will not mount anything yet"
+            : "Finish setting up Ext4Mac?"
+
+        var lines: [String] = []
+        for id in missing {
+            if let detail = model.checks.first(where: { $0.id.rawValue == id })?.detail {
+                lines.append("• " + detail)
+            }
+        }
+        if sampleMounted {
+            lines.append("• The sample volume is still mounted and will be ejected.")
+        }
+        alert.informativeText = """
+            Still to do:
+
+            \(lines.joined(separator: "\n"))
+
+            You can come back at any time from the menu-bar icon → Setup Assistant…
+            """
+        alert.addButton(withTitle: "Keep Setting Up")
+        alert.addButton(withTitle: "Close Anyway")
+        // The safe answer is the default one: a return key pressed out of
+        // habit should not be what loses an unapproved install.
+        NSApp.activate(ignoringOtherApps: true)
+        return alert.runModal() != .alertFirstButtonReturn
+    }
 
     func windowWillClose(_ notification: Notification) {
         model?.windowClosed()
@@ -594,7 +644,7 @@ struct SetupAssistantView: View {
                 Button("Skip") { model.skip() }
             }
             if model.step == .done {
-                Button("Finish") { NSApp.keyWindow?.close() }
+                Button("Finish") { NSApp.keyWindow?.performClose(nil) }
                     .keyboardShortcut(.defaultAction)
             } else {
                 Button("Continue") { model.advance() }
