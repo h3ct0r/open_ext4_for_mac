@@ -141,6 +141,13 @@ to approve the extension again: replacing the whole bundle changes every
 file's identity and macOS treats it as a new extension. Volumes mounted by
 the old version keep being served by it until you eject and replug them.
 
+An upgrade that loses the approval is what the Setup Assistant is for: it
+opens by itself on the next launch, at the approval step, and closes again
+when the switch is back on. If macOS has forgotten the module entirely — an
+empty File System Extensions list rather than an unlit switch — opening
+Ext4Mac from `/Applications` re-registers it, and the assistant says which of
+the two happened.
+
 ## Uninstalling
 
 Everything an install creates, named and removed:
