@@ -114,6 +114,7 @@ stage app            make app
 # above into a cache hit that proves nothing.
 stage events         bash Tests/run_events_tests.sh
 stage setup          bash Tests/run_setup_tests.sh
+stage diskutil       bash Tests/run_diskutil_tests.sh
 
 # What this build can check about itself. Today: whether key material is
 # actually locked into memory on this machine, which mlock only promises

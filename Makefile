@@ -216,7 +216,7 @@ ARGON2_CFLAGS := $(CFLAGS) $(NO_WARN) -I$(ARGON2_DIR)
 CORE_LIB      := $(BUILD)/lib/$(CONFIG)/libext4core.a
 CORE_TEST_LIB := $(BUILD)/lib/$(CONFIG)/libext4core-test.a
 
-.PHONY: help all core test-docs test-setup fuzz-triage-oom verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-revoke test-bounds test-fuzz test-fuzz-regressions test-reorder test-crypto test-events test-envelope test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline ci-linux release changelog-draft check-release uninstall test-uninstall print-fuzz-flags fuzz-build fuzz fuzz-rw fuzz-repro fuzz-minimize fuzz-merge fuzz-check fuzz-cov fuzz-cov-gate
+.PHONY: help all core test-docs test-setup fuzz-triage-oom verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-diskutil test-revoke test-bounds test-fuzz test-fuzz-regressions test-reorder test-crypto test-events test-envelope test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline ci-linux release changelog-draft check-release uninstall test-uninstall print-fuzz-flags fuzz-build fuzz fuzz-rw fuzz-repro fuzz-minimize fuzz-merge fuzz-check fuzz-cov fuzz-cov-gate
 
 all: app  ## build Ext4Mac.app with the FSKit extension inside (same as app)
 
@@ -448,6 +448,10 @@ test-events: tools
 # without an approved extension.
 test-setup: tools  ## the setup assistant: checklist from inputs, bundle artefacts, sample mount
 	@bash Tests/run_setup_tests.sh
+
+test-diskutil: tools  ## Disk Utility: erasing a root-owned device node as ext4
+	@bash Tests/run_diskutil_tests.sh
+
 
 # Do the documents say what the tree says: links resolve, the counts in the
 # README are the tree's counts, every patch has its row, make help is

@@ -255,6 +255,7 @@ stage "5h. the build is the version it says" bash scripts/check_release.sh
 # The Setup Assistant's checklist from explicit inputs and the bundle's own
 # artefacts; the sample-volume mount runs when the extension is approved.
 stage "5i. setup assistant" bash Tests/run_setup_tests.sh
+stage "5j. disk utility" bash Tests/run_diskutil_tests.sh
 
 if docker info >/dev/null 2>&1; then
   stage "6. LUKS containers" bash Tests/run_luks_tests.sh
