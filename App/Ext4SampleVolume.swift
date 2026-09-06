@@ -58,9 +58,25 @@ enum Ext4SampleVolume {
     private static let lock = NSLock()
     private static var live: [Handle] = []
 
-    static var attachedDevices: [String] {
+    static var attachedDevices: [String] { snapshot().map(\.device) }
+
+    // Synchronous, and called from async code rather than locking inside it:
+    // holding a lock across a suspension point is the bug Swift 6 makes an
+    // error, and these three do their whole job between two statements.
+    private static func remember(_ handle: Handle) {
         lock.lock(); defer { lock.unlock() }
-        return live.map(\.device)
+        live.removeAll { $0.device == handle.device }
+        live.append(handle)
+    }
+
+    private static func forget(_ device: String) {
+        lock.lock(); defer { lock.unlock() }
+        live.removeAll { $0.device == device }
+    }
+
+    private static func snapshot() -> [Handle] {
+        lock.lock(); defer { lock.unlock() }
+        return live
     }
 
     // MARK: - mounting
@@ -109,7 +125,7 @@ enum Ext4SampleVolume {
         // used is harmless; a device used and not recorded is the leak.
         var handle = Handle(device: device, mountPoint: URL(fileURLWithPath: "/"),
                             workDirectory: work)
-        lock.lock(); live.append(handle); lock.unlock()
+        remember(handle)
         log.info("attached \(device, privacy: .public) for the sample volume")
 
         progress(.waiting)
@@ -137,10 +153,7 @@ enum Ext4SampleVolume {
         }
 
         handle = Handle(device: device, mountPoint: mountPoint, workDirectory: work)
-        lock.lock()
-        live.removeAll { $0.device == device }
-        live.append(handle)
-        lock.unlock()
+        remember(handle)
         progress(.mounted)
 
         if reveal {
@@ -183,7 +196,7 @@ enum Ext4SampleVolume {
     static func detach(_ handle: Handle) async -> String? {
         func gone() -> Bool { !FileManager.default.fileExists(atPath: handle.device) }
         func succeed() -> String? {
-            lock.lock(); live.removeAll { $0.device == handle.device }; lock.unlock()
+            forget(handle.device)
             try? FileManager.default.removeItem(at: handle.workDirectory)
             log.info("detached \(handle.device, privacy: .public)")
             return nil
@@ -210,8 +223,7 @@ enum Ext4SampleVolume {
     /// Everything this process still has attached. Called when the app quits
     /// and when the wizard's window closes.
     static func detachAll() async {
-        lock.lock(); let all = live; lock.unlock()
-        for handle in all { _ = await detach(handle) }
+        for handle in snapshot() { _ = await detach(handle) }
     }
 
     // MARK: - what to tell the user
