@@ -162,11 +162,18 @@ echo ""
 echo "the sample volume, mounted and ejected"
 echo ""
 
+# Through the INSTALLED app, the way the mounted cells of run_events_tests.sh
+# do: only a signed bundle in /Applications may ask FSKit anything, and only
+# the extension inside it is the one macOS approved. check_install_freshness
+# is what stops this from testing yesterday's binary.
+INSTALLED="/Applications/Ext4Mac.app/Contents/MacOS/Ext4Mac"
+
 if ! bash "$ROOT/scripts/check_extension.sh" >/dev/null 2>&1; then
   echo "  (mount cells skipped: the FSKit extension is not installed and enabled)"
 else
+  bash "$ROOT/scripts/check_install_freshness.sh" || exit 1
   before=$(hdiutil info 2>/dev/null | grep -c "CRawDiskImage")
-  run_deadline 120 "$APP" selftest --mount > "$WORK/mount.txt" 2>&1; rc=$?
+  run_deadline 120 "$INSTALLED" selftest --mount > "$WORK/mount.txt" 2>&1; rc=$?
   after=$(hdiutil info 2>/dev/null | grep -c "CRawDiskImage")
   if [ "$rc" = 0 ] && grep -q "README" "$WORK/mount.txt"; then
     ok "selftest --mount mounts the sample, reads its README, and ejects it (rc=0)"

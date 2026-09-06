@@ -126,7 +126,11 @@ struct Ext4MacApp {
         // Documented rather than hidden. A diagnostic somebody has to be told
         // about is a diagnostic nobody runs.
         case "selftest":
-            exit(selftest())
+            // `--mount` is the variant that touches a disk: it attaches the
+            // bundled sample volume, reads a file off it and ejects it, which
+            // is the whole install proven end to end. The default selftest
+            // stays offline so it can run anywhere.
+            exit(arguments.contains("--mount") ? selftestMount() : selftest())
 
         case "version", "--version", "-v":
             // Which source the installed bundles were built from. The point is
@@ -174,6 +178,59 @@ struct Ext4MacApp {
             FileHandle.standardError.write("Ext4Mac: unknown command '\(command)'\n".data(using: .utf8)!)
             usage(1)
         }
+    }
+
+    /// `selftest --mount` — the bundled sample volume, mounted and ejected.
+    ///
+    /// 77 (the suites' SKIP) when the extension is not approved or this build
+    /// carries no sample: neither is a failure of the code under test, and a
+    /// red cell nobody can act on is worse than an honest skip.
+    static func selftestMount() -> Int32 {
+        print("Ext4Mac selftest --mount")
+        print("")
+        let done = DispatchSemaphore(value: 0)
+        var code: Int32 = 1
+        Task {
+            defer { done.signal() }
+            let result = await Ext4SampleVolume.mount(reveal: false) { phase in
+                print("  ....  \(phase.rawValue)")
+            }
+            switch result {
+            case .failure(let failure):
+                switch failure {
+                case .notApproved, .imageMissing:
+                    print("  ----  \(Ext4SampleVolume.advice(for: failure))")
+                    print("")
+                    print("SKIPPED")
+                    code = 77
+                default:
+                    print("  FAIL  \(Ext4SampleVolume.advice(for: failure))")
+                    code = 1
+                }
+            case .success(let handle):
+                var failed = 0
+                print("  ok    mounted \(handle.device) at \(handle.mountPoint.path)")
+                let readme = handle.mountPoint.appendingPathComponent("README.txt")
+                if let text = try? String(contentsOf: readme, encoding: .utf8), !text.isEmpty {
+                    print("  ok    read README.txt through the driver (\(text.utf8.count) bytes)")
+                } else {
+                    print("  FAIL  README.txt could not be read from the mounted sample")
+                    failed += 1
+                }
+                // The eject is part of what is being tested, not cleanup after
+                // it: a demonstration that leaves a device attached has failed
+                // at the thing this app asks users to do.
+                if let stuck = await Ext4SampleVolume.detach(handle) {
+                    print("  FAIL  \(stuck)")
+                    failed += 1
+                } else {
+                    print("  ok    ejected and detached, nothing left attached")
+                }
+                code = failed == 0 ? 0 : 1
+            }
+        }
+        done.wait()
+        return code
     }
 
     // MARK: - setup
@@ -393,6 +450,8 @@ struct Ext4MacApp {
                                     volume, and what to do about it
         Ext4Mac events [n]          the last n volume events (default 10)
         Ext4Mac selftest            what this build can check about itself
+        Ext4Mac selftest --mount    mount the bundled sample volume, read it and
+                                    eject it — the install proven end to end
         Ext4Mac setup --check       the first-run checklist: what is still
                                     missing before ext4 volumes will mount
         Ext4Mac mount /dev/diskN    mount a volume whose key is stored
