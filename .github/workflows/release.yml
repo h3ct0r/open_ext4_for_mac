@@ -64,7 +64,7 @@ jobs:
 
       - name: the signed DMG, as an artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-dmg
           path: build/Ext4Mac-*.dmg
