@@ -135,12 +135,31 @@ extension Ext4Volume: FSVolume.XattrOperations {
     }
 }
 
+/// The bridge hands back on-disk names: ext4 stores an attribute as a
+/// namespace plus a suffix, and macOS names -- com.apple.provenance,
+/// com.apple.quarantine, com.apple.FinderInfo -- are filed under the user
+/// namespace, so on disk they read "user.com.apple.provenance". That is the
+/// right name for Linux and the wrong one for macOS, which never set the
+/// prefix and does not expect it back: listed with it, Finder and cp copy
+/// the attribute OFF the volume under the prefixed name, and a file that
+/// round-trips through this driver comes home with its metadata renamed.
+/// (Found on the 2026-09-05 hardware loop; every mounted suite before it
+/// only asked whether an attribute survived, not what it was called.)
+///
+/// So the user prefix comes off here, the mirror of where the bridge puts it
+/// on. Other namespaces keep theirs: "security.selinux" is a Linux name with
+/// no macOS spelling, and the bridge resolves it by that full name on a get.
 private let collectXattr: @convention(c) (UnsafeMutableRawPointer?,
                                           UnsafePointer<CChar>?, Int) -> Bool = {
     ctx, namePtr, nameLen in
     guard let ctx, let namePtr else { return false }
     let list = ctx.assumingMemoryBound(to: [FSFileName].self)
-    list.pointee.append(FSFileName(data: Data(bytes: namePtr, count: nameLen)))
+    var bytes = Data(bytes: namePtr, count: nameLen)
+    let userPrefix = Data("user.".utf8)
+    if bytes.count > userPrefix.count, bytes.prefix(userPrefix.count) == userPrefix {
+        bytes = bytes.dropFirst(userPrefix.count)
+    }
+    list.pointee.append(FSFileName(data: bytes))
     return true
 }
 

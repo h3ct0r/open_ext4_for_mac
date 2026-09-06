@@ -450,6 +450,29 @@ if [ -n "$(xattr "$MNT/f40424.bin" 2>/dev/null)" ]; then
 else
     bad "extended attributes survive the copy" "the copy carries none"
 fi
+# ... and under the names macOS gave them. ext4 files a macOS attribute under
+# its user namespace, so on disk it is "user.com.apple.metadata:...", and the
+# list path handed that on-disk name straight back: every tool that lists
+# before it copies -- Finder, cp off the volume, a backup -- then recreated
+# the attribute on APFS under the wrong name. Found on the 2026-09-05
+# hardware loop; this cell was green for weeks because it only asked whether
+# an attribute survived. Red against the extension before the fix:
+# "user.com.apple.metadata:kMDItemWhereFroms".
+names=$(xattr "$MNT/f131313.bin" 2>/dev/null | tr '\n' ' ')
+case "$names" in
+    *"user."*) bad "listed attribute names are the names macOS set, without the on-disk namespace" "$names" ;;
+    *"com.apple.metadata:kMDItemWhereFroms"*) ok "listed attribute names are the names macOS set, without the on-disk namespace" ;;
+    *) bad "listed attribute names are the names macOS set, without the on-disk namespace" "listed: '$names'" ;;
+esac
+# The full round trip that actually bit: set on the volume, list, and get by
+# the LISTED name -- what a copying tool does.
+xattr -w com.apple.roundtrip rt "$MNT/f40424.bin" 2>/dev/null
+listed=$(xattr "$MNT/f40424.bin" 2>/dev/null | grep roundtrip | head -1)
+if [ "$listed" = "com.apple.roundtrip" ] && [ "$(xattr -p "$listed" "$MNT/f40424.bin" 2>/dev/null)" = "rt" ]; then
+    ok "an attribute set on the volume lists under its own name and reads back by it"
+else
+    bad "an attribute set on the volume lists under its own name and reads back by it" "listed as '$listed'"
+fi
 detach_volume
 
 # e2fsck, which is where the missing ext_attr feature showed up. The cell

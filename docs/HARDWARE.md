@@ -91,6 +91,21 @@ sudo make prepare-device DEVICE=diskN CONFIRM=ERASE EXT4_SIZE=8g
 partition, and a full-disk partition on a 64 GB stick turns each autopsy
 into an hour.
 
+Expect `partitionDisk` to report the ext4 half as failed, and do not stop
+there. It formats through `newfs_fskit`, which the `.fs` wrapper re-dispatches
+to the console user so that fskitd can find the module -- and that user
+cannot open a physical disk's `root:operator` node for writing, so fskitd
+answers EACCES before the extension is ever asked (`diskutil` shows it as
+`-69832`, "file system formatter failed"; measured 2026-09-05). The script
+then formats the raw node directly as root, which is what has produced
+every hardware volume so far. Two consequences: `sudo ./build/bin/ext4dump
+/dev/diskNs2 probe` is the authority on whether the format landed, and
+**DiskArbitration will not notice a direct format until the stick is
+unplugged and plugged back in** -- `diskutil info` keeps saying "no file
+system" and `diskutil mount` refuses, however many times it is asked. The
+replug is the next rung anyway. (Disk Utility's Erase-as-ext4 fails the same
+way for the same reason; that is an envelope fact, not a runbook one.)
+
 Formatting goes through the **raw** node (`/dev/rdiskN`) now, falling back
 to the buffered one if a device refuses it. The buffered node routes every
 transfer through the block layer a sector at a time: an 8 GB volume
