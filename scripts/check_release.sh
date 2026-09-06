@@ -67,6 +67,23 @@ else
   echo "  (app is not Developer-ID signed here; the keychain-group cell applies to a signed build)"
 fi
 
+# The DMG has to carry a signature of its own. Notarization accepts a disk
+# image whose app is signed, the ticket staples, and then `spctl -t open`
+# assesses the IMAGE and answers "rejected, source=no usable signature" --
+# which is what the first tagged release did (v0.1.0's first run,
+# 2026-09-06), after notarization had said Accepted. Judged only when a DMG
+# is there and the app is Developer-ID signed; `make app` alone has neither.
+DMGF=$(ls "$ROOT"/build/Ext4Mac-*.dmg 2>/dev/null | head -1)
+if [ -n "$DMGF" ] && grep -q "Authority=Developer ID Application" <<<"$sig"; then
+  dsig=$(codesign -dvv "$DMGF" 2>&1 || true)
+  if grep -q "Authority=Developer ID Application" <<<"$dsig"; then
+    ok "the DMG carries its own Developer ID signature"
+  else
+    bad "the DMG carries its own Developer ID signature" \
+        "$(basename "$DMGF"): $(head -1 <<<"$dsig") -- spctl will answer 'no usable signature'"
+  fi
+fi
+
 tag=$(git -C "$ROOT" describe --tags --exact-match 2>/dev/null || true)
 if [ -n "$tag" ]; then
   [ "$tag" = "v$want" ] && ok "HEAD is tagged $tag, which is this version" \

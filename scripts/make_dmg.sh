@@ -49,4 +49,18 @@ hdiutil create \
     -ov \
     "$OUT" >/dev/null
 
+# The image itself gets a signature, with the identity the app was signed
+# with. Without it notarization still says Accepted and the ticket still
+# staples -- the app inside is signed -- but Gatekeeper's assessment of the
+# disk image (`spctl -a -t open --context context:primary-signature`) answers
+# "rejected, source=no usable signature", which is how the first tagged
+# release failed after its notarization had succeeded (2026-09-06).
+if [ -n "${SIGN_ID:-}" ]; then
+    codesign --sign "$SIGN_ID" --timestamp \
+        ${SIGN_KEYCHAIN:+--keychain "$SIGN_KEYCHAIN"} "$OUT"
+    codesign --verify "$OUT" || { echo "the DMG did not sign"; exit 1; }
+    echo "signed $OUT as $SIGN_ID"
+else
+    echo "note: SIGN_ID not set; the DMG is unsigned and Gatekeeper will reject it"
+fi
 echo "built $OUT ($(du -h "$OUT" | cut -f1))"

@@ -1081,7 +1081,7 @@ DMG     := $(BUILD)/$(APP_NAME)-$(VERSION).dmg
 # handing it to anyone: an unnotarized Developer ID app is refused by Gatekeeper
 # on first launch.
 dmg: sign  ## build a signed DMG
-	@bash scripts/make_dmg.sh "$(BUILD)/$(APP_NAME).app" "$(DMG)"
+	@SIGN_ID="$(SIGN_ID)" SIGN_KEYCHAIN="$(SIGN_KEYCHAIN)" bash scripts/make_dmg.sh "$(BUILD)/$(APP_NAME).app" "$(DMG)"
 	@echo "next: make notarize NOTARY_PROFILE=<your-stored-profile>"
 
 # Submit the DMG to Apple's notary service and wait for the verdict. Credentials
