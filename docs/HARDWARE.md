@@ -106,6 +106,13 @@ system" and `diskutil mount` refuses, however many times it is asked. The
 replug is the next rung anyway. (Disk Utility's Erase-as-ext4 fails the same
 way for the same reason; that is an envelope fact, not a runbook one.)
 
+Ownership is the whole of it, confirmed 2026-09-06: after `sudo chown $(id -u)
+/dev/disk4s2 /dev/rdisk4s2` the same Disk Utility erase succeeded, mounted
+without a replug -- DiskArbitration watched the format happen, so its cache
+was never stale -- and `e2fsck -fn` was clean. The node reverts to
+`root:operator` on the next replug, which is why `prepare-device` still does
+it the root way rather than chowning behind the user's back.
+
 Formatting goes through the **raw** node (`/dev/rdiskN`) now, falling back
 to the buffered one if a device refuses it. The buffered node routes every
 transfer through the block layer a sector at a time: an 8 GB volume

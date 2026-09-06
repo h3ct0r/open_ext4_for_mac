@@ -613,8 +613,9 @@ struct SetupAssistantView: View {
                 disk as ext4 fails with “File system formatter failed (−69832)”, and \
                 authenticating does not help. macOS runs the formatter as you, and a \
                 physical disk's device node belongs to root, so the write is refused \
-                before this driver is ever asked. Format real disks on Linux, or with \
-                `sudo make prepare-device` from a source checkout. Disk Utility also \
+                before this driver is ever asked. Taking ownership of that one node \
+                first — `sudo chown $(id -u) /dev/diskNsM /dev/rdiskNsM` — makes the \
+                erase work; it reverts when the disk is replugged. Disk Utility also \
                 labels an ext4 volume “EXT2”. You can remove this at any time from \
                 this window.
                 """)

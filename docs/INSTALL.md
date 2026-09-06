@@ -85,17 +85,36 @@ File system formatter failed. : (-69832)
 because macOS runs the formatter as the logged-in user while a physical
 disk's device node belongs to `root:operator` with mode 0640 — group members
 may read it, nobody but root may write it. `fskitd` refuses before this
-driver is ever asked, so there is nothing here to fix or grant.
+driver is ever asked.
 
-To put ext4 on a real disk today: format it on a Linux machine, or from a
-source checkout of this project, which writes the raw node directly as root:
+Ownership is the whole obstacle, and you can lift it for one disk. Take the
+two nodes for the partition you are erasing, then erase as usual:
 
 ```bash
-sudo make prepare-device DEVICE=diskN
+sudo chown $(id -u) /dev/disk4s2 /dev/rdisk4s2   # your disk's numbers
+```
+
+Measured on 2026-09-06: the same Disk Utility erase that had failed then
+succeeded, the volume mounted immediately with no replug, and `e2fsck -fn`
+found nothing wrong. Two things to understand before using it. While you own
+the node, anything running as you can write to that whole partition, so name
+the exact disk and do it only when you mean to erase it. And the ownership
+reverts the moment the disk is replugged or the Mac reboots, which makes this
+a way to erase one disk, not a change to how your system works.
+
+The alternative, which needs no such thing: format it on a Linux machine, or
+from a source checkout of this project, which writes the raw node directly as
+root:
+
+```bash
+sudo make prepare-device DEVICE=diskN CONFIRM=ERASE
 ```
 
 Then unplug the disk and plug it in again. DiskArbitration caches its verdict
-and will keep reporting "no file system" until the device reappears.
+and will keep reporting "no file system" until the device reappears — a direct
+format is invisible to it until then. An erase through Disk Utility does not
+need the replug, because it went through FSKit and DiskArbitration watched it
+happen.
 
 ## 3a. Prove it without a disk
 
