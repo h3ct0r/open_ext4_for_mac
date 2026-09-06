@@ -5,13 +5,27 @@
 //  Run:  swift Packaging/icon/make_icon.swift App/Ext4Mac.icns
 //
 //  The plan called for an SVG rendered with sips. sips does not rasterise SVG
-//  at all, and pulling in librsvg or Inkscape to draw one rounded rectangle
-//  would make the icon un-rebuildable on a machine that has neither. So the
-//  source of the icon is this file: CoreGraphics, in the toolchain the project
-//  already requires, producing every size iconutil wants.
+//  at all, and pulling in librsvg or Inkscape to draw a rounded rectangle and
+//  four letters would make the icon un-rebuildable on a machine that has
+//  neither. So the source of the icon is this file: CoreGraphics, in the
+//  toolchain the project already requires, producing every size iconutil
+//  wants.
 //
-//  The mark is the same external drive the menu-bar item uses, so the thing in
-//  the Dock and the thing in the menu bar are recognisably one program.
+//  The mark is the name. In a Dock of blue squircles a dark one carrying the
+//  word "ext4" says what the program is without anyone having to recognise a
+//  drawing of a disk, and the file system's name is the one word every user of
+//  this app already knows.
+//
+//  It is drawn differently at different sizes, which is the whole reason an
+//  .icns holds ten images rather than one scaled picture:
+//
+//    128 px and up   the wordmark with the accent bar beneath it
+//    32 to 64 px     the wordmark alone, larger; the bar becomes a smudge
+//    16 px           "e4" -- four letters at that size are grey mush, and a
+//                    thing that cannot be read should not pretend to be words
+//
+//  Rendered at 5x and looked at before it was chosen; the 16 px comparison is
+//  in the commit that introduced it.
 //
 
 import AppKit
@@ -20,76 +34,64 @@ import Foundation
 let output = CommandLine.arguments.count > 1
     ? CommandLine.arguments[1] : "App/Ext4Mac.icns"
 
-func draw(size: CGFloat) -> NSBitmapImageRep {
+let slate = NSColor(calibratedRed: 0.20, green: 0.23, blue: 0.28, alpha: 1)
+let slateDark = NSColor(calibratedRed: 0.09, green: 0.10, blue: 0.13, alpha: 1)
+let accent = NSColor(calibratedRed: 0.36, green: 0.62, blue: 1, alpha: 1)
+let paper = NSColor(calibratedWhite: 1, alpha: 0.97)
+
+func draw(size s: CGFloat) -> NSBitmapImageRep {
     let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
-                              pixelsWide: Int(size), pixelsHigh: Int(size),
+                              pixelsWide: Int(s), pixelsHigh: Int(s),
                               bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
                               isPlanar: false, colorSpaceName: .deviceRGB,
                               bytesPerRow: 0, bitsPerPixel: 0)!
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
     let ctx = NSGraphicsContext.current!.cgContext
-    let s = size
 
-    // The rounded square every macOS icon sits in, inset the way the template
-    // grid asks for, with a diagonal wash so it does not read as flat.
+    // The rounded square every macOS icon sits in: inset off the canvas edge,
+    // with the continuous corner at 22.37% of the body, and a diagonal wash so
+    // it does not read as flat.
     let inset = s * 0.086
-    let rect = CGRect(x: inset, y: inset, width: s - inset * 2, height: s - inset * 2)
-    let squircle = CGPath(roundedRect: rect,
-                          cornerWidth: rect.width * 0.2237,
-                          cornerHeight: rect.height * 0.2237, transform: nil)
+    let body = CGRect(x: inset, y: inset, width: s - inset * 2, height: s - inset * 2)
     ctx.saveGState()
-    ctx.addPath(squircle)
+    ctx.addPath(CGPath(roundedRect: body,
+                       cornerWidth: body.width * 0.2237,
+                       cornerHeight: body.height * 0.2237, transform: nil))
     ctx.clip()
-    let colours = [CGColor(red: 0.20, green: 0.44, blue: 0.86, alpha: 1),
-                   CGColor(red: 0.12, green: 0.24, blue: 0.55, alpha: 1)] as CFArray
     let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
-                              colors: colours, locations: [0, 1])!
+                              colors: [slate.cgColor, slateDark.cgColor] as CFArray,
+                              locations: [0, 1])!
     ctx.drawLinearGradient(gradient,
-                           start: CGPoint(x: rect.minX, y: rect.maxY),
-                           end: CGPoint(x: rect.maxX, y: rect.minY), options: [])
+                           start: CGPoint(x: body.minX, y: body.maxY),
+                           end: CGPoint(x: body.maxX, y: body.minY), options: [])
     ctx.restoreGState()
 
-    // The drive: a rounded body, a slot, and the light that says it is doing
-    // something -- the shape the menu-bar symbol has.
-    let bodyWidth = rect.width * 0.62
-    let bodyHeight = bodyWidth * 0.60
-    let body = CGRect(x: rect.midX - bodyWidth / 2,
-                      y: rect.midY - bodyHeight / 2 + rect.height * 0.055,
-                      width: bodyWidth, height: bodyHeight)
-    ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 0.96))
-    ctx.addPath(CGPath(roundedRect: body, cornerWidth: bodyHeight * 0.22,
-                       cornerHeight: bodyHeight * 0.22, transform: nil))
-    ctx.fillPath()
-
-    let slot = CGRect(x: body.minX + body.width * 0.12,
-                      y: body.minY + body.height * 0.24,
-                      width: body.width * 0.52, height: body.height * 0.16)
-    ctx.setFillColor(CGColor(red: 0.12, green: 0.24, blue: 0.55, alpha: 1))
-    ctx.addPath(CGPath(roundedRect: slot, cornerWidth: slot.height / 2,
-                       cornerHeight: slot.height / 2, transform: nil))
-    ctx.fillPath()
-
-    let light = CGRect(x: body.maxX - body.width * 0.22,
-                       y: body.minY + body.height * 0.22,
-                       width: body.height * 0.20, height: body.height * 0.20)
-    ctx.setFillColor(CGColor(red: 0.30, green: 0.80, blue: 0.42, alpha: 1))
-    ctx.fillEllipse(in: light)
-
-    // The wordmark, only where it can be read. At 16 and 32 points it would be
-    // three grey pixels pretending to be letters.
-    if s >= 128 {
-        let text = "ext4" as NSString
-        let font = NSFont.systemFont(ofSize: s * 0.13, weight: .semibold)
+    func word(_ text: String, points: CGFloat, weight: NSFont.Weight, baseline: CGFloat) {
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: NSColor(calibratedWhite: 1, alpha: 0.95),
-            .kern: s * 0.008,
+            .font: NSFont.systemFont(ofSize: points, weight: weight),
+            .foregroundColor: paper,
         ]
-        let measured = text.size(withAttributes: attributes)
-        text.draw(at: NSPoint(x: rect.midX - measured.width / 2,
-                              y: body.minY - measured.height - s * 0.035),
-                  withAttributes: attributes)
+        let ns = text as NSString
+        let measured = ns.size(withAttributes: attributes)
+        ns.draw(at: NSPoint(x: body.midX - measured.width / 2, y: baseline),
+                withAttributes: attributes)
+    }
+
+    if s >= 128 {
+        word("ext4", points: s * 0.30, weight: .bold, baseline: body.midY - s * 0.075)
+        // The accent bar: a drive slot, and the one piece of colour.
+        ctx.setFillColor(accent.cgColor)
+        let bar = CGRect(x: body.midX - body.width * 0.26,
+                         y: body.minY + body.height * 0.17,
+                         width: body.width * 0.52, height: body.height * 0.055)
+        ctx.addPath(CGPath(roundedRect: bar, cornerWidth: bar.height / 2,
+                           cornerHeight: bar.height / 2, transform: nil))
+        ctx.fillPath()
+    } else if s >= 32 {
+        word("ext4", points: s * 0.335, weight: .bold, baseline: body.midY - s * 0.125)
+    } else {
+        word("e4", points: s * 0.46, weight: .bold, baseline: body.midY - s * 0.175)
     }
 
     NSGraphicsContext.restoreGraphicsState()
@@ -103,8 +105,7 @@ try FileManager.default.createDirectory(at: iconset, withIntermediateDirectories
 
 for (points, scale) in [(16, 1), (16, 2), (32, 1), (32, 2), (128, 1), (128, 2),
                         (256, 1), (256, 2), (512, 1), (512, 2)] {
-    let pixels = CGFloat(points * scale)
-    let rep = draw(size: pixels)
+    let rep = draw(size: CGFloat(points * scale))
     guard let png = rep.representation(using: .png, properties: [:]) else {
         fatalError("could not encode \(points)@\(scale)x")
     }
