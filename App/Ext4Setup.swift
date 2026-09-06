@@ -177,17 +177,15 @@ extension Ext4Setup {
     static func launchDecision() async -> LaunchDecision {
         let defaults = UserDefaults.standard
         let buildID = Bundle.main.object(forInfoDictionaryKey: "Ext4BuildID") as? String ?? "unknown"
-        if await extensionState().enabled {
-            // A working install that never saw a wizard has nothing to be
-            // walked through. Record it so a later upgrade is not treated as
-            // a first run.
-            if defaults.string(forKey: Prefs.completedVersion) == nil {
-                let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString")
-                              as? String ?? "0.0.0"
-                defaults.set(version, forKey: Prefs.completedVersion)
-            }
-            return .quiet
-        }
+        // A working install is left alone. It does NOT get marked as
+        // completed: an earlier version wrote that key here, on the reasoning
+        // that a working install has nothing to be walked through -- and the
+        // effect was that the app believed every user had finished the
+        // assistant before they had opened it once, so closing it halfway
+        // through asked nothing. `completedVersion` now means one thing only:
+        // a person reached the last step. Quietness is decided here, by the
+        // state of the extension, and needs no key at all.
+        if await extensionState().enabled { return .quiet }
         if defaults.string(forKey: Prefs.dismissedForBuild) == buildID { return .quiet }
         return .open(reason: "the file system extension is not approved yet")
     }

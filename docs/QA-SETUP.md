@@ -32,8 +32,10 @@ written for and the one state it is never seen in by a new user.
 | 9 | Continue → **Show me** | the menu-bar icon blinks three times and takes the accent colour, a callout appears beside it, and the menu opens when you click the callout's button |
 | 10 | Close the menu | the second callout appears; **Done** moves to the last step |
 | 11 | **Finish** | the window closes with no further question |
-| 11a | Reopen it, go back to step 1, turn the extension OFF in System Settings, then close the window | a dialog: "Ext4Mac will not mount anything yet", listing what is missing, with **Keep Setting Up** as the default button |
-| 11b | Click **Keep Setting Up**, mount the sample volume, then close the window again | the dialog names the mounted sample volume as something that will be ejected |
+| 11a | Reopen it, stop on any middle step, and close the window | a dialog: "Finish setting up Ext4Mac?", naming the steps not seen yet, with **Keep Setting Up** as the default button |
+| 11b | Reopen, turn the extension OFF in System Settings, then close the window | the same dialog, headed "Ext4Mac will not mount anything yet" and listing the approval |
+| 11c | Click **Keep Setting Up**, mount the sample volume, then close the window again | the dialog names the mounted sample volume as something that will be ejected |
+| 11d | Walk to the last step, press **Finish**, reopen from the menu and close it | no dialog: a setup finished once is not asked about again |
 
 Then the parts that are about not being a nuisance:
 

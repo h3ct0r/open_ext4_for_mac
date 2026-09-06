@@ -469,7 +469,7 @@ struct Ext4MacApp {
         var unapproved = green
         unapproved.enabled = false
         let notReady = SetupChecklist.evaluate(unapproved)
-        if case .confirm(let missing, _) = SetupChecklist.closeDecision(notReady) {
+        if case .confirm(let missing, _, _) = SetupChecklist.closeDecision(notReady) {
             check("closing with the extension unapproved asks first, naming what is missing",
                   missing.contains("approve"), "named \(missing)")
         } else {
@@ -483,6 +483,11 @@ struct Ext4MacApp {
               SetupChecklist.closeDecision(
                   SetupChecklist.evaluate(noLogin, skipped: [.loginItem])) == .close)
 
+        check("closing a setup nobody walked to the end asks, even with every check green",
+              SetupChecklist.closeDecision(ready, walkFinished: false) != .close,
+              "every check passed, so it closed silently on someone who was halfway through")
+        check("and reopening a finished setup just closes again",
+              SetupChecklist.closeDecision(ready, walkFinished: true) == .close)
         check("closing while the sample volume is mounted asks too",
               SetupChecklist.closeDecision(ready, sampleMounted: true) != .close,
               "the volume would be ejected underneath the Finder without a word")

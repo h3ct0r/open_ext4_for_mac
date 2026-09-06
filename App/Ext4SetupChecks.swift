@@ -291,18 +291,31 @@ enum SetupSample {
 /// Finder. Both are worth one question.
 enum SetupCloseDecision: Equatable {
     case close
-    case confirm(missing: [String], sampleMounted: Bool)
+    case confirm(missing: [String], sampleMounted: Bool, walkUnfinished: Bool)
 }
 
 extension SetupChecklist {
-    /// Confirm only when something is actually unfinished. A step the person
-    /// chose to skip is finished as far as they are concerned, and a warning
-    /// is something said, not something owed -- neither earns a dialog.
+    /// Confirm when something is unfinished, in any of the three senses that
+    /// matter, and stay quiet otherwise.
+    ///
+    /// The first version asked only about failing checks, and was wrong on a
+    /// machine where every check passes: a person who closes the window
+    /// halfway through has still not seen the steps they were walking, and
+    /// nothing said so. Walking the wizard to the end is its own kind of
+    /// finished, separate from the checklist being green.
+    ///
+    /// What does NOT earn a dialog: a step the person chose to skip, which is
+    /// finished as far as they are concerned; a warning, which is something
+    /// said rather than owed; and reopening a setup already completed on this
+    /// version, where closing again is simply leaving.
     static func closeDecision(_ checks: [SetupCheck],
-                              sampleMounted: Bool = false) -> SetupCloseDecision {
+                              sampleMounted: Bool = false,
+                              walkFinished: Bool = true) -> SetupCloseDecision {
         let missing = checks.filter { $0.state == .missing }
-        if missing.isEmpty && !sampleMounted { return .close }
-        return .confirm(missing: missing.map(\.id.rawValue), sampleMounted: sampleMounted)
+        if missing.isEmpty && !sampleMounted && walkFinished { return .close }
+        return .confirm(missing: missing.map(\.id.rawValue),
+                        sampleMounted: sampleMounted,
+                        walkUnfinished: !walkFinished)
     }
 }
 

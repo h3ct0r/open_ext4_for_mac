@@ -153,7 +153,25 @@ final class SetupAssistantModel: ObservableObject {
     /// screen the person has just read would be the wizard arguing with them.
     func closeDecision() -> SetupCloseDecision {
         if step == .done { return .close }
-        return SetupChecklist.closeDecision(checks, sampleMounted: sample != nil)
+        return SetupChecklist.closeDecision(checks,
+                                            sampleMounted: sample != nil,
+                                            walkFinished: walkFinished)
+    }
+
+    /// Has this person been through the assistant to the end on this version?
+    /// Reaching the last step writes it down, so reopening a finished setup to
+    /// look at something is not treated as abandoning it.
+    var walkFinished: Bool {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString")
+                      as? String ?? "0.0.0"
+        return UserDefaults.standard.string(forKey: Ext4Setup.Prefs.completedVersion) == version
+    }
+
+    /// The steps still ahead, by name, for the dialog that asks about leaving.
+    var remainingStepTitles: [String] {
+        SetupStep.allCases
+            .filter { $0.rawValue > step.rawValue && $0 != .done }
+            .map(\.title)
     }
 
     /// Closing while the extension is still unapproved is an answer too: this
@@ -368,7 +386,8 @@ final class SetupAssistantWindowController: NSObject, NSWindowDelegate {
     /// without a word.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard let model else { return true }
-        guard case .confirm(let missing, let sampleMounted) = model.closeDecision() else {
+        guard case .confirm(let missing, let sampleMounted, let walkUnfinished)
+                = model.closeDecision() else {
             return true
         }
         let alert = NSAlert()
@@ -385,6 +404,17 @@ final class SetupAssistantWindowController: NSObject, NSWindowDelegate {
         }
         if sampleMounted {
             lines.append("• The sample volume is still mounted and will be ejected.")
+        }
+        // Steps not yet seen are worth naming even when every check is green:
+        // the person was in the middle of something, and "you have not got to
+        // the end" is a different fact from "something is broken".
+        if walkUnfinished {
+            let remaining = model.remainingStepTitles
+            if remaining.isEmpty {
+                lines.append("• The last step, which is where setup is marked as done.")
+            } else {
+                lines.append("• Steps you have not seen yet: " + remaining.joined(separator: ", ") + ".")
+            }
         }
         alert.informativeText = """
             Still to do:
