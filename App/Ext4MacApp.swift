@@ -109,6 +109,13 @@ struct Ext4MacApp {
             }
             exit(0)
 
+        // The first-run checklist, without a window. Every fact it reads can
+        // be given instead (`--given registered=1 enabled=0`), which is how
+        // the suite produces states -- an unapproved extension, a second ext
+        // driver -- that would otherwise mean breaking this Mac to see.
+        case "setup":
+            exit(setupCommand(arguments))
+
         // Checks this build can make about itself, with no disk, no volume
         // and nothing installed. Today that is one thing, and it is one thing
         // worth being able to ask: is key material actually locked into
@@ -168,6 +175,97 @@ struct Ext4MacApp {
             usage(1)
         }
     }
+
+    // MARK: - setup
+
+    /// `setup --check [--json] [--given k=v …] [--skipped id,…]`
+    ///
+    /// Exit status is the checklist's: 0 when nothing is missing, 1 when
+    /// something is, 2 when the command line itself is wrong. A `--given` key
+    /// that is not understood is the third case on purpose -- a typo that
+    /// quietly read this machine instead would make a test cell pass for a
+    /// reason nobody chose.
+    static func setupCommand(_ args: [String]) -> Int32 {
+        var wantJSON = false
+        var given: [String] = []
+        var gaveAnything = false
+        var skipped = Set<SetupCheckID>()
+
+        func bad(_ message: String) -> Int32 {
+            FileHandle.standardError.write("Ext4Mac setup: \(message)\n".data(using: .utf8)!)
+            print(setupUsage)
+            return 2
+        }
+
+        var i = 0
+        while i < args.count {
+            let arg = args[i]
+            switch arg {
+            case "--check":
+                break                      // the only mode there is, for now
+            case "--json":
+                wantJSON = true
+            case "--given":
+                gaveAnything = true
+                // Every k=v that follows belongs to this flag, so a caller can
+                // write one long list and then override a key at the end.
+                while i + 1 < args.count, !args[i + 1].hasPrefix("--") {
+                    given.append(args[i + 1]); i += 1
+                }
+            case "--skipped":
+                guard i + 1 < args.count else { return bad("--skipped wants a check id") }
+                for name in args[i + 1].split(separator: ",") {
+                    guard let id = SetupCheckID(rawValue: String(name)) else {
+                        return bad("--skipped does not know '\(name)'")
+                    }
+                    skipped.insert(id)
+                }
+                i += 1
+            default:
+                guard arg.contains("=") else { return bad("unexpected argument '\(arg)'") }
+                gaveAnything = true
+                given.append(arg)
+            }
+            i += 1
+        }
+
+        let env: SetupEnvironment
+        if gaveAnything {
+            do {
+                env = try SetupEnvironment.parse(given: given)
+            } catch let e as SetupEnvironment.GivenError {
+                return bad(e.message)
+            } catch {
+                return bad(error.localizedDescription)
+            }
+        } else {
+            // No facts given: read them off this Mac. FSKit is async and this
+            // entry point is not; one wait, at the only point that needs it.
+            let done = DispatchSemaphore(value: 0)
+            var probed = SetupEnvironment()
+            Task { probed = await Ext4Setup.probe(); done.signal() }
+            done.wait()
+            env = probed
+            skipped.formUnion(Ext4Setup.skippedSteps())
+        }
+
+        let checks = SetupChecklist.evaluate(env, skipped: skipped)
+        print(wantJSON ? SetupChecklist.json(checks) : SetupChecklist.text(checks))
+        return SetupChecklist.exitCode(checks)
+    }
+
+    static let setupUsage = """
+        usage: Ext4Mac setup --check [--json] [--given key=value …] [--skipped id,…]
+
+          --given   state the facts instead of reading them off this Mac:
+                    bundle=<path> registered=0|1 enabled=0|1 login=0|1
+                    diskutil=0|1 sample=0|1 other=0|1
+                    notify=authorized|provisional|denied|notDetermined|unknown
+          --skipped steps the user chose to skip, by id:
+                    \(SetupCheckID.allCases.map(\.rawValue).joined(separator: ", "))
+
+        Exit status: 0 nothing missing, 1 something missing, 2 bad usage.
+        """
 
     /// Returns 0 if everything this build can check about itself holds.
     static func selftest() -> Int32 {
@@ -295,6 +393,8 @@ struct Ext4MacApp {
                                     volume, and what to do about it
         Ext4Mac events [n]          the last n volume events (default 10)
         Ext4Mac selftest            what this build can check about itself
+        Ext4Mac setup --check       the first-run checklist: what is still
+                                    missing before ext4 volumes will mount
         Ext4Mac mount /dev/diskN    mount a volume whose key is stored
         Ext4Mac menu                watch for encrypted volumes and ask
         Ext4Mac login-item [on|off] start at login, so the extension stays

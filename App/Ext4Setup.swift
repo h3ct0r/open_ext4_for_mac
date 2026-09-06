@@ -26,6 +26,7 @@
 
 import Foundation
 import AppKit
+import UserNotifications
 import FSKit
 import ServiceManagement
 import os
@@ -165,5 +166,138 @@ enum Ext4Setup {
             }
             log.info("approval not granted within the watch window")
         }
+    }
+}
+
+// MARK: - the facts, from this machine
+//
+// One owner for probing and persistence. These were copied into three places
+// (the menu bar's toggle, the `login-item` verb, the alert flow above), and
+// three copies of a rule is three chances to disagree about it.
+
+extension Ext4Setup {
+    /// UserDefaults keys, named once. `Ext4SetupDeclinedLoginItem` predates
+    /// the wizard and keeps its meaning: the user was asked and said no.
+    enum Prefs {
+        static let completedVersion = "Ext4SetupCompletedVersion"
+        static let skippedSteps = "Ext4SetupSkippedSteps"
+        static let declinedLoginItem = "Ext4SetupDeclinedLoginItem"
+        static let dismissedForBuild = "Ext4SetupDismissedForBuild"
+    }
+
+    static func loginItemEnabled() -> Bool {
+        SMAppService.mainApp.status == .enabled
+    }
+
+    static func setLoginItem(_ on: Bool) throws {
+        if on {
+            try SMAppService.mainApp.register()
+            log.info("registered as a login item")
+        } else {
+            try SMAppService.mainApp.unregister()
+            log.info("unregistered as a login item")
+        }
+    }
+
+    /// Opens the pane that holds File System Extensions. Returns false if the
+    /// URL scheme is refused, so a caller can say so instead of appearing to
+    /// have done something.
+    @discardableResult
+    static func openSettingsPane() -> Bool {
+        guard let pane = settingsPane else { return false }
+        return NSWorkspace.shared.open(pane)
+    }
+
+    static let notificationSettingsPane =
+        URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension")
+
+    /// Notification permission, when there is an application object to ask on
+    /// behalf of. `UNUserNotificationCenter` belongs to a running app; from a
+    /// command line there is no supported way to read it, and `unknown` is
+    /// the honest answer rather than a guessed one.
+    @MainActor
+    static func notificationStatus() async -> SetupNotifyState {
+        guard NSApp != nil, Bundle.main.bundleIdentifier != nil else { return .unknown }
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        switch settings.authorizationStatus {
+        case .authorized: return .authorized
+        case .provisional: return .provisional
+        case .denied: return .denied
+        case .notDetermined: return .notDetermined
+        @unknown default: return .unknown
+        }
+    }
+
+    /// Everything the checklist needs, from this Mac.
+    ///
+    /// `interactive` is asked for, not inferred: notification permission can
+    /// only be read on the main actor, and the command line reaches this by
+    /// blocking the main thread on a semaphore -- so a probe that decided for
+    /// itself whether to ask deadlocked `Ext4Mac setup --check` outright.
+    /// The wizard, which has a run loop, passes true.
+    static func probe(interactive: Bool = false) async -> SetupEnvironment {
+        var env = SetupEnvironment.fromDisk()
+        let state = await extensionState()
+        env.registered = state.registered
+        env.enabled = state.enabled
+        env.loginItem = loginItemEnabled()
+        env.notifications = interactive ? await notificationStatus() : .unknown
+        return env
+    }
+
+    static func skippedSteps() -> Set<SetupCheckID> {
+        var ids = Set((UserDefaults.standard.stringArray(forKey: Prefs.skippedSteps) ?? [])
+                        .compactMap(SetupCheckID.init(rawValue:)))
+        if UserDefaults.standard.bool(forKey: Prefs.declinedLoginItem) { ids.insert(.loginItem) }
+        return ids
+    }
+
+    /// Watch for the approval switch. A stream rather than a wait, so the
+    /// wizard can show a countdown and the person can see that something is
+    /// still looking -- the old version gave up after two minutes in silence.
+    /// Yields false on every poll that is still unapproved, true once, then
+    /// finishes.
+    static func approvalStream(every seconds: UInt64 = 2,
+                               maxTries: Int = 60) -> AsyncStream<Bool> {
+        AsyncStream { continuation in
+            let task = Task {
+                for _ in 0..<maxTries {
+                    try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+                    if Task.isCancelled { break }
+                    let enabled = await extensionState().enabled
+                    continuation.yield(enabled)
+                    if enabled { break }
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    /// Why the Setup Assistant would open at launch, if it should at all.
+    enum LaunchDecision {
+        case quiet
+        case open(reason: String)
+    }
+
+    /// Opening a window at every launch is a nag; never opening it leaves a
+    /// broken install with no way back. The rule: open when the extension is
+    /// not usable and this build has not already been dismissed once.
+    static func launchDecision() async -> LaunchDecision {
+        let defaults = UserDefaults.standard
+        let buildID = Bundle.main.object(forInfoDictionaryKey: "Ext4BuildID") as? String ?? "unknown"
+        if await extensionState().enabled {
+            // A working install that never saw a wizard has nothing to be
+            // walked through. Record it so a later upgrade is not treated as
+            // a first run.
+            if defaults.string(forKey: Prefs.completedVersion) == nil {
+                let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString")
+                              as? String ?? "0.0.0"
+                defaults.set(version, forKey: Prefs.completedVersion)
+            }
+            return .quiet
+        }
+        if defaults.string(forKey: Prefs.dismissedForBuild) == buildID { return .quiet }
+        return .open(reason: "the file system extension is not approved yet")
     }
 }
