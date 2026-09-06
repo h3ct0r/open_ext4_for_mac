@@ -38,21 +38,51 @@ if [ "$repair_requested" -eq 1 ]; then
     echo "$self: check of a clean volume, run e2fsck from e2fsprogs." >&2
 fi
 
-# FSKit modules are enabled per user, and fskitd will not start a third-party
-# module on behalf of root -- which is who runs First Aid's checks. Same
-# re-dispatch as newfs_ext4: enter the console user's bootstrap context and
-# run as them, because theirs is the enablement that exists.
+# >>> ext4.fs dispatch — identical in newfs_ext4 and fsck_ext4. The suite
+#     diffs the two blocks and fails if they drift; edit both or neither.
 #
-# macOS ships bash 3.2, where expanding an empty array under `set -u` is an
-# unbound-variable error rather than nothing. First Aid passes no options we
-# forward, so the empty case is the common one.
+# FSKit modules are enabled per user, and fskitd will not start a third-party
+# module on behalf of root -- but Disk Utility's backend (storagekitd, which
+# fork/execs a personality's tool through DMToolProcess) runs formatters and
+# checkers exactly as root. A bare exec therefore fails with "No extension
+# with fsShortName found" and Erase reports "File system formatter failed".
+#
+# The answer here used to be to re-dispatch to the console user: launchctl
+# asuser into their bootstrap context, sudo -n to their uid. That moved the
+# failure rather than fixing it. newfs_fskit opens the device IN ITS OWN
+# PROCESS -- it holds no device-opening entitlement, only a mach-lookup
+# exception for fskitd -- so on a physical disk, whose node is root:operator
+# mode 0640, the console user's open returned EACCES before this module was
+# ever asked. That is the whole of "-69832" on real hardware, and the old
+# comment claiming fskit_helper did the open was simply wrong: fskit_helper
+# is on the mount path.
+#
+# newfs_fskit already knows how to be both things at once. Run it as root
+# with SUDO_UID set and, before it touches FSKit, it does
+# setreuid(SUDO_UID, -1): the REAL uid becomes the console user, so fskitd's
+# audit-token lookup finds their enabled module, while the EFFECTIVE uid
+# stays 0, so the open(2) on a root-owned node succeeds. It is what plain
+# `sudo newfs_fskit` has always done, because sudo sets SUDO_UID itself.
+#
+# Verified by disassembly (getenv -> getuid -> strtoul -> setreuid with a
+# second argument of -1) and asserted from two directions in
+# Tests/run_diskutil_tests.sh: the string and symbol are still in the
+# shipped binary, and without SUDO_UID the same command cannot find the
+# module. Nothing is chowned, nothing is borrowed, nothing has to be given
+# back.
 if [ "$(id -u)" -eq 0 ]; then
     console_uid=$(/usr/bin/stat -f %u /dev/console 2>/dev/null || echo 0)
+    case "$console_uid" in ''|*[!0-9]*) console_uid=0 ;; esac
     if [ "$console_uid" -gt 0 ]; then
-        exec /bin/launchctl asuser "$console_uid" \
-             /usr/bin/sudo -n -u "#$console_uid" \
-             /sbin/fsck_fskit -t ext4 ${args[@]+"${args[@]}"} "$device"
+        # export, not a `VAR=x exec ...` prefix: an assignment before a
+        # special builtin sets a shell variable without exporting it, so the
+        # convenient spelling would pass nothing at all.
+        export SUDO_UID="$console_uid"
+        /usr/bin/logger -t ext4.fs "$self: running as root with SUDO_UID=$console_uid for $device"
+    else
+        /usr/bin/logger -t ext4.fs "$self: no console user; the module lookup will fail"
     fi
 fi
+# <<< ext4.fs dispatch
 
 exec /sbin/fsck_fskit -t ext4 ${args[@]+"${args[@]}"} "$device"

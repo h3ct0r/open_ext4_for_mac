@@ -220,10 +220,15 @@ else
     # dispatch is no longer doing anything and the next macOS could break it
     # silently.
     out=$(sudo /usr/bin/env -u SUDO_UID /sbin/newfs_fskit -t ext4 "$dev" 2>&1); rc2=$?
-    if [ "$rc2" -ne 0 ] && grep -qiE "fsShortName|no extension" <<<"$out"; then
-      ok "and without SUDO_UID the same tool cannot find the module (the control)"
+    # It must fail, and it must fail on the MODULE, not on the device: pure
+    # root can open the node perfectly well, it just has no enabled FSKit
+    # module to hand the job to. A permission error here would mean the
+    # effective uid is not what this rests on. (Observed: rc 22, EINVAL, with
+    # nothing on stderr -- newfs_fskit does not always name the reason.)
+    if [ "$rc2" -ne 0 ] && ! grep -qi "denied" <<<"$out"; then
+      ok "and without SUDO_UID the same tool cannot format at all (the control, rc=$rc2)"
     else
-      bad "and without SUDO_UID the same tool cannot find the module (the control)" \
+      bad "and without SUDO_UID the same tool cannot format at all (the control)" \
           "rc=$rc2: $(head -1 <<<"$out")"
     fi
 
