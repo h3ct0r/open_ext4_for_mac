@@ -45,7 +45,7 @@ enum SetupStep: Int, CaseIterable, Identifiable {
         switch self {
         case .welcome: return "Welcome"
         case .approve: return "Approve the extension"
-        case .loginItem: return "Keep it working after a restart"
+        case .loginItem: return "Automatically start at login"
         case .notifications: return "Let Ext4Mac tell you things"
         case .diskUtility: return "Disk Utility (optional)"
         case .tryIt: return "Try it on a real volume"
@@ -372,6 +372,16 @@ final class SetupAssistantWindowController: NSObject, NSWindowDelegate {
         }
         window.isReleasedWhenClosed = false
         self.window = window
+
+        // Become an ordinary app for as long as this window exists. Without
+        // this the wizard is unreachable the moment it loses focus: an
+        // accessory app has no Dock tile, and macOS leaves accessory apps out
+        // of the ⌘-Tab switcher along with every window they own. The menu bar
+        // needs a menu to go with it, or ⌘W and ⌘Q would do nothing.
+        NSApp.setActivationPolicy(
+            SetupActivation.wanted(assistantOpen: true) == .regular ? .regular : .accessory)
+        installMainMenu()
+
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         Task { await model.refresh() }
@@ -435,6 +445,46 @@ final class SetupAssistantWindowController: NSObject, NSWindowDelegate {
         model?.windowClosed()
         window = nil
         model = nil
+        // Back to the menu bar. Deferred one turn of the run loop: the window
+        // is still closing, and changing the policy underneath it drops the
+        // close animation and can leave a ghost tile in the Dock.
+        DispatchQueue.main.async {
+            NSApp.setActivationPolicy(
+                SetupActivation.wanted(assistantOpen: false) == .regular ? .regular : .accessory)
+        }
+    }
+
+    /// The smallest menu bar that is not a lie: an app menu that can quit, and
+    /// a window menu that can close and minimise. An app with a Dock tile and
+    /// no menu bar looks broken, and its keyboard shortcuts do nothing.
+    private func installMainMenu() {
+        guard NSApp.mainMenu == nil else { return }
+        let main = NSMenu()
+
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "About Ext4Mac",
+                        action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+                        keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Hide Ext4Mac", action: #selector(NSApplication.hide(_:)),
+                        keyEquivalent: "h")
+        appMenu.addItem(withTitle: "Quit Ext4Mac", action: #selector(NSApplication.terminate(_:)),
+                        keyEquivalent: "q")
+        appItem.submenu = appMenu
+        main.addItem(appItem)
+
+        let windowItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)),
+                           keyEquivalent: "w")
+        windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)),
+                           keyEquivalent: "m")
+        windowItem.submenu = windowMenu
+        main.addItem(windowItem)
+
+        NSApp.mainMenu = main
+        NSApp.windowsMenu = windowMenu
     }
 }
 
@@ -529,11 +579,11 @@ struct SetupAssistantView: View {
         switch model.step {
         case .welcome:
             Text("""
-                Ext4Mac lets macOS read and write ext2, ext3 and ext4 disks — the file \
-                systems Linux uses — through Apple's own file system extension mechanism. \
+                Ext4Mac lets macOS read and write Linux Filesystems: ext2, ext3 and ext4 \
+                through Apple's own file system extension mechanism. \
                 Plugged-in drives appear in the Finder like any other disk.
 
-                This takes about a minute. Nothing here changes your disks.
+                This setup takes about a minute. Nothing here changes your disks.
                 """)
             if model.state(of: .install) != .ok {
                 banner(model.detail(of: .install), colour: .orange, symbol: "exclamationmark.triangle.fill")
@@ -544,7 +594,7 @@ struct SetupAssistantView: View {
 
         case .approve:
             if model.isReady {
-                Text("The extension is approved. macOS will hand every ext2, ext3 and ext4 volume to Ext4Mac.")
+                Text("The extension is approved: macOS will hand every ext2, ext3 and ext4 volume to Ext4Mac.")
             } else {
                 Text(model.detail(of: .approve))
                 Text("""

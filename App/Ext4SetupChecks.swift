@@ -339,3 +339,24 @@ extension SetupChecklist {
         otherInstances > 0 ? .askRunningAgent : .startAgent
     }
 }
+
+// MARK: - being visible while there is something to look at
+
+/// How the app should present itself to the Dock and the app switcher.
+///
+/// Ext4Mac is an accessory app: LSUIElement in its plist, `.accessory` at
+/// launch, because it exists to host a file system extension and to sit in the
+/// menu bar. macOS gives an accessory app no Dock tile and leaves it out of the
+/// app switcher **including its windows**, so the Setup Assistant could be open
+/// and on screen with no way to get back to it after clicking elsewhere.
+///
+/// So the policy follows the window: regular while the assistant is up, back to
+/// accessory when it closes. A window a person can lose is a window that will
+/// be lost.
+enum SetupActivation: String {
+    case regular, accessory
+
+    static func wanted(assistantOpen: Bool) -> SetupActivation {
+        assistantOpen ? .regular : .accessory
+    }
+}

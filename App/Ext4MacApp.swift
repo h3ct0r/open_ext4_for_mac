@@ -95,7 +95,7 @@ struct Ext4MacApp {
                 do {
                     try SMAppService.mainApp.unregister()
                     print("Ext4Mac will no longer start at login")
-                    print("note: after a reboot the extension will be missing until the app runs")
+                    print("Note: after a reboot the extension will be missing until the app runs")
                 } catch {
                     FileHandle.standardError.write(
                         "Ext4Mac: could not disable: \(error.localizedDescription)\n".data(using: .utf8)!)
@@ -497,6 +497,15 @@ struct Ext4MacApp {
         check("with one already running, `setup` asks it instead of adding a second menu-bar icon",
               SetupChecklist.openRoute(otherInstances: 1) == .askRunningAgent,
               "two identical icons, and no way to tell which menu is which")
+
+        // An accessory app has no Dock tile and no place in the app switcher,
+        // and macOS applies that to its windows too -- so a wizard opened and
+        // then clicked away from could not be found again.
+        check("the assistant's window makes the app reachable from the Dock and ⌘-Tab",
+              SetupActivation.wanted(assistantOpen: true) == .regular,
+              "an accessory app's windows are excluded from the switcher")
+        check("and closing it puts the agent back in the menu bar only",
+              SetupActivation.wanted(assistantOpen: false) == .accessory)
         print("")
         print("passed: \(passedCount)   failed: \(failed)")
         return failed == 0 ? 0 : 1
