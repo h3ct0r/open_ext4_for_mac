@@ -175,9 +175,18 @@ echo ""
 echo "a device node owned by root, which is what a physical disk is"
 echo ""
 
+# Two prerequisites, and they fail differently. Without a credential this is a
+# developer machine that has not run `sudo -v`. Without an enabled extension it
+# is a CI runner: passwordless sudo, no console user, no approved FSKit module
+# -- and the formatter cell then fails for the one reason that says nothing
+# about the code, which is exactly what it did on the first CI run of this
+# suite. A missing prerequisite is a skip, not a red cell.
 if ! sudo -n true 2>/dev/null; then
   echo "  (root cells skipped: no cached sudo credential. Run 'sudo -v' first,"
   echo "   then this suite, to exercise the physical-disk case.)"
+elif ! bash "$ROOT/scripts/check_extension.sh" >/dev/null 2>&1; then
+  echo "  (root cells skipped: the FSKit extension is not installed and enabled,"
+  echo "   so there is no module for the formatter to reach.)"
 else
   img=$(blank rootowned 64)
   attach "$img" || DEV=""
