@@ -93,6 +93,22 @@ else
   bad "an app run from Downloads is told to move to /Applications" "rc=$CHECK_RC: $(grep -i install "$WORK/check.txt" | head -1)"
 fi
 
+# Three states, not two. A bundle that is installed but older than the app is
+# the case that cost a user an afternoon: Disk Utility was there, it looked
+# installed, and it could not erase a physical disk because the copy in
+# /Library/Filesystems predated the fix.
+check $GREEN diskutil=old; CHECK_RC=$?
+if [ "$CHECK_RC" = 0 ] && line warn diskUtility && grep -qi "update" "$WORK/check.txt"; then
+  ok "an outdated Disk Utility bundle is a warning that says to update it"
+else
+  bad "an outdated Disk Utility bundle is a warning that says to update it" \
+      "rc=$CHECK_RC: $(grep -i diskUtility "$WORK/check.txt" | head -1)"
+fi
+check $GREEN diskutil=0; CHECK_RC=$?
+[ "$CHECK_RC" = 1 ] && line missing diskUtility \
+  && ok "and an absent one is still missing, not a warning" \
+  || bad "and an absent one is still missing, not a warning" "rc=$CHECK_RC"
+
 check $GREEN other=1; CHECK_RC=$?
 if [ "$CHECK_RC" = 0 ] && line warn otherDriver && grep -qi "paragon" "$WORK/check.txt"; then
   ok "another ext driver is a warning naming Paragon, not a failure"

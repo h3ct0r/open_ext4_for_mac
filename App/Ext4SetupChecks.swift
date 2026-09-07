@@ -24,6 +24,13 @@ import Foundation
 
 // MARK: - the facts
 
+/// The Disk Utility bundle is not present-or-absent: a copy installed before
+/// September 2026 is present and cannot erase a physical disk, which looked
+/// exactly like a driver bug to the first person who hit it.
+enum SetupBundleState: String {
+    case absent, current, outdated
+}
+
 /// What macOS lets us know about notification permission. `unknown` is real:
 /// asking from a command line, with no application object running, is not
 /// something UserNotifications supports, and inventing an answer there would
@@ -40,7 +47,7 @@ struct SetupEnvironment {
     var enabled: Bool = false
     var loginItem: Bool = false
     var notifications: SetupNotifyState = .unknown
-    var diskUtility: Bool = false
+    var diskUtility: SetupBundleState = .absent
     /// The name of another ext driver found on this Mac, if any.
     var otherDriver: String? = nil
     var sample: Bool = false
@@ -138,12 +145,21 @@ enum SetupChecklist {
                 "not readable from a command line; the Setup Assistant asks for it")
         }
 
-        add(.diskUtility,
-            env.diskUtility ? .ok : .missing,
-            env.diskUtility
-                ? "ext2, ext3 and ext4 are in Disk Utility's Erase menu"
-                : "optional — add ext2/3/4 to Disk Utility's Erase menu and to `diskutil listFilesystems`",
-            action: "Add to Disk Utility…")
+        switch env.diskUtility {
+        case .current:
+            add(.diskUtility, .ok, "ext2, ext3 and ext4 are in Disk Utility's Erase menu")
+        case .outdated:
+            // A warning, not a failure: what is installed still works for disk
+            // images, and a person part-way through the wizard should not be
+            // stopped by it.
+            add(.diskUtility, .warn,
+                "Disk Utility support is installed but older than this version of Ext4Mac — update it, or erasing a physical disk as ext4 will fail",
+                action: "Update Disk Utility Support…")
+        case .absent:
+            add(.diskUtility, .missing,
+                "optional — add ext2/3/4 to Disk Utility's Erase menu and to `diskutil listFilesystems`",
+                action: "Add to Disk Utility…")
+        }
 
         add(.sample,
             env.sample ? .ok : .missing,
@@ -237,7 +253,11 @@ extension SetupEnvironment {
             case "registered": env.registered = try flag()
             case "enabled":    env.enabled = try flag()
             case "login":      env.loginItem = try flag()
-            case "diskutil":   env.diskUtility = try flag()
+            case "diskutil":
+                switch value.lowercased() {
+                case "old", "outdated": env.diskUtility = .outdated
+                default:                env.diskUtility = try flag() ? .current : .absent
+                }
             case "sample":     env.sample = try flag()
             case "other":
                 env.otherDriver = try flag() ? SetupPaths.otherDrivers[0].name : nil
@@ -258,8 +278,7 @@ extension SetupEnvironment {
     static func fromDisk() -> SetupEnvironment {
         var env = SetupEnvironment()
         env.bundlePath = Bundle.main.bundleURL.path
-        env.diskUtility = FileManager.default.fileExists(
-            atPath: SetupPaths.diskUtilityBundle + "/Contents/Info.plist")
+        env.diskUtility = Ext4DiskUtilityInstall.state()
         env.otherDriver = SetupPaths.otherDrivers.first {
             FileManager.default.fileExists(atPath: $0.path)
         }?.name

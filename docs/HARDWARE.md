@@ -551,6 +551,24 @@ called green.
 | deep kill | `make test-kill-recovery EXT4_KILL_DEVICE=disk4s2`: 18 of 18; every remount including replay 1 s; the deep round replayed 88 transactions / 3,522 blocks in 126 ms |
 | pull | `make test-pull DEVICE=disk4`, three rounds: mount rw, remount rw, `e2fsck -fn` 0, `e2fsck -fy` 0, 18 / 19 / 18 synced files durable, 0 bad checksums |
 
+### 2026-09-06, Kingston DataTraveler Max 256 GB — Disk Utility
+
+The first session in which a physical disk was erased as ext4 from Disk
+Utility's GUI, with no terminal open and nothing chowned.
+
+| rung | result |
+|---|---|
+| the failure | Erase as ext4 on `disk4s2` ended `newfs_fskit: Permission denied`, `Code=13`, `File system formatter failed. : (-69832)` |
+| the locate | `sudo chown $(id -u) /dev/disk4s2 /dev/rdisk4s2`, then the identical erase succeeded and was `e2fsck -fn` clean — which placed the failure at the device node, not the driver |
+| the fix | the `.fs` wrapper stops re-dispatching to the console user and sets `SUDO_UID` instead, so `newfs_fskit` runs with the console user's real uid and root's effective uid |
+| offline proof | `make test-diskutil`: 16 of 16, reproducing the whole failure on a disk image whose nodes were chowned to `root:operator` |
+| **the GUI** | after `sudo make install-diskutil`, erasing the stick as ext4 from Disk Utility worked, reported by the owner |
+| First Aid | fixed by the same change; it could not read a physical disk's node before |
+
+What to check if an erase fails on a future machine: the installed bundle's
+`CFBundleVersion`. Anything below 2 predates this fix, and the Setup Assistant
+now says so rather than reporting the integration as simply "installed".
+
 Findings:
 
 - **Listed xattr names carried the on-disk `user.` prefix** (`user.com.apple.provenance`): values were byte-exact and get/set/remove by the original name worked, so every mounted suite passed while anything that lists before it copies would have recreated the attribute on APFS under the wrong name. Fixed in the extension's list path (`7bd5746`), red-first on the mounted-data suite (76/2 → 78/0), and confirmed on the stick's own files.

@@ -459,7 +459,7 @@ struct Ext4MacApp {
         // clicking a red close button at the right moment.
         let green = SetupEnvironment(bundlePath: "/Applications/Ext4Mac.app",
                                      registered: true, enabled: true, loginItem: true,
-                                     notifications: .authorized, diskUtility: true,
+                                     notifications: .authorized, diskUtility: .current,
                                      otherDriver: nil, sample: true)
         let ready = SetupChecklist.evaluate(green)
         check("a finished setup closes without asking",

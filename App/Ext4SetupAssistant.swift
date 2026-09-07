@@ -598,9 +598,10 @@ struct SetupAssistantView: View {
             } else {
                 Text(model.detail(of: .approve))
                 Text("""
-                    macOS reserves this switch for a person at the keyboard — no app can \
-                    turn it on, which is why nothing has asked until now. In the pane that \
-                    opens, find **File System Extensions** and turn on **open_ext4 (ext2/3/4)**.
+                    macOS reserves this switch for a person at the keyboard, so we cannot do it \
+                    automatically in the app can. \
+
+                    In the pane that opens, find **File System Extensions** and turn on **open_ext4 (ext2/3/4)**.
                     """)
                 HStack {
                     Button("Open System Settings") { model.openSettings() }
@@ -625,10 +626,10 @@ struct SetupAssistantView: View {
 
         case .loginItem:
             Text("""
-                macOS registers a file system extension while its app is running. After a \
-                restart the module is absent from System Settings — not switched off, \
-                absent — until Ext4Mac runs again. Starting at login is what makes the \
-                approval stick.
+                macOS registers a file system extension only while its app is running. \
+                
+                After a restart, the module will not appear in System Settings until Ext4Mac runs again. \
+                Starting at login is what makes the extension to work properly after a restart.
                 """)
             if model.state(of: .loginItem) == .ok {
                 Text("Ext4Mac starts at login.").foregroundStyle(.secondary)
@@ -657,19 +658,21 @@ struct SetupAssistantView: View {
             Text("""
                 Adds ext2, ext3 and ext4 to Disk Utility's Erase menu and to \
                 `diskutil listFilesystems`. The formatting is still done by the \
-                extension; this only makes it selectable.
+                extension; this only makes the new option appear in the Disk Utility.
 
                 Erasing works for disk images and for real disks alike: choose ext4 \
-                in Disk Utility's Erase menu and that is all there is to it. Worth \
-                knowing: Disk Utility labels an ext4 volume “EXT2” whatever \
-                generation you picked, which is cosmetic. If you added this before \
-                September 2026, update it from here — the older version could not \
-                erase a physical disk. You can remove it at any time from this \
-                window.
+                in Disk Utility's Erase menu and that is all there is to it. 
+                
+                Worth knowing: Disk Utility labels an ext4 volume “EXT2” whatever \
+                generation you picked, which is cosmetic.
                 """)
-            if model.state(of: .diskUtility) == .ok {
+            switch model.state(of: .diskUtility) {
+            case .ok:
                 Text("Installed in /Library/Filesystems/ext4.fs.").foregroundStyle(.secondary)
-            } else {
+            case .warn:
+                Button("Update Disk Utility Support…") { Task { await model.installDiskUtility() } }
+                    .buttonStyle(.borderedProminent)
+            default:
                 Button("Add to Disk Utility…") { Task { await model.installDiskUtility() } }
                     .buttonStyle(.borderedProminent)
             }
@@ -678,7 +681,7 @@ struct SetupAssistantView: View {
             Text("""
                 Ext4Mac carries a small ext4 volume of its own. Mounting it uses exactly \
                 the path a plugged-in disk takes, so if it appears in the Finder, the \
-                install works.
+                install works!
                 """)
             if !model.isReady {
                 banner("Approve the extension first — nothing can mount an ext4 volume until then.",

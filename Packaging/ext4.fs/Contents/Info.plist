@@ -32,11 +32,15 @@
 	<key>CFBundlePackageType</key>
 	<string>fs  </string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>0.2.0</string>
 	<key>CFBundleSignature</key>
 	<string>????</string>
+	<!-- Bumped whenever the wrappers change behaviour, because this is what
+	     tells an installed copy from a current one. 2 is the release in which
+	     the formatter stopped dropping to the console user and a physical disk
+	     became erasable; anything older cannot do it. -->
 	<key>CFBundleVersion</key>
-	<string>0.1.0</string>
+	<string>2</string>
 
 	<key>FSPersonalities</key>
 	<dict>

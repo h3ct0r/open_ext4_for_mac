@@ -45,7 +45,7 @@ echo ""
 ATTACHED=()
 cleanup() {
   for dev in ${ATTACHED[@]+"${ATTACHED[@]}"}; do
-    diskutil unmountDisk "$dev" >/dev/null 2>&1
+    diskutil unmountDisk force "$dev" >/dev/null 2>&1
     for _ in 1 2 3 4 5; do
       hdiutil detach "$dev" -force >/dev/null 2>&1 && break
       sleep 1
@@ -55,13 +55,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
-attach() {  # attach <img> -> echoes /dev/diskN
-  local dev
-  dev=$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount "$1" 2>/dev/null \
+# Sets DEV; it does NOT echo the device. A function whose output is captured
+# runs in a subshell, so the ATTACHED entry it appends is lost the moment it
+# returns -- which left five copies of one image attached to this machine, one
+# of them pointing at a backing file the next run had already deleted. Exactly
+# the leak scripts/check_extension.sh has retried against since 2026.
+DEV=""
+attach() {  # attach <img> -> sets DEV
+  DEV=$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount "$1" 2>/dev/null \
         | awk '/^\/dev\/disk/ { print $1; exit }')
-  [ -n "$dev" ] || return 1
-  ATTACHED+=("$dev")
-  echo "$dev"
+  [ -n "$DEV" ] || return 1
+  ATTACHED+=("$DEV")
+  return 0
 }
 
 blank() {  # blank <name> <MiB> -> echoes the image path
@@ -144,7 +149,8 @@ elif ! bash "$ROOT/scripts/check_extension.sh" >/dev/null 2>&1; then
   echo "  (skipped: the FSKit extension is not installed and enabled)"
 else
   img=$(blank plain 64)
-  dev=$(attach "$img") || dev=""
+  attach "$img" || DEV=""
+  dev="$DEV"
   if [ -z "$dev" ]; then
     bad "an image can be erased as ext4 by diskutil" "could not attach the image"
   else
@@ -174,7 +180,8 @@ if ! sudo -n true 2>/dev/null; then
   echo "   then this suite, to exercise the physical-disk case.)"
 else
   img=$(blank rootowned 64)
-  dev=$(attach "$img") || dev=""
+  attach "$img" || DEV=""
+  dev="$DEV"
   if [ -z "$dev" ]; then
     bad "the physical-disk case can be reproduced" "could not attach the image"
   else

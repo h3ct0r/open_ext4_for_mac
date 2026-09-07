@@ -42,6 +42,30 @@ enum Ext4DiskUtilityInstall {
         FileManager.default.fileExists(atPath: destination + "/Contents/Info.plist")
     }
 
+    /// `CFBundleVersion` of a .fs bundle, as a number. The installed copy and
+    /// the one inside this app are different files, and until now nothing
+    /// compared them: a bundle installed months ago reported itself as
+    /// "installed" while lacking the change that lets Disk Utility erase a
+    /// physical disk.
+    private static func version(ofBundleAt path: String) -> Int {
+        guard let data = FileManager.default.contents(atPath: path + "/Contents/Info.plist"),
+              let plist = try? PropertyListSerialization.propertyList(
+                    from: data, options: [], format: nil) as? [String: Any] else { return 0 }
+        return Int(plist["CFBundleVersion"] as? String ?? "0") ?? 0
+    }
+
+    static func installedVersion() -> Int { version(ofBundleAt: destination) }
+
+    static func bundledVersion() -> Int {
+        guard let source else { return 0 }
+        return version(ofBundleAt: source.path)
+    }
+
+    static func state() -> SetupBundleState {
+        guard isInstalled() else { return .absent }
+        return installedVersion() < bundledVersion() ? .outdated : .current
+    }
+
     static func diskUtilityListsExt() -> Bool {
         let out = Shell.run("/usr/sbin/diskutil", ["listFilesystems"], deadline: 15)
         return out.status == 0 && out.stdout.lowercased().contains("ext4")
