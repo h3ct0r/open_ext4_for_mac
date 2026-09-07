@@ -609,15 +609,13 @@ struct SetupAssistantView: View {
                 `diskutil listFilesystems`. The formatting is still done by the \
                 extension; this only makes it selectable.
 
-                Worth knowing: this works for disk images, but erasing a PHYSICAL \
-                disk as ext4 fails with “File system formatter failed (−69832)”, and \
-                authenticating does not help. macOS runs the formatter as you, and a \
-                physical disk's device node belongs to root, so the write is refused \
-                before this driver is ever asked. Taking ownership of that one node \
-                first — `sudo chown $(id -u) /dev/diskNsM /dev/rdiskNsM` — makes the \
-                erase work; it reverts when the disk is replugged. Disk Utility also \
-                labels an ext4 volume “EXT2”. You can remove this at any time from \
-                this window.
+                Erasing works for disk images and for real disks alike: choose ext4 \
+                in Disk Utility's Erase menu and that is all there is to it. Worth \
+                knowing: Disk Utility labels an ext4 volume “EXT2” whatever \
+                generation you picked, which is cosmetic. If you added this before \
+                September 2026, update it from here — the older version could not \
+                erase a physical disk. You can remove it at any time from this \
+                window.
                 """)
             if model.state(of: .diskUtility) == .ok {
                 Text("Installed in /Library/Filesystems/ext4.fs.").foregroundStyle(.secondary)

@@ -40,6 +40,14 @@ headings to be edited into one.
   the pointer is on, rather than wherever `center()` decided.
 
 ### Fixed
+- **Disk Utility can erase a physical disk as ext4.** It failed with "File
+  system formatter failed (-69832)" for every real disk: the `.fs` bundle's
+  wrapper re-dispatched the work to the logged-in user, who cannot open a
+  device node that belongs to root, so the open failed before this driver was
+  asked. The wrapper now keeps the privileges macOS gives it. First Aid on an
+  ext4 volume had the same bug and is fixed with it. Reinstall the Disk
+  Utility integration to pick this up — from the Setup Assistant, or
+  `sudo make install-diskutil`.
 - The app no longer records the Setup Assistant as completed just because the
   extension is enabled. That key was written at launch for every working
   install, so the app believed people had finished a window they had never

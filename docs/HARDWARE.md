@@ -91,27 +91,25 @@ sudo make prepare-device DEVICE=diskN CONFIRM=ERASE EXT4_SIZE=8g
 partition, and a full-disk partition on a 64 GB stick turns each autopsy
 into an hour.
 
-Expect `partitionDisk` to report the ext4 half as failed, and do not stop
-there. It formats through `newfs_fskit`, which the `.fs` wrapper re-dispatches
-to the console user so that fskitd can find the module -- and that user
-cannot open a physical disk's `root:operator` node for writing, so fskitd
-answers EACCES before the extension is ever asked (`diskutil` shows it as
-`-69832`, "file system formatter failed"; measured 2026-09-05). The script
-then formats the raw node directly as root, which is what has produced
-every hardware volume so far. Two consequences: `sudo ./build/bin/ext4dump
-/dev/diskNs2 probe` is the authority on whether the format landed, and
-**DiskArbitration will not notice a direct format until the stick is
-unplugged and plugged back in** -- `diskutil info` keeps saying "no file
-system" and `diskutil mount` refuses, however many times it is asked. The
-replug is the next rung anyway. (Disk Utility's Erase-as-ext4 fails the same
-way for the same reason; that is an envelope fact, not a runbook one.)
+`partitionDisk … EXT4` works as of 2026-09-06 and formats through the
+installed `.fs` bundle. It used to fail, and the reason is worth keeping: the
+wrapper re-dispatched the format to the console user so that fskitd could find
+the per-user module, and that user cannot open a physical disk's
+`root:operator` node, so fskitd answered EACCES before the extension was asked
+(`diskutil` showed `-69832`, "file system formatter failed"). The wrapper now
+keeps the root storagekitd hands it and sets `SUDO_UID`, which makes
+`newfs_fskit` take the console user's real uid and root's effective uid at
+once. **If `partitionDisk` still reports the ext4 half as failed, the installed
+bundle is older than this tree: `sudo make install-diskutil`.**
 
-Ownership is the whole of it, confirmed 2026-09-06: after `sudo chown $(id -u)
-/dev/disk4s2 /dev/rdisk4s2` the same Disk Utility erase succeeded, mounted
-without a replug -- DiskArbitration watched the format happen, so its cache
-was never stale -- and `e2fsck -fn` was clean. The node reverts to
-`root:operator` on the next replug, which is why `prepare-device` still does
-it the root way rather than chowning behind the user's back.
+`prepare-device` still formats the raw node directly as root when
+`partitionDisk` fails or overruns, and that path has produced most of the
+hardware volumes here. Two consequences of the direct route, which do not
+apply to a Disk Utility erase: `sudo ./build/bin/ext4dump /dev/diskNs2 probe`
+is the authority on whether the format landed, and **DiskArbitration will not
+notice a direct format until the stick is unplugged and plugged back in** --
+`diskutil info` keeps saying "no file system" and `diskutil mount` refuses,
+however many times it is asked. The replug is the next rung anyway.
 
 Formatting goes through the **raw** node (`/dev/rdiskN`) now, falling back
 to the buffered one if a device refuses it. The buffered node routes every

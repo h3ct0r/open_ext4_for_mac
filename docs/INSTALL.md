@@ -72,49 +72,42 @@ sentence it uses for a genuinely broken disk. Check with:
 which prints `status: enabled` when the switch is on and `registered but
 DISABLED` when it is not.
 
-### What Disk Utility can erase as ext4
+### Erasing a disk as ext4
 
-Disk images: yes. A physical disk: no, and no amount of authenticating
-changes it. The erase ends with
+Disk images and physical disks alike, from Disk Utility's Erase menu or from
+`diskutil eraseVolume EXT4 <name> /dev/diskNsM`. Pick **ext4** and click Erase;
+there is nothing else to do.
+
+If your Disk Utility integration predates 2026-09-06, update it — from the
+Setup Assistant's Disk Utility step, or with `sudo make install-diskutil` from
+a source checkout. The older bundle fails on a physical disk with
 
 ```
 newfs_fskit: Operation ended with error: Permission denied
 File system formatter failed. : (-69832)
 ```
 
-because macOS runs the formatter as the logged-in user while a physical
-disk's device node belongs to `root:operator` with mode 0640 — group members
-may read it, nobody but root may write it. `fskitd` refuses before this
-driver is ever asked.
+because it handed the work to your login account, which cannot open a disk
+device that belongs to root. The current one keeps the privileges macOS gives
+it. Two things it does NOT do, in case you were told otherwise: it does not
+change the ownership of anything, and it does not ask for a password beyond
+the one Disk Utility asks for itself.
 
-Ownership is the whole obstacle, and you can lift it for one disk. Take the
-two nodes for the partition you are erasing, then erase as usual:
+Disk Utility still labels the result "EXT2" whatever generation you chose, and
+that is cosmetic: all three personalities share one content type, so
+DiskArbitration reports the first of them.
 
-```bash
-sudo chown $(id -u) /dev/disk4s2 /dev/rdisk4s2   # your disk's numbers
-```
-
-Measured on 2026-09-06: the same Disk Utility erase that had failed then
-succeeded, the volume mounted immediately with no replug, and `e2fsck -fn`
-found nothing wrong. Two things to understand before using it. While you own
-the node, anything running as you can write to that whole partition, so name
-the exact disk and do it only when you mean to erase it. And the ownership
-reverts the moment the disk is replugged or the Mac reboots, which makes this
-a way to erase one disk, not a change to how your system works.
-
-The alternative, which needs no such thing: format it on a Linux machine, or
-from a source checkout of this project, which writes the raw node directly as
-root:
+To format a disk with no partition map at all, or without Disk Utility, a
+source checkout has:
 
 ```bash
 sudo make prepare-device DEVICE=diskN CONFIRM=ERASE
 ```
 
-Then unplug the disk and plug it in again. DiskArbitration caches its verdict
-and will keep reporting "no file system" until the device reappears — a direct
-format is invisible to it until then. An erase through Disk Utility does not
-need the replug, because it went through FSKit and DiskArbitration watched it
-happen.
+It partitions and writes the raw node directly. Unplug the disk and plug it in
+again afterwards: a direct format is invisible to DiskArbitration until the
+device reappears. An erase through Disk Utility needs no replug, because
+DiskArbitration watched it happen.
 
 ## 3a. Prove it without a disk
 

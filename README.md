@@ -48,7 +48,7 @@ that walks them, and then proves the result on a real volume.
 | **Approve the extension** | opens the right pane, then watches for the switch and says the moment it lands. It also tells apart the two ways it can be unset: an unlit switch, and a File System Extensions list that is empty because macOS has not registered the module at all |
 | **Keep it working after a restart** | starts Ext4Mac at login, which is what keeps the extension registered |
 | **Let Ext4Mac tell you things** | notification permission, so a locked or refused volume is reported when it happens rather than only by `Ext4Mac status` |
-| **Disk Utility** *(optional)* | adds ext2/3/4 to the Erase menu, behind the standard administrator prompt. It erases disk images; a physical disk cannot be erased as ext4 through FSKit, whoever you are |
+| **Disk Utility** *(optional)* | adds ext2/3/4 to the Erase menu, behind the standard administrator prompt. Erases disk images and physical disks alike |
 | **Try it on a real volume** | mounts a small ext4 volume that ships inside the app, through the same path a plugged-in disk takes, and ejects it again |
 | **Where Ext4Mac lives** | points at the menu-bar icon and opens its menu |
 
@@ -80,7 +80,7 @@ Walking it on a fresh user account, which no test suite can do, is
 | **ext2, ext3, ext4** | mount, read and write; volumes written on macOS read back byte-for-byte on Linux |
 | **Journal** | replayed before any read-write mount; an unreplayed log is never written over |
 | **LUKS1 and LUKS2** | `aes-xts-plain64`; PBKDF2 and Argon2; unlock from the menu bar or `Ext4Mac unlock`; the passphrase never enters the sandboxed extension |
-| **Formatting** | `newfs_fskit -t ext4 /dev/diskN`; Disk Utility, for disk images — a physical disk cannot be erased as ext4 through FSKit at all, see [ENVELOPE](docs/ENVELOPE.md#limits) |
+| **Formatting** | `newfs_fskit -t ext4 /dev/diskN`, or Disk Utility's Erase menu after `sudo make install-diskutil` — disk images and physical disks alike |
 | **Files** | extended attributes, hard links, symlinks, rename, preallocation; `chattr +i` / `+a` honoured as `uchg` / `uappnd` |
 | **Refused by name** | `bigalloc`, `inline_data`, `meta_bg`, `casefold`, `large_dir`, `ea_inode`, fscrypt, compression, external journals — each with a message that says which |
 | **Read-only** | `quota`, `project`, `verity`, any unknown RO_COMPAT bit, and read-only media |

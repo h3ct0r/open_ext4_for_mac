@@ -108,3 +108,46 @@ otherwise incidental.
 
 The same core path is fully covered offline: `ext4dump format` builds volumes
 across 117 geometries, all `e2fsck`-clean.
+
+
+## The re-dispatch was half a fix (2026-09-06)
+
+The paragraph above says the wrappers re-dispatch to the console user and that
+"the device stays accessible because fskit_helper (root) opens it, not the
+calling user". The second half is wrong, and it cost a user an afternoon.
+
+`fskit_helper` is on the MOUNT path. `newfs_fskit` opens the device in its own
+process: its entitlements are `com.apple.private.LiveFS.connection` and a
+mach-lookup exception for `com.apple.filesystems.fskitd`, and nothing for
+disk-device access. So after the re-dispatch dropped to uid 501, the open of a
+physical disk's `root:operator` node returned EACCES, and Disk Utility reported
+`-69832`. Disk images never showed it, because their nodes belong to whoever
+attached them -- which is exactly why every test until now passed.
+
+The report that found it: an erase of a 256 GB stick, `Code=13`. `sudo chown
+$(id -u) /dev/disk4s2 /dev/rdisk4s2` made the identical erase succeed, which
+located the failure precisely -- and then made ownership look like the answer.
+It was not. A design that lends the node and hands it back needs a trap, and a
+detached restorer to survive the `SIGKILL` that `storagekitd` cancels with
+(`rawTerminate` is `mov w1, #9; bl _kill`), and it leaves a window in which a
+user has raw access to a disk.
+
+The actual answer was already inside the tool. `/sbin/newfs_fskit` and
+`/sbin/fsck_fskit` both read `SUDO_UID`, and when running as root call
+`setreuid(SUDO_UID, -1)` before touching FSKit -- visible in `main` as
+`getenv` -> `getuid` -> `strtoul` -> `setreuid`, second argument `-1`. Real uid
+becomes the console user, so fskitd's audit-token lookup finds their enabled
+module; effective uid stays 0, so the open succeeds. It is what plain `sudo
+newfs_fskit` has always done. The wrapper now sets that variable and keeps the
+root it was given.
+
+Two other things this corrects. The daemon that runs a `.fs` bundle's formatter
+is **`storagekitd`**, not `diskmanagementd` -- there is no such process on
+macOS 26; it fork/execs the tool through `DMToolProcess` and waits. And
+`fsck_ext4` carried the identical bug: First Aid on a physical ext4 volume
+could not even read the node. Nobody had run it.
+
+`Tests/run_diskutil_tests.sh` reproduces all of it without hardware, by
+chowning a disk image's nodes to `root:operator`, and asserts the mechanism
+from both sides: the string and the symbol are still in the shipped binary,
+and without `SUDO_UID` the same command cannot format at all.
