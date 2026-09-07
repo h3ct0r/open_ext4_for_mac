@@ -6,7 +6,8 @@ measurements — lives in [the notebook](notebook/README.md); this page is the
 summary. What the driver will and will not mount is [ENVELOPE.md](ENVELOPE.md),
 which is checked against the code on every test run.
 
-Last updated 2026-09-06, at the first release.
+Last updated 2026-09-07: the Setup Assistant, and erasing a physical disk
+as ext4 from Disk Utility.
 
 | phase | state |
 |---|---|
@@ -16,6 +17,7 @@ Last updated 2026-09-06, at the first release.
 | kernel-offloaded I/O | **disabled** by design — see gaps |
 | correctness harness | complete: image suites, crash consistency, reordered writes, differential vs Linux, replay speed, fuzzing, mounted driver |
 | encrypted volumes | complete: LUKS1 and LUKS2, unlock from the menu bar or the command line |
+| first run | complete: a Setup Assistant walks approval, login item, notifications, Disk Utility and a bundled sample volume, then points at the menu-bar icon |
 | distribution | complete: **v0.1.0 published 2026-09-06** — signed, notarized and stapled DMG on the Releases page, cut by `make release` and the release workflow |
 
 ## What works today
@@ -31,8 +33,18 @@ Last updated 2026-09-06, at the first release.
 - **LUKS1 and LUKS2** (`aes-xts-plain64`; PBKDF2, Argon2id, Argon2i; both
   header copies; every key slot) unlock from the menu-bar agent or
   `Ext4Mac unlock`; the passphrase never enters the sandboxed extension.
-- **Formatting** with `newfs_fskit -t ext4|ext3|ext2`, and Disk Utility after
-  `sudo make install-diskutil`; `fsck_fskit` is a mountability check.
+- **Formatting** with `newfs_fskit -t ext4|ext3|ext2`, and from Disk Utility's
+  Erase menu after `sudo make install-diskutil` — disk images and physical
+  disks alike, with nothing to authorise and no device node to chown. That last
+  part only became true on 2026-09-07; the wrapper used to hand the work to the
+  logged-in user, who cannot open a disk that belongs to root.
+  [Why.](notebook/disk-utility-and-newfs.md)
+- **A first run that explains itself.** One window: approve the extension (with
+  the two failure modes told apart), start at login, allow notifications, add
+  Disk Utility support, mount a sample ext4 volume that ships inside the app,
+  and a short tour of the menu-bar icon. `Ext4Mac setup --check` prints the same
+  checklist for a script; `Ext4Mac selftest --mount` proves the install end to
+  end.
 - **Open-unlink** puts a deleted-but-open inode on ext4's orphan list, so a
   crash in that window is recoverable by the next mount.
 - **`chattr +i` / `+a`** are honoured and shown to macOS as `uchg` / `uappnd`.
@@ -79,8 +91,8 @@ measured limit, is in [ENVELOPE.md](ENVELOPE.md).
 
 ## How it is tested
 
-The oracle is never this driver. `make validate` runs 29 stages unattended
-in about ten minutes: every read against `debugfs`, `e2fsck` after every
+The oracle is never this driver. `make validate` runs 32 stages unattended
+in about twelve minutes: every read against `debugfs`, `e2fsck` after every
 write, crash cuts and reordered writes replayed by the Linux kernel, both
 directions of a differential round trip, LUKS containers judged by real
 `cryptsetup`, a mutation campaign and 22 hostile fixtures, and — with the
@@ -95,9 +107,10 @@ how each suite came to exist is in the notebook.
 
 | what | latest | where |
 |---|---|---|
-| full validation | 2026-09-05: 29 stages green, ~590 s, twenty times over in the soak | `make validate` |
+| full validation | 2026-09-07: **32 stages green, 697 s**, on `8c8a930` — two of the stages are new (the setup assistant, Disk Utility) | `make validate` |
 | soak | 2026-09-05: **20** clean rounds of the full set with 10 min of fuzzing each way between rounds, on `ba71e40`; the three attempts before it each stopped on a finding, fixed red-first | [notebook/soak.md](notebook/soak.md) |
 | pull test | twenty mid-write pulls across five drives, USB-2 sticks to an NVMe SSD behind a bridge; every one `e2fsck`-clean, no synced file lost | [the five-drive verdict](notebook/write-ordering-and-the-barrier.md#the-barrier-daemon-is-retired-a-five-drive-verdict) |
+| Disk Utility on hardware | 2026-09-07: a 256 GB stick erased as ext4 from Disk Utility's GUI with no terminal and nothing chowned — the first time that has worked. The failure, the measurement that located it and the fix are in [HARDWARE §5](HARDWARE.md#5-sessions) | `make test-diskutil` |
 | hardware loop | 2026-09-05 on `7bd5746`, a 256 GB USB stick: every rung green — 2,032-file copy byte-exact after a cold replug, e2fsck clean, kill-recovery 18/18 with 1 s remounts, three pulls with no synced file lost; two findings fixed red-first on the day | [HARDWARE.md §5](HARDWARE.md#5-sessions) |
 | fuzzing | 22 hostile fixtures, one per finding; the soak's latest two (the xattr list's alignment, an inode count past its groups) fixed 2026-09-05 | `Tests/fixtures/hostile/MANIFEST` |
 | bugs found in lwext4 | 79 numbered patches, each with its reason | [patches/lwext4/README.md](../patches/lwext4/README.md) |
