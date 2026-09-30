@@ -32,6 +32,9 @@ headings to be edited into one.
   a setup already completed.
 
 ### Changed
+- **macOS 26 or later is required.** The app used to declare 15.4, where it
+  had never been built or tested; FSKit's interface changed between the 15.x
+  SDK and 26, and this driver is written against 26.
 - `make validate` runs the mounted data suite as stage 13: a file written
   through a real FSKit mount must read back byte for byte. It is the suite
   that found the preallocated-tail corruption, and until now it ran only by

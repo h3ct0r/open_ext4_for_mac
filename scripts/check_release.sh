@@ -43,6 +43,18 @@ for f in LICENSE:LICENSE.txt THIRD_PARTY_NOTICES.md:THIRD_PARTY_NOTICES.txt; do
   cmp -s "$src" "$dst" && ok "the app carries ${f##*:}, current" \
                        || bad "the app carries ${f##*:}, current" "missing or different from ${f%%:*}"
 done
+# One minimum OS, the Makefile's, in both bundles -- it said 15.4, where this
+# was never built or tested, and nothing compared it with anything.
+floor=$(sed -nE 's/^DEPLOY_TARGET \?= *([0-9.]+).*/\1/p' "$ROOT/Makefile")
+for b in "$APP" "$APPEX"; do
+  m=$(plutil -extract LSMinimumSystemVersion raw -o - "$b/Contents/Info.plist" 2>/dev/null)
+  [ -n "$floor" ] && [ "$m" = "$floor" ] && ok "$(basename "$b") requires macOS $floor, as the build targets" \
+    || bad "$(basename "$b") requires macOS ${floor:-?}, as the build targets" "LSMinimumSystemVersion is '${m:-?}'"
+done
+# The Disk Utility bundle inside the app says the release it came with.
+fsv=$(plutil -extract CFBundleShortVersionString raw -o - "$APP/Contents/Resources/ext4.fs/Contents/Info.plist" 2>/dev/null)
+[ "$fsv" = "$want" ] && ok "the bundled ext4.fs says $want" \
+                     || bad "the bundled ext4.fs says $want" "it says '${fsv:-?}'"
 bn=$(plutil -extract CFBundleVersion raw -o - "$APP/Contents/Info.plist" 2>/dev/null)
 [ -n "$bn" ] && [ "$bn" != "0" ] && ok "the build number is stamped ($bn)" \
                                   || bad "the build number is stamped" "CFBundleVersion is '${bn:-?}' -- a placeholder"

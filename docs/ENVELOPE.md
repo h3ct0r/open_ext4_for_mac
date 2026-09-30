@@ -159,7 +159,7 @@ and not yet filed.
 
 ## Platform
 
-Apple Silicon, macOS 15.4 or later; developed and tested on macOS 26. Intel
+Apple Silicon, macOS 26 or later -- the release it is developed and tested on. Intel
 Macs are not supported: no Intel or universal build is produced or tested.
 
 ## What is tested where

@@ -31,8 +31,11 @@
 	<string>ext4</string>
 	<key>CFBundlePackageType</key>
 	<string>fs  </string>
+	<!-- Stamped from the VERSION file: into the copy inside the app when it is
+	     built, and into /Library/Filesystems/ext4.fs by install-diskutil. It
+	     was set by hand and said 0.2.0 while the release was 0.1.0. -->
 	<key>CFBundleShortVersionString</key>
-	<string>0.2.0</string>
+	<string>0.0.0</string>
 	<key>CFBundleSignature</key>
 	<string>????</string>
 	<!-- Bumped whenever the wrappers change behaviour, because this is what

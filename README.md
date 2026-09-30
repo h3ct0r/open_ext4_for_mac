@@ -3,7 +3,7 @@
 [![ci](https://github.com/h3ct0r/open_ext4_for_mac/actions/workflows/ci.yml/badge.svg)](https://github.com/h3ct0r/open_ext4_for_mac/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/h3ct0r/open_ext4_for_mac)](https://github.com/h3ct0r/open_ext4_for_mac/releases)
 [![licence](https://img.shields.io/github/license/h3ct0r/open_ext4_for_mac)](LICENSE)
-[![platform](https://img.shields.io/badge/macOS-15.4%2B%20%C2%B7%20Apple%20Silicon-black)](#three-things-to-know)
+[![platform](https://img.shields.io/badge/macOS-26%2B%20%C2%B7%20Apple%20Silicon-black)](#three-things-to-know)
 
 **Native ext2 / ext3 / ext4 for macOS, read and write, built on Apple's FSKit.**
 
@@ -96,7 +96,7 @@ against the driver's own table on every test run, so it cannot drift.
   drive. Twenty mid-write pulls across five drives all recovered cleanly, but
   a pull mid-write can also panic macOS itself — the storage stack's problem,
   not one this driver can prevent. Details and numbers: [ENVELOPE.md](docs/ENVELOPE.md#the-barrier-what-this-driver-cannot-promise).
-- **Apple Silicon, macOS 15.4 or later.** No Intel or universal build is
+- **Apple Silicon, macOS 26 or later.** No Intel or universal build is
   produced or tested.
 - **Building a copy that mounts needs a paid Apple Developer account.**
   FSKit's entitlement is restricted and macOS honours it only under a
@@ -134,7 +134,7 @@ More in [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Building from source
 
-Requirements: macOS 15.4+, Apple Silicon, Xcode Command Line Tools,
+Requirements: macOS 26+, Apple Silicon, Xcode Command Line Tools,
 `brew install e2fsprogs`; Docker for the Linux-kernel stages.
 
 ```bash

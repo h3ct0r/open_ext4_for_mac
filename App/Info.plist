@@ -27,8 +27,12 @@
 	<string>0.0.0</string>
 	<key>CFBundleVersion</key>
 	<string>0</string>
+	<!-- Stamped from the Makefile's DEPLOY_TARGET at build, like the two above;
+	     kept equal here so a copy out of the tree says the same thing. -->
 	<key>LSMinimumSystemVersion</key>
-	<string>15.4</string>
+	<string>26.0</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 open_ext4_for_mac contributors. GPL-3.0-or-later; third-party notices in Resources.</string>
 	<key>LSUIElement</key>
 	<true/>
 </dict>

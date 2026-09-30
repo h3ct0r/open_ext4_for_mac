@@ -84,7 +84,7 @@ same thing is `sudo make install-diskutil`.
 Notes
 -----
 
-- Requires macOS 15.4 or later on Apple Silicon.
+- Requires macOS 26 or later on Apple Silicon.
 - Eject removable media before unplugging it.
 - Keep a backup of anything you cannot lose. This is young software.
 

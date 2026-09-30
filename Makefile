@@ -16,7 +16,10 @@
 # macOS is the product; Linux is the oracle. See the TARGET_FLAG block below.
 HOST_OS       := $(shell uname -s)
 
-DEPLOY_TARGET ?= 15.4
+# The oldest macOS the app and the extension run on. It was 15.4, and nothing
+# was ever built or tested there: FSKit's API moved between the 15.x SDK and
+# 26, and this code is written against 26. Stamped into both Info.plists.
+DEPLOY_TARGET ?= 26.0
 
 # See the distribution section for why these are here and not in a plist.
 VERSION      := $(strip $(shell cat VERSION 2>/dev/null || echo 0.0.0))
@@ -992,6 +995,7 @@ $(APPEX)/Contents/Info.plist: $(SWIFT_SRCS) $(CORE_LIB) Extension/Info.plist $(B
 	@plutil -replace Ext4BuildID -string "$(BUILD_ID)" "$@.tmp"
 	@plutil -replace CFBundleShortVersionString -string "$(VERSION)" "$@.tmp"
 	@plutil -replace CFBundleVersion -string "$(BUILD_NUMBER)" "$@.tmp"
+	@plutil -replace LSMinimumSystemVersion -string "$(DEPLOY_TARGET)" "$@.tmp"
 	@mv "$@.tmp" "$@"
 	@echo "built $(APPEX)"
 
@@ -1033,10 +1037,14 @@ $(APP_RESOURCES)/Ext4Mac.icns: App/Ext4Mac.icns
 	@mkdir -p $(dir $@)
 	@cp $< $@
 
-$(APP_RESOURCES)/ext4.fs: $(shell find Packaging/ext4.fs -type f 2>/dev/null)
+# The display version comes from VERSION; CFBundleVersion stays the hand-bumped
+# wrapper-behaviour number the app compares to tell a stale install (see the
+# comment in its Info.plist), so it is deliberately not stamped.
+$(APP_RESOURCES)/ext4.fs: $(shell find Packaging/ext4.fs -type f 2>/dev/null) VERSION
 	@mkdir -p $(dir $@)
 	@rm -rf $@
 	@cp -R Packaging/ext4.fs $@
+	@plutil -replace CFBundleShortVersionString -string "$(VERSION)" $@/Contents/Info.plist
 
 # The licence and the third-party notices travel with the binary: the GPL
 # asks for it, and so does clause 2 of every BSD licence in lwext4. Text, in
@@ -1067,6 +1075,7 @@ $(BUILD)/$(APP_NAME).app/Contents/Info.plist: App/Info.plist $(BUILD)/.build-id
 	@plutil -replace CFBundleShortVersionString -string "$(VERSION)" $@.tmp
 	@plutil -replace CFBundleVersion -string "$(BUILD_NUMBER)" $@.tmp
 	@plutil -replace CFBundleIconFile -string "Ext4Mac" $@.tmp
+	@plutil -replace LSMinimumSystemVersion -string "$(DEPLOY_TARGET)" $@.tmp
 	@mv $@.tmp $@
 
 # The app links the core so it can read a LUKS header and run the key
@@ -1283,6 +1292,7 @@ install-diskutil:  ## appear in Disk Utility (sudo)
 	@test -f "$(FS_BUNDLE_SRC)/Contents/Info.plist" || { echo "missing $(FS_BUNDLE_SRC)"; exit 1; }
 	@rm -rf "$(FS_BUNDLE_DEST)"
 	@cp -R "$(FS_BUNDLE_SRC)" "$(FS_BUNDLE_DEST)"
+	@plutil -replace CFBundleShortVersionString -string "$(VERSION)" "$(FS_BUNDLE_DEST)/Contents/Info.plist"
 	@chown -R root:wheel "$(FS_BUNDLE_DEST)"
 	@chmod -R go-w "$(FS_BUNDLE_DEST)"
 	@echo "installed $(FS_BUNDLE_DEST)"

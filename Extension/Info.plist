@@ -23,8 +23,9 @@
 	<string>0.0.0</string>
 	<key>CFBundleVersion</key>
 	<string>0</string>
+	<!-- Stamped from the Makefile's DEPLOY_TARGET at build. -->
 	<key>LSMinimumSystemVersion</key>
-	<string>15.4</string>
+	<string>26.0</string>
 	<key>EXAppExtensionAttributes</key>
 	<dict>
 		<key>EXExtensionPointIdentifier</key>
