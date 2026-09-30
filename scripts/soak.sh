@@ -140,7 +140,7 @@ report() {
     fi
     if [ -n "$failed_at" ]; then
         echo "      round $failed_at FAILED ($failed_kind)"
-        if [ "$failed_kind" = "the fuzzer" ]; then
+        if [ "$failed_kind" = "the fuzzer" ] || [ "$failed_kind" = "the fuzzer's toolchain" ]; then
             echo "      artifacts in .fuzz/crashes/, logs in .fuzz/logs/"
         else
             echo "      $OUT/round-$failed_at.log"
@@ -182,6 +182,16 @@ fuzz_interlude() {
 
     if [ ! -x "$FUZZ_BIN" ]; then
         if ! bash "$ROOT/scripts/fuzz_build.sh" >/dev/null 2>&1; then
+            # On a laptop, a missing runtime is a machine that cannot fuzz.
+            # On CI it is a job that promised fuzzing and quietly did none:
+            # the nightly soak ran "--fuzz 10" this way for a month, green,
+            # because its compiler picker never installed llvm.
+            if [ -n "${CI:-}" ]; then
+                echo "      no libFuzzer runtime, and CI asked for --fuzz: failing"
+                failed_at="$round"
+                failed_kind="the fuzzer's toolchain"
+                return 1
+            fi
             echo "      (no libFuzzer runtime here; --fuzz has nothing to run)"
             FUZZ_MIN=0
             return 0

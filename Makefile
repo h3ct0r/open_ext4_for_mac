@@ -701,6 +701,12 @@ FUZZ_TIME  ?= 600
 FUZZ_TIMEOUT ?= 20
 FUZZ_JOBS  ?= 4
 FUZZ_CC    ?= /opt/homebrew/opt/llvm/bin/clang
+# Per-process RSS ceilings. The defaults suit a developer Mac; a hosted macOS
+# runner has 7 GB for every job at once, and the nightly lowers both rather
+# than lose the runner (four nightlies died "lost communication" in 09/2026
+# with 3 jobs x 4096 MB and an 8192 MB merge).
+FUZZ_RSS_MB       ?= 4096
+FUZZ_MERGE_RSS_MB ?= 8192
 
 # Every source under tools/fuzz/ except the ones carrying their own main().
 # A wildcard so that the later phases add a file rather than edit this line.
@@ -725,7 +731,7 @@ FUZZ_BIN   := $(BUILD)/bin/ext4_fuzz
 # blame. The first 2048 MB run produced exactly that -- a zero-byte oom
 # artifact at corpus 294/1202Mb, rss 2098. Generous rss, tight malloc.
 FUZZ_ARGS  := -dict=$(CURDIR)/tools/fuzz/ext4.dict -max_len=8388608 \
-              -rss_limit_mb=4096 -malloc_limit_mb=512 \
+              -rss_limit_mb=$(FUZZ_RSS_MB) -malloc_limit_mb=512 \
               -use_value_profile=1 -detect_leaks=0 \
               -artifact_prefix=$(CURDIR)/$(FUZZ_DIR)/crashes/ \
               -max_total_time=$(FUZZ_TIME) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS)
@@ -804,12 +810,14 @@ fuzz: fuzz-build $(FUZZ_DIR)/seeds/.stamp  ## libFuzzer, read-only mode (needs H
 
 # Read-write is a different question, not more of the same one: it is the only
 # mode that runs jbd2 recovery and the dx split, and it is the only mode where
-# a bug can write. Slower per input, hence the longer per-input timeout.
+# a bug can write. Slower per input, hence twice the per-input timeout -- as a
+# multiple of FUZZ_TIMEOUT, so raising it (CI does, to 60) raises both; a
+# fixed value here used to ignore it.
 fuzz-rw: fuzz-build $(FUZZ_DIR)/seeds/.stamp  ## libFuzzer, read-write mode
 	@mkdir -p $(FUZZ_DIR)/corpus/rw $(FUZZ_DIR)/crashes $(FUZZ_DIR)/logs
 	@cd $(FUZZ_DIR)/logs && EXT4_FUZZ_MODE=rw \
 	  $(CURDIR)/$(FUZZ_BIN) $(CURDIR)/$(FUZZ_DIR)/corpus/rw $(CURDIR)/$(FUZZ_DIR)/seeds \
-	  $(FUZZ_ARGS) -timeout=40
+	  $(FUZZ_ARGS) -timeout=$$(( $(FUZZ_TIMEOUT) * 2 ))
 
 # One input, both modes, verbose, with a symbolised stack. This is the first
 # thing to run against a crash artifact.
@@ -920,13 +928,17 @@ fuzz-check:
 # run separately, so nothing a large geometry reaches is lost -- only its
 # thousand mutated copies. The rw corpus was never merged before this.
 FUZZ_MERGE_MAX_LEN ?= 2097152
+# logs/ is created here, not assumed: CI restores only corpus/, and on a fresh
+# runner the redirect below failed for every nightly from 09-05 on -- hidden
+# by an `|| true`, while the unmerged corpus grew to 90 GB.
 fuzz-merge: fuzz-build  ## distil both corpora to their smallest covering set (units <= FUZZ_MERGE_MAX_LEN)
+	@mkdir -p $(FUZZ_DIR)/logs
 	@for mode in ro rw; do \
 	  mkdir -p $(FUZZ_DIR)/corpus/$$mode; \
 	  rm -rf $(FUZZ_DIR)/merged && mkdir -p $(FUZZ_DIR)/merged; \
 	  before=$$(du -sm $(FUZZ_DIR)/corpus/$$mode | cut -f1); \
 	  EXT4_FUZZ_MODE=$$mode $(FUZZ_BIN) -merge=1 -max_len=$(FUZZ_MERGE_MAX_LEN) \
-	    -rss_limit_mb=8192 $(FUZZ_DIR)/merged $(FUZZ_DIR)/corpus/$$mode $(FUZZ_DIR)/seeds \
+	    -rss_limit_mb=$(FUZZ_MERGE_RSS_MB) $(FUZZ_DIR)/merged $(FUZZ_DIR)/corpus/$$mode $(FUZZ_DIR)/seeds \
 	    > $(FUZZ_DIR)/logs/merge-$$mode.txt 2>&1 || { echo "merge ($$mode) failed; see $(FUZZ_DIR)/logs/merge-$$mode.txt"; exit 1; }; \
 	  rm -rf $(FUZZ_DIR)/corpus/$$mode && mv $(FUZZ_DIR)/merged $(FUZZ_DIR)/corpus/$$mode; \
 	  echo "merged corpus ($$mode): $$(ls $(FUZZ_DIR)/corpus/$$mode | wc -l | tr -d ' ') inputs, $${before} MB -> $$(du -sm $(FUZZ_DIR)/corpus/$$mode | cut -f1) MB"; \

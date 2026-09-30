@@ -125,14 +125,38 @@ ext4b_orphan_cleanup
 # bytes, and four kilobytes of a filesystem is not a filesystem. The first
 # version of this measurement reported jbd_recover uncovered in both modes
 # for exactly that reason, and it looked like a finding.
+#
+# A unit that crashes aborts the whole replay, and the log then has no stats
+# line and no coverage: the gate used to report that as "mounted nothing",
+# which is a claim about the corpus's reach when the fact is a crash
+# (nightly 2026-09-30). So a crashing corpus unit is moved out to
+# .fuzz/crashes/, where fuzz-check reports it as the finding it is, and the
+# replay runs again without it. libFuzzer names corpus files by the SHA-1 of
+# their content, which is also the name of the artifact it writes.
 run_coverage() {  # run_coverage <mode> <logfile>
   local mode="$1" log="$2"
-  local inputs=("$SEEDS")
+  local inputs=("$SEEDS") attempt unit sha
   [ -n "$CORPUS" ] && [ -d "$CORPUS/$mode" ] && inputs+=("$CORPUS/$mode")
-  EXT4_FUZZ_MODE="$mode" EXT4_FUZZ_NO_SELFTEST=1 \
-    "$BIN" -runs=0 -max_len=8388608 -rss_limit_mb=4096 \
-           -print_coverage=1 -detect_leaks=0 "${inputs[@]}" > "$log" 2>&1
-  return 0
+  for attempt in 1 2 3 4 5; do
+    EXT4_FUZZ_MODE="$mode" EXT4_FUZZ_NO_SELFTEST=1 \
+      "$BIN" -runs=0 -max_len=8388608 -rss_limit_mb=4096 \
+             -print_coverage=1 -detect_leaks=0 \
+             -artifact_prefix="$OUT/replay-" "${inputs[@]}" > "$log" 2>&1
+    unit=$(sed -nE 's/.*Test unit written to (.*)$/\1/p' "$log" | tail -1)
+    [ -n "$unit" ] || return 0
+    sha=$(basename "$unit"); sha="${sha##*-}"
+    rm -f "$unit"
+    if [ -n "$CORPUS" ] && [ -f "$CORPUS/$mode/$sha" ]; then
+      mkdir -p "$ROOT/.fuzz/crashes"
+      mv "$CORPUS/$mode/$sha" "$ROOT/.fuzz/crashes/corpus-$mode-$sha"
+      echo "  note  corpus unit $sha crashes the $mode replay; quarantined to .fuzz/crashes/corpus-$mode-$sha"
+    else
+      bad "$mode replay crashes on $sha, which is not a corpus unit (a seed?); see $log"
+      return 1
+    fi
+  done
+  bad "$mode replay still crashing after quarantining 5 units; see $log"
+  return 1
 }
 
 covered() {  # covered <log> <function>
@@ -148,7 +172,7 @@ echo ""
 for mode in $MODES; do
   log="$OUT/print-$mode.txt"
   echo "mode $mode"
-  run_coverage "$mode" "$log"
+  run_coverage "$mode" "$log" || { echo ""; continue; }
 
   ran=$(grep -oE '^ext4_fuzz: inputs=[0-9]+ probed-ext=[0-9]+ mounted=[0-9]+' "$log" | tail -1)
   total=$(grep -c '^COVERED_FUNC' "$log")
@@ -160,7 +184,7 @@ for mode in $MODES; do
   if [ "$total" -eq 0 ] && grep -q "failed to symbolize\|Can't read from symbolizer" "$log"; then
     bad "$mode: the symbolizer works" \
         "$(grep -m1 'failed to symbolize\|symbolizer' "$log") -- coverage cannot be measured on this toolchain"
-    return 0
+    continue
   fi
 
   # A run that mounted nothing measures nothing, and every expectation below

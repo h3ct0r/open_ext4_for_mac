@@ -7,8 +7,7 @@
 # Anything that needs a decision belongs in the script, where it can be read,
 # tested and reverted like code.
 #
-# What CI cannot run, and why (docs/ENVELOPE.md will carry this in prose; it is
-# Part C and not written yet): the
+# What CI cannot run, and why (docs/ENVELOPE.md carries this in prose): the
 # mounted stages need a signed FSKit extension that a human approved in System
 # Settings, and the pull suite needs hands on a USB stick. Those stay local
 # under `make validate`. CI's job is to make everything else un-forgettable.
@@ -354,25 +353,20 @@ jobs:
           brew install llvm
           echo "fuzz_cc=/opt/homebrew/opt/llvm/bin/clang" >> "$GITHUB_OUTPUT"
 
-      # The corpus is the point of running this repeatedly. Keyed on the
-      # branch so a pull request grows its own, with restore-keys falling back
-      # to master's -- a new branch inherits weeks of exploration instead of
-      # starting from the seeds.
-      # restore and save are separate steps on purpose. actions/cache saves in
-      # its post step only when the job SUCCEEDED, so for as long as this job
-      # was red -- three runs -- no corpus was ever saved, and every run
-      # started again from the fourteen seeds. A campaign that cannot keep
-      # what it learned while it is finding things is a campaign that never
-      # grows. The save runs always.
-      - name: restore the corpus
+      # Start from the nightly's corpus -- weeks of exploration, merged and
+      # held to a budget -- and never save one. This job used to save a
+      # per-run entry on every push AND every pull request, unmerged, and
+      # those entries plus the nightly's filled the repository's 10 GB cache
+      # quota. Five minutes adds little a two-hour nightly would not; a crash
+      # it finds is kept as an artifact below, which is what matters.
+      - name: restore the nightly corpus
         id: corpus
         uses: actions/cache/restore@v6
         with:
           path: .fuzz/corpus
-          key: fuzz-corpus-${{ github.ref_name }}-${{ github.run_number }}
+          key: fuzz-corpus-v2-
           restore-keys: |
-            fuzz-corpus-${{ github.ref_name }}-
-            fuzz-corpus-master-
+            fuzz-corpus-v2-
 
       - name: build the harness
         run: |
@@ -411,13 +405,6 @@ jobs:
       - name: any artifact with an input is a failure
         if: always() && env.skip != '1'
         run: make fuzz-check
-
-      - name: save the corpus
-        if: always() && env.skip != '1'
-        uses: actions/cache/save@v6
-        with:
-          path: .fuzz/corpus
-          key: fuzz-corpus-${{ github.ref_name }}-${{ github.run_number }}
 
       - name: artifacts
         if: always()
