@@ -26,7 +26,9 @@ and approved.
    test runs red against the unfixed code — the fix reverted, or a fault
    injected — and the red result is recorded in the commit message alongside
    the green. A test that has never failed has not demonstrated it tests
-   anything.
+   anything. `scripts/red_first.sh --id NNNN [--suite <suite>] [--asan]`
+   does this for any commit that changes `Core/`: it reverts the code in a
+   throwaway worktree, keeps the tests, and requires red, then green.
 
 2. **lwext4 changes are numbered, one per commit.** `Core/lwext4` is this
    project's fork ([FORK.md](Core/lwext4/FORK.md)), edited in place like any

@@ -37,6 +37,7 @@ which inputs are interesting.
     scripts/fuzz_build.sh         build the harness, or exit 77 saying why
     scripts/fuzz_coverage.sh      the gate: is the campaign still reaching
                                   the code it was aimed at?
+    scripts/red_first.sh          prove a fix by taking it away
 
 Durable state lives in `.fuzz/`, deliberately outside `build/`: a validation
 round begins with `make clean`, and a corpus a round deletes is a corpus that
@@ -84,9 +85,10 @@ gate is code too.
    nobody will dare to change.
 6. Fix it — in the shim, or in lwext4 as the next `lwext4 NNNN:` commit with
    its row in [docs/lwext4-changes.md](../../docs/lwext4-changes.md).
-7. Show the fixture red with the fix reverted and green with it applied
-   (CONTRIBUTING rule 1). A fix that passes both ways is a fix whose test does
-   not test it.
+7. `bash scripts/red_first.sh --id NNNN [--asan]` (or a commit id). It
+   reverts the fix's code in a throwaway worktree, rebuilds, requires the
+   suite to FAIL, then restores and requires it to PASS. A fix that passes
+   both ways is a fix whose test does not test it.
 8. Commit the fixture, the fix and the ledger row together.
 
 ## What each instrument cannot see

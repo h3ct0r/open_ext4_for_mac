@@ -14,7 +14,9 @@ This is the ledger: every change made to that code, and why.
   `Lwext4-Change: NNNN`, so `git log --grep '^Lwext4-Change: 0048$'` finds it
   and `git show` of that commit *is* the change.
 * **Every ID has a row below**, added in the same commit: what it does, why,
-  and the test or hostile fixture that proves it.
+  and the test or hostile fixture that proves it --
+  `scripts/red_first.sh --id NNNN` shows that test red without the change
+  and green with it.
 * **IDs are never reused.** 0001-0079 began as a patch series applied at build
   time. Each was replayed as its own commit with its original prose, author
   and date, and `Introduced-In:` names the commit that first added it as a
