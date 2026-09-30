@@ -45,7 +45,7 @@ Ext4Mac.app                          container app; macOS finds FSKit modules
         └── libext4core.a
             ├── ext4_bridge.c        inode-oriented C API; probe; journal policy
             ├── crypto/              AES-XTS, LUKS1/2 headers, PBKDF2, Argon2
-            └── lwext4               vendored, pinned submodule + patches/
+            └── lwext4               in-tree fork; docs/lwext4-changes.md
 ```
 
 ## What happens on a mount
@@ -206,7 +206,7 @@ One case is worth calling out. `metadata_csum_seed` (INCOMPAT 0x2000) stores
 an explicit checksum seed so `tune2fs` can change a volume's UUID without
 rewriting every checksum. Upstream lwext4 has no notion of that field and
 always derives the seed from the UUID, so on any volume whose UUID had ever
-changed every checksum it wrote was wrong. `patches/lwext4/0012` gives it
+changed every checksum it wrote was wrong. lwext4 change 0012 gives it
 `ext4_sb_csum_seed()`, which honours the stored value, and such volumes mount
 read-write here. Modern `mke2fs` enables the feature by default.
 

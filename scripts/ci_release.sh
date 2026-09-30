@@ -114,7 +114,6 @@ for pp in Extension/Ext4FS.provisionprofile App/Ext4Mac.provisionprofile; do
 done
 
 # ------------------------------------------------------------------- build --
-make patch >/dev/null
 make app sign check-signing dmg SIGN_ID="$identity" SIGN_KEYCHAIN="$KEYCHAIN" 2>&1 | tee build/release-sign.log
 [ "${PIPESTATUS[0]}" -eq 0 ] || exit 1
 # The app must have been signed WITH the shared keychain group. sign.sh says

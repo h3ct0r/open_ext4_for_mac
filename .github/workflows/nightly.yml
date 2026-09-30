@@ -60,35 +60,12 @@ jobs:
       FUZZ_CORPUS_BUDGET_MB: 1024
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: recursive
 
-      # See ci.yml: git refuses a checkout it does not own, and the SDK has to
-      # be the 26.5 one this driver is written against.
-      - name: trust the checkout and pick the SDK
-        run: |
-          git config --global --add safe.directory "*"
-          sudo xcode-select -s /Applications/Xcode_26.5.app/Contents/Developer
-          echo "SDK: $(xcrun --show-sdk-version)"
-
-      - name: install e2fsprogs
-        run: |
-          brew install e2fsprogs
-          echo "/opt/homebrew/opt/e2fsprogs/sbin" >> "$GITHUB_PATH"
-          echo "/opt/homebrew/opt/e2fsprogs/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/setup-macos
 
       - name: pick a compiler with a libFuzzer runtime
         id: cc
-        run: |
-          for cc in "$(xcrun -f clang)" /opt/homebrew/opt/llvm/bin/clang; do
-            [ -x "$cc" ] || continue
-            rt="$("$cc" -print-libgcc-file-name 2>/dev/null)" || continue
-            if [ -f "$(dirname "$rt")/libclang_rt.fuzzer_osx.a" ]; then
-              echo "fuzz_cc=$cc" >> "$GITHUB_OUTPUT"; exit 0
-            fi
-          done
-          brew install llvm
-          echo "fuzz_cc=/opt/homebrew/opt/llvm/bin/clang" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/pick-fuzz-cc
 
       # The nightly corpus is the only one that accumulates; ci.yml reads it
       # and never writes. Restore and save are separate steps so a red night
@@ -161,38 +138,12 @@ jobs:
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: recursive
 
-      # See ci.yml: git refuses a checkout it does not own, and the SDK has to
-      # be the 26.5 one this driver is written against.
-      - name: trust the checkout and pick the SDK
-        run: |
-          git config --global --add safe.directory "*"
-          sudo xcode-select -s /Applications/Xcode_26.5.app/Contents/Developer
-          echo "SDK: $(xcrun --show-sdk-version)"
-
-      - name: install e2fsprogs
-        run: |
-          brew install e2fsprogs
-          echo "/opt/homebrew/opt/e2fsprogs/sbin" >> "$GITHUB_PATH"
-          echo "/opt/homebrew/opt/e2fsprogs/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/setup-macos
 
       - name: pick a compiler with a libFuzzer runtime
         id: cc
-        run: |
-          for cc in "$(xcrun -f clang)" /opt/homebrew/opt/llvm/bin/clang; do
-            [ -x "$cc" ] || continue
-            rt="$("$cc" -print-libgcc-file-name 2>/dev/null)" || continue
-            if [ -f "$(dirname "$rt")/libclang_rt.fuzzer_osx.a" ]; then
-              echo "fuzz_cc=$cc" >> "$GITHUB_OUTPUT"; exit 0
-            fi
-          done
-          # Xcode's clang has no fuzzer runtime. Without this fallback the
-          # soak's --fuzz 10 found no compiler and quietly fuzzed nothing,
-          # every night, while the job stayed green.
-          brew install llvm
-          echo "fuzz_cc=/opt/homebrew/opt/llvm/bin/clang" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/pick-fuzz-cc
 
       - name: soak
         run: |

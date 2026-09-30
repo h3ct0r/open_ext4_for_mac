@@ -12,6 +12,6 @@
     }
   ],
   "symptom": "eh_max is the stride to the checksum tail (12 + 12 * eh_max, which for 0xFFFF lands 786 KB past a 4 KiB block) and eh_entries bounds the binary search every lookup runs. Reading /victim was a heap-buffer-overflow in ext4_ext_binsearch.",
-  "fixed_by": "patches/lwext4/0048-an-extent-header-is-bounded-before-it-is-believed.patch",
+  "fixed_by": "lwext4 0048 (docs/lwext4-changes.md)",
   "reproduce": "build/bin/ext4dump <img> cat /victim"
 }

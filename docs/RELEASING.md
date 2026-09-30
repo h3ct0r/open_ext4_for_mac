@@ -10,8 +10,8 @@ GitHub Release whose notes are the changelog section — produced by
   refuses without one. `make changelog-draft` prints the commits since the
   last tag under Keep-a-Changelog headings to edit from.
 - The tree is clean and on `master`; CI is green on the commit you will tag.
-- The hostile-fixture and patch counts in the changelog match
-  `Tests/fixtures/hostile/MANIFEST` and `patches/lwext4/` (the docs suite
+- The hostile-fixture and lwext4-change counts in the changelog match
+  `Tests/fixtures/hostile/MANIFEST` and `docs/lwext4-changes.md` (the docs suite
   checks the README's; check the changelog's by eye).
 - When the first-run path changed, [QA-SETUP.md](QA-SETUP.md) has been walked
   on a fresh user account: no suite can see the Setup Assistant's window.

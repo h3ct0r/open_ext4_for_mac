@@ -1,0 +1,45 @@
+# The three things every macOS job did first, once instead of seven times.
+# The copies had drifted: the Xcode path was hard-coded seven times, one job
+# on Linux carried a "select Xcode" step that could never run, and the
+# e2fsprogs step differed between jobs.
+name: set up a macOS runner
+description: Trust the workspace, select the Xcode this driver is built with, install e2fsprogs.
+inputs:
+  xcode:
+    description: the Xcode version to select (its SDK is what FSKit is written against)
+    default: '26.5'
+  e2fsprogs:
+    description: install e2fsprogs (mke2fs, e2fsck, debugfs) and put it on PATH
+    default: 'true'
+runs:
+  using: composite
+  steps:
+    # git 2.35+ refuses a working tree whose owner is not the caller
+    # ("detected dubious ownership"), and the build asks git for its build id
+    # and build number. The workspace only: this was "*" for the lwext4
+    # submodule, which no longer exists.
+    - name: trust the workspace
+      shell: bash
+      run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+    # FSKit moved between SDKs twice in this project's life: the macOS 15.x
+    # SDK wants the replyHandler forms of probeResource/loadResource where
+    # this code has the async ones, and the 26.2 SDK has no
+    # FSVolume.MountOptions at all. Pin it, and print it, so a drift is one
+    # line at the top of the log.
+    - name: select Xcode ${{ inputs.xcode }}
+      shell: bash
+      run: |
+        sudo xcode-select -s "/Applications/Xcode_${{ inputs.xcode }}.app/Contents/Developer"
+        echo "SDK: $(xcrun --show-sdk-version) at $(xcrun --show-sdk-path)"
+        xcodebuild -version | head -1
+
+    - name: install e2fsprogs
+      if: inputs.e2fsprogs == 'true'
+      shell: bash
+      env:
+        HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
+      run: |
+        brew install e2fsprogs
+        echo "/opt/homebrew/opt/e2fsprogs/sbin" >> "$GITHUB_PATH"
+        echo "/opt/homebrew/opt/e2fsprogs/bin" >> "$GITHUB_PATH"

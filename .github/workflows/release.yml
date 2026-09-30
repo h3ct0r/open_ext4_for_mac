@@ -35,19 +35,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          submodules: recursive
           fetch-depth: 0
 
-      - name: trust the checkout and pick the SDK
-        run: |
-          git config --global --add safe.directory "*"
-          sudo xcode-select -s /Applications/Xcode_26.5.app/Contents/Developer
-          echo "SDK: $(xcrun --show-sdk-version)"
-
-      - name: install e2fsprogs
-        env:
-          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
-        run: brew install e2fsprogs
+      - uses: ./.github/actions/setup-macos
 
       - name: sign, check, and unless dry-run notarize and publish
         env:

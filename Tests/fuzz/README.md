@@ -37,7 +37,7 @@ which inputs are interesting.
     scripts/fuzz_build.sh         build the harness, or exit 77 saying why
     scripts/fuzz_coverage.sh      the gate: is the campaign still reaching
                                   the code it was aimed at?
-    scripts/red_first_patch.sh    prove a patch by taking it away
+    scripts/red_first.sh          prove a fix by taking it away
 
 Durable state lives in `.fuzz/`, deliberately outside `build/`: a validation
 round begins with `make clean`, and a corpus a round deletes is a corpus that
@@ -83,28 +83,13 @@ gate is code too.
 5. Add a row to `Tests/fixtures/hostile/MANIFEST` with the gzipped image and a
    JSON recipe naming the bytes. A fixture nobody can explain is a fixture
    nobody will dare to change.
-6. Fix it — in the shim, or in lwext4 as `patches/lwext4/00NN-*.patch` with a
-   README row and `make check-patches` green.
-7. `bash scripts/red_first_patch.sh 00NN [--asan]`. It reverses the patch,
-   rebuilds, requires the suite to FAIL, then repatches and requires it to
-   PASS. A patch that passes both ways is a patch whose test does not test it.
-8. Commit the fixture, the patch and the row together.
-
-## Two traps this cost time to learn
-
-**The patch stamp puts your revert back.** `build/.lwext4-patched` is a
-prerequisite of every object file and depends on the patch *files*. A freshly
-written patch is newer than the stamp, so the stamp rule re-runs — and that
-rule re-applies every patch that still applies, including the one you just
-reverted. `touch build/.lwext4-patched` after reverting.
-`scripts/red_first_patch.sh` does it, and then verifies the revert survived
-the build rather than trusting it.
-
-**A failed red-first leaves a poisoned binary.** `build/bin/ext4dump` is one
-path whatever the CONFIG, so an early exit can leave it built from the
-reverted source while the submodule says otherwise. The next suite anyone runs
-then reports the fixed bug as live. The script's EXIT trap repatches *and*
-relinks.
+6. Fix it — in the shim, or in lwext4 as the next `lwext4 NNNN:` commit with
+   its row in [docs/lwext4-changes.md](../../docs/lwext4-changes.md).
+7. `bash scripts/red_first.sh --id NNNN [--asan]` (or a commit id). It
+   reverts the fix's code in a throwaway worktree, rebuilds, requires the
+   suite to FAIL, then restores and requires it to PASS. A fix that passes
+   both ways is a fix whose test does not test it.
+8. Commit the fixture, the fix and the ledger row together.
 
 ## What each instrument cannot see
 

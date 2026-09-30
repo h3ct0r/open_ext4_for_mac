@@ -37,7 +37,7 @@ CRYPTO_DIR := Core/crypto
 # s_checksum_seed and always derives the seed from the UUID, which is correct
 # exactly while the two still agree -- ext4b_probe() verifies that and forces
 # read-only when they diverge, so tolerating the bit here is safe.
-# Requires patches/lwext4/0001-guard-EXT_FINCOM_IGNORED.patch.
+# Requires lwext4 change 0001 (docs/lwext4-changes.md), which guards the macro.
 # Overridable so that cache pressure is a dimension the tests can vary. lwext4
 # writes a dirty buffer out when the cache fills, and whether it does that
 # before or after the transaction owning it has committed is a correctness
@@ -127,7 +127,9 @@ endif
 # check_install_freshness.sh compares cannot be embedded in the binary it
 # signs, and a stale installed extension has now cost three debugging sessions
 # -- most recently a field log line that looked like today's build and was not.
-BUILD_ID := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git diff --quiet 2>/dev/null || echo -dirty)
+# Against HEAD, so staged edits count too; and since lwext4 stopped being a
+# submodule, an edit to it counts -- the old `ignore = dirty` hid every one.
+BUILD_ID := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git diff --quiet HEAD 2>/dev/null || echo -dirty)
 
 # EXTRA_CFLAGS is an injection point for one-off diagnostic builds, e.g.
 #   make EXTRA_CFLAGS=-DEXT4B_NO_UNWRITTEN_FASTPATH=1 app
@@ -216,7 +218,7 @@ ARGON2_CFLAGS := $(CFLAGS) $(NO_WARN) -I$(ARGON2_DIR)
 CORE_LIB      := $(BUILD)/lib/$(CONFIG)/libext4core.a
 CORE_TEST_LIB := $(BUILD)/lib/$(CONFIG)/libext4core-test.a
 
-.PHONY: help all core test-docs test-setup fuzz-triage-oom verify-patches clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-diskutil test-revoke test-bounds test-fuzz test-fuzz-regressions test-reorder test-crypto test-events test-envelope test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-data test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements check-submodule check-patches patch repatch unpatch extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline ci-linux release changelog-draft check-release uninstall test-uninstall print-fuzz-flags fuzz-build fuzz fuzz-rw fuzz-repro fuzz-minimize fuzz-merge fuzz-check fuzz-cov fuzz-cov-gate
+.PHONY: help all core test-docs test-setup fuzz-triage-oom clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-diskutil test-revoke test-bounds test-fuzz test-fuzz-regressions test-reorder test-crypto test-events test-envelope test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-data test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline ci-linux release changelog-draft check-release uninstall test-uninstall print-fuzz-flags fuzz-build fuzz fuzz-rw fuzz-repro fuzz-minimize fuzz-merge fuzz-check fuzz-cov fuzz-cov-gate check-lwext4 lwext4-diff
 
 all: app  ## build Ext4Mac.app with the FSKit extension inside (same as app)
 
@@ -225,119 +227,29 @@ all: app  ## build Ext4Mac.app with the FSKit extension inside (same as app)
 help:  ## this list
 	@awk 'BEGIN { FS = ":.*  ## " } /^[a-zA-Z0-9_-]+:.*  ## / { printf "  %-20s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-check-submodule:
+# Core/lwext4 is tracked files now, so this can only fail on a checkout that
+# still has the old submodule's leftovers in the way.
+check-lwext4:
 	@test -f $(LWEXT4_DIR)/include/ext4.h || { \
-	  echo "error: lwext4 submodule missing. Run: git submodule update --init"; \
+	  echo "error: $(LWEXT4_DIR) is empty. lwext4 is tracked in this repository,"; \
+	  echo "  not a submodule: run 'git submodule deinit -f Core/lwext4', then"; \
+	  echo "  'git checkout -- Core/lwext4'."; \
 	  exit 1; }
 
-core: check-submodule verify-patches $(CORE_LIB)
+core: check-lwext4 $(CORE_LIB)
 
-# Vendored-dependency patches.
-#
-# The stamp file makes patching a real prerequisite of every object file. An
-# earlier version listed a phony `patch` target on `core`, which compiled fine
-# but was silently skipped whenever make reached $(CORE_LIB) through another
-# path (`make app`), producing a library built from unpatched sources.
-PATCHES     := $(sort $(wildcard patches/lwext4/*.patch))
-PATCH_STAMP := $(BUILD)/.lwext4-patched
-
-# The authoritative test is the sequential replay in check_patches.sh: apply
-# everything to the pinned commit, diff against the tree. Per-patch checks
-# cannot be: a later patch may edit lines an earlier one introduced (0021
-# adjusts the purge loop 0020 wrote), and then the earlier patch fails a
-# reverse-check on a tree that is exactly right. So: if the replay proves the
-# tree, stamp it. Only when it does not, try to bring a clean checkout up by
-# applying whatever is missing, then prove it again.
-$(PATCH_STAMP): $(PATCHES) | check-submodule
-	@mkdir -p $(dir $@)
-	@if bash scripts/check_patches.sh >/dev/null 2>&1; then touch $@; exit 0; fi; \
-	failed=""; \
-	for p in $(PATCHES); do \
-	  if git -C $(LWEXT4_DIR) apply "$(CURDIR)/$$p" 2>/dev/null; then \
-	    echo "applied $$p"; \
-	  else \
-	    failed="$$failed $$p"; \
-	  fi; \
-	done; \
-	if bash scripts/check_patches.sh >/dev/null 2>&1; then :; \
-	elif [ -n "$(ALLOW_UNAPPLIED_PATCHES)" ]; then \
-	  echo "note: working tree does not match the patch set (ALLOW_UNAPPLIED_PATCHES)"; \
-	else \
-	  bash scripts/check_patches.sh; \
-	  if [ -n "$$failed" ]; then \
-	    echo "  patches that did not apply cleanly (already present, or in conflict):"; \
-	    for p in $$failed; do echo "    $$p"; done; \
-	  fi; \
-	  echo "  Set ALLOW_UNAPPLIED_PATCHES=1 while developing a patch, or run"; \
-	  echo "  'make repatch' to reset the submodule to pinned-plus-patches."; \
-	  exit 1; \
-	fi
-	@touch $@
-
-patch: $(PATCH_STAMP)
-
-# The stamp records that the patches were applied once. It cannot know they
-# still are: `git checkout -- src/foo.c` inside the submodule reverts every
-# patch touching that file and leaves the stamp cheerfully claiming otherwise.
-# The build then succeeds, and the result is a driver missing fixes it appears
-# to have -- reverting 0009 alone puts a wrong free-block count on every volume
-# this thing formats, which reads as a fresh bug in whatever you were working
-# on rather than as a missing patch.
-#
-# So verify instead of trusting, and re-apply if anything is gone. Fourteen
-# There are three states, not two, and conflating the last two is its own trap.
-# A patch may be applied (the reverse-check succeeds), missing (the forward
-# check succeeds, so re-apply it), or neither -- which means the file has been
-# edited further, which is exactly what developing a new patch looks like. The
-# first version re-applied in that case and broke the build.
-#
-# `git apply --check` runs cost milliseconds; the confusion costs an hour.
-# One question, asked the strong way: does replaying the patch set onto the
-# pinned commit reproduce this tree? (Per-patch reverse-checks used to live
-# here and were wrong twice over -- blind to direct submodule edits, and
-# falsely alarmed by stacked patches that edit each other's lines.)
-# ALLOW_UNAPPLIED_PATCHES exempts a tree that is mid-patch-development -- the
-# working tree legitimately leads the patch set while a fix is being built --
-# but prints a note, so forgetting to regenerate stays visible.
-verify-patches: $(PATCH_STAMP)
-	@if [ -n "$(ALLOW_UNAPPLIED_PATCHES)" ]; then \
-	  bash scripts/check_patches.sh >/dev/null 2>&1 || \
-	    echo "note: working tree leads the patch set (ALLOW_UNAPPLIED_PATCHES)"; \
-	else \
-	  bash scripts/check_patches.sh >/dev/null || { \
-	    bash scripts/check_patches.sh; exit 1; }; \
-	fi
-
-# Does the patch set reproduce the tree we compile? verify-patches asks whether
-# each patch is applied; this asks the stronger question, which is whether the
-# working tree contains anything the patches do not.
-check-patches:  ## do the lwext4 patches reproduce Core/lwext4 exactly?
-	@bash scripts/check_patches.sh
-
-# Put the submodule back to pinned-plus-patches, whatever state it is in.
-#
-# `git checkout -- src/foo.c` inside the submodule reverts to the *pinned*
-# commit, silently discarding every patch that touches that file -- the trap
-# the comment above describes, which is easy to spring while trying to undo
-# something unrelated. The repair is deterministic and check-patches proves it,
-# but only if you know what it is.
-#
-# Destructive by design: it discards uncommitted edits in Core/lwext4. Run
-# `make check-patches` first if there might be work there worth keeping.
-repatch: check-submodule
-	@pinned=$$(git ls-tree HEAD Core/lwext4 | awk '{print $$3}'); \
-	git -C $(LWEXT4_DIR) reset -q --hard $$pinned; \
-	for p in $(PATCHES); do \
-	  git -C $(LWEXT4_DIR) apply "$(CURDIR)/$$p" || { echo "failed: $$p"; exit 1; }; \
-	done; \
-	rm -f $(PATCH_STAMP); \
-	bash scripts/check_patches.sh
-
-unpatch:
-	@for p in $(PATCHES); do \
-	  git -C $(LWEXT4_DIR) apply --reverse "$(CURDIR)/$$p" 2>/dev/null && echo "reverted $$p" || true; \
-	done
-	@rm -f $(PATCH_STAMP)
+# lwext4 is an in-tree fork (Core/lwext4/FORK.md), tracked like the shim, so
+# make's own timestamps rebuild what changed and `git status` shows every
+# edit. Until 2026-09 it was a submodule plus 79 patch files applied at build
+# time, with a stamp file standing in for "the tree you compile is the tree a
+# clone gets". The stamp rule was rewritten five times, and once let a clone
+# build a driver with no journal write barrier. docs/lwext4-changes.md is the
+# ledger of every change and why; this is how much.
+lwext4-diff:  ## what Core/lwext4 changes against the upstream it was imported from
+	@base=$$(git rev-parse -q --verify 'lwext4-upstream-58bcf89a^{commit}' 2>/dev/null \
+	  || git log -1 --format=%H --grep='^lwext4 vendor: import upstream 58bcf89a'); \
+	  test -n "$$base" || { echo "lwext4-diff: the upstream import commit is not in this clone"; exit 1; }; \
+	  git diff --stat "$$base" -- $(LWEXT4_DIR)
 
 # The header dependency is not decoration. A struct in ext4_journal.h grew a
 # field during development; only ext4_journal.o was rebuilt, every other
@@ -346,7 +258,7 @@ unpatch:
 # untouched images as a clean pass.
 LWEXT4_HEADERS := $(wildcard $(LWEXT4_DIR)/include/*.h $(LWEXT4_DIR)/include/misc/*.h)
 
-$(OBJ)/lwext4/%.o: $(LWEXT4_DIR)/src/%.c $(LWEXT4_HEADERS) $(PATCH_STAMP)
+$(OBJ)/lwext4/%.o: $(LWEXT4_DIR)/src/%.c $(LWEXT4_HEADERS)
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(LWEXT4_CFLAGS) -c $< -o $@
 
@@ -355,12 +267,12 @@ $(OBJ)/lwext4/%.o: $(LWEXT4_DIR)/src/%.c $(LWEXT4_HEADERS) $(PATCH_STAMP)
 # changes even though no source file did -- otherwise the log lines keep
 # naming the commit they were first built at while the re-stamped plists name
 # the current one, and a hardware session reads as fresh when it is not.
-$(OBJ)/shim/%.o: $(SHIM_DIR)/%.c $(SHIM_DIR)/ext4_bridge.h $(LWEXT4_HEADERS) $(PATCH_STAMP) $(BUILD)/.build-id
+$(OBJ)/shim/%.o: $(SHIM_DIR)/%.c $(SHIM_DIR)/ext4_bridge.h $(LWEXT4_HEADERS) $(BUILD)/.build-id
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(SHIM_CFLAGS) -c $< -o $@
 
 # Test shim: EXT4B_TEST_HOOKS exposes the orphan-inspection API the suites use.
-$(OBJ)/shim-test/%.o: $(SHIM_DIR)/%.c $(SHIM_DIR)/ext4_bridge.h $(LWEXT4_HEADERS) $(PATCH_STAMP) $(BUILD)/.build-id
+$(OBJ)/shim-test/%.o: $(SHIM_DIR)/%.c $(SHIM_DIR)/ext4_bridge.h $(LWEXT4_HEADERS) $(BUILD)/.build-id
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(SHIM_CFLAGS) -DEXT4B_TEST_HOOKS=1 -c $< -o $@
 
@@ -404,7 +316,7 @@ $(BUILD)/.tools-config: FORCE
 	@mkdir -p $(BUILD)
 	@printf '%s' "$(CONFIG)" | cmp -s - $@ 2>/dev/null || printf '%s' "$(CONFIG)" > $@
 
-tools: verify-patches $(BUILD)/bin/ext4dump $(BUILD)/bin/cryptotest $(BUILD)/bin/datafile $(BUILD)/bin/ext4_stampcheck $(EVENT_PROBE)  ## ext4dump, cryptotest, datafile and friends
+tools: check-lwext4 $(BUILD)/bin/ext4dump $(BUILD)/bin/cryptotest $(BUILD)/bin/datafile $(BUILD)/bin/ext4_stampcheck $(EVENT_PROBE)  ## ext4dump, cryptotest, datafile and friends
 
 # The fuzzing stamper's oracle. Built with the ordinary compiler and linked
 # against nothing of ours -- it is a SECOND implementation of ext4's
@@ -454,9 +366,9 @@ test-diskutil: tools  ## Disk Utility: erasing a root-owned device node as ext4
 
 
 # Do the documents say what the tree says: links resolve, the counts in the
-# README are the tree's counts, every patch has its row, make help is
-# complete. Offline, no tools, no Homebrew.
-test-docs:  ## links resolve; README counts, patch rows and make help match the tree
+# README are the tree's counts, every lwext4 change has its ledger row, make
+# help is complete. Offline, no tools, no Homebrew.
+test-docs:  ## links resolve; README counts, the lwext4 ledger and make help match the tree
 	@bash Tests/run_docs_tests.sh
 
 # Does docs/ENVELOPE.md still describe the code? The feature-policy table is
@@ -1212,11 +1124,15 @@ RELEASE_VERSION := $(if $(findstring command line,$(origin VERSION)),$(VERSION),
 # The commits since the last tag, sorted into Keep-a-Changelog headings by
 # their first word, for editing into CHANGELOG.md. A draft, not a section: the
 # point of a hand-maintained changelog is that a person decided what mattered.
-changelog-draft:  ## commits since the last tag, under Keep-a-Changelog headings
-	@last=$$(git describe --tags --abbrev=0 2>/dev/null); \
+#
+# Release tags only (`v*`): the lwext4 import tag would otherwise be "the last
+# tag", and a draft since it lists 79 replayed lwext4 commits and none of the
+# work users see. lwext4 changes are in docs/lwext4-changes.md, not here.
+changelog-draft:  ## commits since the last release tag, under Keep-a-Changelog headings
+	@last=$$(git describe --tags --match 'v*' --abbrev=0 2>/dev/null); \
 	  echo "## [Unreleased]  (since $${last:-the beginning})"; echo; \
 	  for h in Added Changed Fixed; do echo "### $$h"; \
-	    git log --no-merges --format='- %s' $${last:+$$last..}HEAD | grep -iE "^- ($$( \
+	    git log --no-merges --format='- %s' $${last:+$$last..}HEAD | grep -v '^- lwext4 ' | grep -iE "^- ($$( \
 	      case $$h in Added) echo 'add|new|introduc|creat';; Changed) echo 'chang|mov|rename|switch|now';; Fixed) echo 'fix|bug|crash|hang|overflow|leak|wrong';; esac))" || true; \
 	    echo; done
 

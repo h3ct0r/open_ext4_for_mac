@@ -12,6 +12,6 @@
 | [QA-SETUP.md](QA-SETUP.md) | the maintainer | walking the Setup Assistant on a fresh account, which no suite can do |
 | [notebook/](notebook/README.md) | the curious | the engineering record: every investigation, dated and unedited |
 | [feedback/](feedback/) | the maintainer | Apple Feedback drafts and their ids |
-| [../patches/lwext4/README.md](../patches/lwext4/README.md) | developers | every change to the vendored lwext4 and why |
+| [lwext4-changes.md](lwext4-changes.md) | developers | every change to the lwext4 fork and why |
 | [../Tests/fuzz/README.md](../Tests/fuzz/README.md) | developers | the two fuzzing instruments |
 | [../CHANGELOG.md](../CHANGELOG.md) | everyone | what changed, by version |

@@ -177,9 +177,15 @@ fi
 
 # Before anything is measured: does the tree we just built match the tree
 # someone else would get? Every suite below runs against Core/lwext4 as it sits
-# on this disk, and says nothing about whether the patch files reproduce it. A
-# green run of a tree that only exists here is the most expensive kind of pass.
-stage "0. patches reproduce lwext4" bash scripts/check_patches.sh
+# on this disk. A green run of a tree that only exists here is the most
+# expensive kind of pass -- two lwext4 fixes once existed on one machine only.
+# lwext4 is tracked files now, so the question is plain git: nothing modified
+# and nothing untracked under Core/lwext4.
+stage "0. lwext4 is what a clone gets" bash -c \
+  'git diff --quiet HEAD -- Core/lwext4 || { git diff --stat HEAD -- Core/lwext4; exit 1; }
+   untracked=$(git ls-files -o --exclude-standard Core/lwext4)
+   [ -z "$untracked" ] || { echo "untracked in Core/lwext4:"; echo "$untracked"; exit 1; }
+   echo "Core/lwext4 matches HEAD"'
 
 # What is in the shipping core, and what must not be: no getenv, no test-only
 # exports, none of the removed env-var names. Needs the ship library, which
