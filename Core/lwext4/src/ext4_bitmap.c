@@ -91,6 +91,13 @@ int ext4_bmap_bit_find_clr(uint8_t *bmap, uint32_t sbit, uint32_t ebit,
 			   uint32_t *bit_id)
 {
 	uint32_t i;
+
+	/* An empty or inverted range holds no clear bit. Computed unsigned,
+	 * ebit - sbit wrapped to about four billion when a caller's start lay
+	 * past its end, and the scan below ran off the end of the bitmap. */
+	if (sbit >= ebit)
+		return ENOSPC;
+
 	uint32_t bcnt = ebit - sbit;
 
 	i = sbit;
@@ -100,8 +107,12 @@ int ext4_bmap_bit_find_clr(uint8_t *bmap, uint32_t sbit, uint32_t ebit,
 		if (!bcnt)
 			return ENOSPC;
 
+		/* The bit found, not the start of the search. This returned
+		 * sbit, which by then was a bit already checked and set. Latent:
+		 * every caller today starts on a byte boundary, or on a goal
+		 * whose own byte it has already scanned bit by bit. */
 		if (ext4_bmap_is_bit_clr(bmap, i)) {
-			*bit_id = sbit;
+			*bit_id = i;
 			return EOK;
 		}
 

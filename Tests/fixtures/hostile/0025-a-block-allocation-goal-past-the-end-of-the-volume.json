@@ -1,0 +1,16 @@
+{
+  "id": "0025",
+  "slug": "a-block-allocation-goal-past-the-end-of-the-volume",
+  "found_by": "the CI fuzz smoke on 9e279b9 (2026-09-30), crash-e3295da596e0a4c8a1527cf88820fb4887f0b48b (1.69 MB), minimized by libFuzzer (-minimize_crash) against the unfixed harness to 70,716 bytes, then cut to 70,656 (a multiple of 512, which ext4dump requires; the harness ignores the tail anyway)",
+  "base": "a fuzzer mutant of the seed corpus: a 1 KiB-block volume whose superblock claims 32 blocks in one group (blocks_per_group 1024, first_data_block 1) on a 69 KiB device",
+  "edits": [
+    {
+      "what": "not hand-made: the bytes are libFuzzer's",
+      "note": "what matters is that a create's block-allocation goal, derived from on-disk state, lands past block 32"
+    }
+  ],
+  "symptom": "A create in the root appended a directory block, and the allocator's goal lay beyond the volume's 32 blocks: idx_in_bg exceeded blk_in_bg, ext4_bmap_bit_find_clr(start past end) computed ebit - sbit unsigned, wrapped to ~4e9, and scanned off the 1024-byte bitmap buffer: AddressSanitizer heap-buffer-overflow READ of size 1 at ext4_bitmap.c:136, from ext4_balloc_alloc_block via ext4_fs_append_inode_dblk and ext4_dir_add_entry (the original input reached it via ext4_dir_dx_init).",
+  "fixed_by": "lwext4 0085 (docs/lwext4-changes.md) -- a goal outside [s_first_data_block, blocks_count) starts from s_first_data_block, as the kernel's ext4_mb_initialize_context does; a block outside the volume is never free to try; the bitmap search refuses an empty or inverted range",
+  "reproduce": "EXT4_FUZZ_MODE=rw build/bin/ext4_replay <img>   # under make tools CONFIG=debug: heap-buffer-overflow without 0085, clean with it",
+  "note_on_detection": "A read overflow, so it faults only under AddressSanitizer: the hostile suite's harness replay (ext4_replay) and write script catch it against the debug/ASan tools (make test-asan)."
+}

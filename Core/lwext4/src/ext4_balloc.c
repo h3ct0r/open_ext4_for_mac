@@ -442,6 +442,20 @@ int ext4_balloc_alloc_block(struct ext4_inode_ref *inode_ref,
 	int r;
 	struct ext4_sblock *sb = &inode_ref->fs->sb;
 
+	/*
+	 * A goal outside the volume is no goal at all. It is derived from
+	 * on-disk state -- an inode's last block, a group's first -- and a
+	 * hostile image put one past the end of a 32-block volume: idx_in_bg
+	 * then landed beyond blk_in_bg, and the bitmap search below ran from
+	 * its start past its end, off the bitmap buffer (the fuzz smoke's
+	 * crash-e3295da5, 2026-09-30). The kernel's rule, from
+	 * ext4_mb_initialize_context: outside [s_first_data_block,
+	 * blocks_count), start from s_first_data_block.
+	 */
+	if (goal < ext4_get32(sb, first_data_block) ||
+	    goal >= ext4_sb_get_blocks_cnt(sb))
+		goal = ext4_get32(sb, first_data_block);
+
 	/* Load block group number for goal and relative index */
 	uint32_t bg_id = ext4_balloc_get_bgid_of_block(sb, goal);
 	uint32_t idx_in_bg = ext4_fs_addr_to_idx_bg(sb, goal);
@@ -683,6 +697,15 @@ int ext4_balloc_try_alloc_block(struct ext4_inode_ref *inode_ref,
 
 	struct ext4_fs *fs = inode_ref->fs;
 	struct ext4_sblock *sb = &fs->sb;
+
+	/* A block outside the volume is never free to take (see the goal in
+	 * ext4_balloc_alloc_block): its group and bit would index past the
+	 * descriptor table and the bitmap. */
+	if (baddr < ext4_get32(sb, first_data_block) ||
+	    baddr >= ext4_sb_get_blocks_cnt(sb)) {
+		*free = false;
+		return EOK;
+	}
 
 	/* Compute indexes */
 	uint32_t block_group = ext4_balloc_get_bgid_of_block(sb, baddr);

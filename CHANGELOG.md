@@ -63,6 +63,11 @@ headings to be edited into one.
   then `git submodule deinit -f Core/lwext4` before pulling.
 
 ### Fixed
+- **Creating a file on a damaged volume could read past a buffer.** A
+  block-allocation goal taken from a corrupt volume could lie beyond its end,
+  and the search for a free block then ran off the bitmap. The goal is now
+  checked against the volume first, as Linux does (lwext4 0085; hostile
+  fixture 0025). Found by the fuzzer in CI.
 - **Mounting a volume through the device that just formatted it no longer
   crashes the core.** Formatting left the device bound to a block cache that
   lived on the formatter's stack, so the mount after it read memory that was
