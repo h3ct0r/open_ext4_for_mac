@@ -51,6 +51,11 @@ headings to be edited into one.
   then `git submodule deinit -f Core/lwext4` before pulling.
 
 ### Fixed
+- **Creating a file in a damaged directory could read past a buffer.** A
+  directory block whose entries ended a few bytes short of the block's end
+  sent the insert walk reading an entry length from outside the block. The
+  walk now checks that a whole entry header fits before reading it (lwext4
+  0081; hostile fixture 0023). Found by the nightly fuzzer.
 - **A volume mounted after another one could refuse every new file.** The
   driver reuses one slot for every mount it makes, and a volume inherited
   the previous volume's inode-allocator position: when the earlier volume was

@@ -613,9 +613,19 @@ int ext4_dir_try_insert_entry(struct ext4_sblock *sb,
 
 	/*
 	 * Walk through the block and check for invalid entries
-	 * or entries with free space for new entry
+	 * or entries with free space for new entry.
+	 *
+	 * The bound is the fixed header, not the next byte: the fields below
+	 * are read before anything can check them, so a record that ends four
+	 * bytes short of the block put the next "entry" at 1020 of 1024 and
+	 * rec_len was read from 1024 -- past the buffer. The check on rec_len
+	 * below bounds the entry it reads, never where the next one starts.
+	 * 0071 and 0072 bound their walks this way; this was the sibling
+	 * they left, and the nightly fuzzer found it (READ of size 2 in
+	 * ext4_dir_en_get_entry_len, 2026-09-22 and 09-30).
 	 */
-	while (start < stop) {
+	while ((uint8_t *)start + sizeof(struct ext4_fake_dir_entry) <=
+	       (uint8_t *)stop) {
 		uint32_t inode = ext4_dir_en_get_inode(start);
 		uint16_t rec_len = ext4_dir_en_get_entry_len(start);
 		uint8_t itype = ext4_dir_en_get_inode_type(sb, start);
@@ -644,6 +654,7 @@ int ext4_dir_try_insert_entry(struct ext4_sblock *sb,
 		 * block or fails the create, and e2fsck gets the volume.
 		 */
 		if (rec_len < sizeof(struct ext4_fake_dir_entry) ||
+		    (rec_len % 4) != 0 ||
 		    (uint8_t *)start + rec_len > (uint8_t *)stop)
 			return EIO;
 
@@ -696,6 +707,12 @@ int ext4_dir_try_insert_entry(struct ext4_sblock *sb,
 		/* Jump to the next entry */
 		start = (void *)((uint8_t *)start + rec_len);
 	}
+
+	/* Entries fill a block exactly. A tail too short to hold a header is
+	 * corruption, not free space -- the kernel's ext4_check_dir_entry
+	 * says the same, and rec_len must be a multiple of four there too. */
+	if (start != stop)
+		return EIO;
 
 	/* No free space found for new entry */
 	return ENOSPC;

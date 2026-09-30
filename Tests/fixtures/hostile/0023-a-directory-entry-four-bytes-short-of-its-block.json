@@ -1,0 +1,20 @@
+{
+  "id": "0023",
+  "slug": "a-directory-entry-four-bytes-short-of-its-block",
+  "found_by": "the nightly rw fuzzer, 2026-09-22 and 09-30 (crash-a036166614b9bc296b5e10f1a2b79ab2068960c0); that input only failed after thousands of others in the same process (lwext4 0080), so this fixture rebuilds the shape by hand",
+  "base": "mke2fs -t ext4 -b 1024 -I 128 -N 128 -O ^dir_index,^metadata_csum,^64bit,^has_journal on 2 MiB (fixed UUID and hash seed, E2FSPROGS_FAKE_TIME=1790000000), then debugfs writes empty files into / until its one linear directory block holds exactly 1020 bytes of entries",
+  "edits": [
+    {
+      "what": "every entry in the root directory's block re-packed at its true length, in order",
+      "note": "so no entry has slack a new name could use, and the entries end at offset 1020"
+    },
+    {
+      "what": "bytes 1020..1023 of the block set to inode number 11",
+      "note": "so the walk takes them for the start of an entry: its inode reads in bounds, its rec_len (offset 4) does not"
+    }
+  ],
+  "symptom": "A create in the root walked ext4_dir_try_insert_entry to offset 1020, read the inode there, then read rec_len from offset 1024 -- the first byte past the 1024-byte block buffer: AddressSanitizer heap-buffer-overflow READ of size 2 at ext4_dir.h:106 (ext4_dir_en_get_entry_len) from ext4_dir_try_insert_entry. The same signature the nightly reported. 0067 had bounded each entry's rec_len after reading it, never where the next entry starts.",
+  "fixed_by": "lwext4 0081 (docs/lwext4-changes.md) -- the insert walk bounds the fixed 8-byte header before reading it, requires rec_len to be a multiple of four, and calls a tail too short for a header corruption",
+  "reproduce": "printf 'create /a\\n' > s.txt; build/bin/ext4dump <img> script s.txt   # under make tools CONFIG=debug: heap-buffer-overflow without 0081, 'created inode 47' with it",
+  "note_on_detection": "A read overflow of two bytes, so it faults only under AddressSanitizer -- the hostile suite catches it against the debug/ASan tools (make test-asan), like 0012. The fuzz harness replay (ext4_replay) reaches it too: its read-write script's first create is in the root."
+}

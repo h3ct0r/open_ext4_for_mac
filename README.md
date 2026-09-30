@@ -173,7 +173,7 @@ whole chain unattended in about ten minutes on a recent Mac (longer the first ti
 | read, write, bounds | every read against `debugfs`; `e2fsck` after **every** write; overflow refusals and hostile geometry |
 | format, orphans, preallocation, revokes | `e2fsck`-clean across a geometry sweep; open-unlink recovery; journal revoke records |
 | crypto, error injection, checksums | AES-XTS against OpenSSL; a medium that answers EIO surfaces every failure; checksums that act |
-| fuzzing | an in-process libFuzzer harness with a structure-aware mutator, a mutation campaign, and 22 hostile fixtures — one per finding, each shown to fail before its fix |
+| fuzzing | an in-process libFuzzer harness with a structure-aware mutator, a mutation campaign, and 23 hostile fixtures — one per finding, each shown to fail before its fix |
 | crash consistency, reordered writes, differential | every cut of the write stream and a reordering medium, replayed by the Linux kernel; both directions byte-exact |
 | replay speed | a deep dirty journal must mount inside DiskArbitration's budget on a modelled USB stick |
 | mounted driver | a live FSKit mount: crash snapshots, kill recovery with a timed remount, encrypted volumes, newfs, user-visible events |
@@ -187,7 +187,7 @@ they stay local — recorded in [docs/HARDWARE.md](docs/HARDWARE.md).
 Testing has found more than twenty genuine bugs in lwext4 — one replayed
 stale journal records over live metadata, one hung the driver forever instead
 of failing. The project carries lwext4 as an in-tree fork with
-80 recorded changes, each with its reason in
+81 recorded changes, each with its reason in
 [docs/lwext4-changes.md](docs/lwext4-changes.md).
 
 ## Documentation
