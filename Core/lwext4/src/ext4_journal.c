@@ -1,4 +1,7 @@
 /*
+ * Modified by the open_ext4_for_mac contributors, 2026. What changed and
+ * why, change by change: docs/lwext4-changes.md in that project.
+ *
  * Copyright (c) 2015 Grzegorz Kostka (kostka.grzegorz@gmail.com)
  * Copyright (c) 2015 Kaho Ng (ngkaho1234@gmail.com)
  * All rights reserved.
