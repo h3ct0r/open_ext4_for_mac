@@ -930,8 +930,11 @@ fuzz-check:
 FUZZ_MERGE_MAX_LEN ?= 2097152
 # logs/ is created here, not assumed: CI restores only corpus/, and on a fresh
 # runner the redirect below failed for every nightly from 09-05 on -- hidden
-# by an `|| true`, while the unmerged corpus grew to 90 GB.
-fuzz-merge: fuzz-build  ## distil both corpora to their smallest covering set (units <= FUZZ_MERGE_MAX_LEN)
+# by an `|| true`, while the unmerged corpus grew to 90 GB. The seeds are a
+# prerequisite for the same reason: they are generated, not restored, and the
+# first nightly to get past the log directory died on "No such file or
+# directory: .fuzz/seeds" -- the merge runs before anything else builds them.
+fuzz-merge: fuzz-build $(FUZZ_DIR)/seeds/.stamp  ## distil both corpora to their smallest covering set (units <= FUZZ_MERGE_MAX_LEN)
 	@mkdir -p $(FUZZ_DIR)/logs
 	@for mode in ro rw; do \
 	  mkdir -p $(FUZZ_DIR)/corpus/$$mode; \
