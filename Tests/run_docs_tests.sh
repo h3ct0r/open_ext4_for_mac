@@ -188,6 +188,19 @@ n=$(check_citations "$WORK/ledger" | sed -n 's/^unknown: //p')
 [ "$n" = "1" ] && ok "self-check: a citation of an unknown change is caught" \
                || bad "self-check: a citation of an unknown change is caught" "counted $n"
 
+# And the history: every commit that changed lwext4's code since the import is
+# a numbered change with its row, or an `lwext4 vendor:` one. What the patch
+# series enforced by construction, an in-tree fork has to check. A shallow
+# clone has no history to read, and says so rather than passing.
+out=$(bash "$ROOT/scripts/check_lwext4_ledger.sh" 2>&1); rc=$?
+case "$rc" in
+  0)  ok "every lwext4 code change since the import is numbered and in the ledger" ;;
+  77) echo "  skip  $out" ;;
+  *)  echo "$out" | sed '$d'
+      bad "every lwext4 code change since the import is numbered and in the ledger" \
+          "$(echo "$out" | tail -1)" ;;
+esac
+
 # Upstream's licence terms travel with its files: the BSD-3 ones require the
 # notice to be kept, and GPL-2.0 requires it too. A reformat or a careless
 # edit that drops a header is a licence problem, not a style one.
