@@ -63,6 +63,11 @@ headings to be edited into one.
   then `git submodule deinit -f Core/lwext4` before pulling.
 
 ### Fixed
+- **Mounting a volume through the device that just formatted it no longer
+  crashes the core.** Formatting left the device bound to a block cache that
+  lived on the formatter's stack, so the mount after it read memory that was
+  gone. The extension was never affected — it reopens the device after a
+  format — but the core's own contract says the sequence works (lwext4 0084).
 - **A directory block that fails its checksum is no longer rewritten.**
   Writing to it used to stamp a fresh checksum over the damage, which then
   looked valid to e2fsck. Creating, renaming into or deleting from such a

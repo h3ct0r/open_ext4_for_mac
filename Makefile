@@ -410,8 +410,9 @@ $(BUILD)/bin/ext4dump: tools/ext4dump.c $(CORE_TEST_LIB) $(BUILD)/.build-id $(BU
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(CFLAGS) -DEXT4B_TEST_HOOKS=1 $< $(CORE_TEST_LIB) $(CORE_LDLIBS) -o $@
 
-# Two volumes mounted one after the other in one process, as the extension
-# does: the second must start clean (lwext4 0080). In-memory, no fixtures.
+# Volumes mounted one after the other in one process, as the extension does:
+# each must start clean (lwext4 0080), and a device must mount what it has
+# just formatted (lwext4 0084). In-memory, no fixtures.
 $(BUILD)/bin/mount_sequence: tools/mount_sequence.c $(CORE_TEST_LIB) $(BUILD)/.tools-config
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(CFLAGS) -DEXT4B_TEST_HOOKS=1 $< $(CORE_TEST_LIB) $(CORE_LDLIBS) -o $@

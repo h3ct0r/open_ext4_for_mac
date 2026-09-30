@@ -1080,7 +1080,8 @@ int ext4b_format(ext4b_device *dev, const ext4b_format_options *opts)
      * ext4_mkfs() drives the block device itself -- it calls ext4_block_init(),
      * binds its own bcache, and tears both down again -- so it must be handed a
      * device that is not already open. That is exactly the state a freshly
-     * created ext4b_device is in.
+     * created ext4b_device is in, and the state mkfs hands it back in
+     * (lwext4 0084), so the same device can mount what it has just formatted.
      */
     struct ext4_fs fs;
     memset(&fs, 0, sizeof(fs));

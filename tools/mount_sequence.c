@@ -1,5 +1,5 @@
 /*
- * Two volumes, one process: does the second start clean?
+ * Volumes in sequence, one process: does each start clean?
  *
  *   build/bin/mount_sequence
  *
@@ -15,6 +15,15 @@
  * group), freshly formatted, must then take one. Between the two, lwext4's
  * global tables must be empty -- no device, no mount point, nothing left in
  * an unmounted slot.
+ *
+ * The device is state too. C is formatted, mounted, written, unmounted and
+ * mounted again through ONE device object, which ext4b_format's contract --
+ * the volume left "consistent and unmounted" -- promises is fine. lwext4's
+ * mkfs bound a block cache from its own stack frame to that device and
+ * returned without unbinding it, so the mount after it walked a cache that
+ * no longer existed (lwext4 0084). The extension never met it because its
+ * format path closes the device it formatted through, and A and B do the
+ * same.
  *
  * In-memory images, no fixtures, no Homebrew. Links the test core for the
  * table accounting. Prints ok/FAIL lines; exits 0 only when all pass.
@@ -44,6 +53,19 @@ static int mem_write(void *c, const void *b, uint64_t off, size_t n)
 
 static int mem_flush(void *c) { (void)c; return 0; }
 
+/* A pointer into a stack frame that has returned reads whatever ran there
+ * since, so the symptom depends on the code around it: here the release
+ * build faults on C's mount and ASan's default mode reports an overflow in
+ * main's frame, while a smaller program making the same calls passed under
+ * ASan without a word. This has ASan name the read for what it is every
+ * time -- a stack-use-after-return into ext4_mkfs's frame -- from the binary
+ * itself, not an ASAN_OPTIONS a caller might not set. Builds without ASan
+ * never call it. */
+const char *__asan_default_options(void)
+{
+    return "detect_stack_use_after_return=1";
+}
+
 static int failures;
 
 static void check(int cond, const char *what, const char *detail)
@@ -62,10 +84,10 @@ static ext4b_device *attach(memdev *m)
                                mem_read, mem_write, mem_flush);
 }
 
-/* Format through one device and mount through another, as the extension
- * does: its format path closes the device it formatted through. */
-static ext4b_device *make_volume(memdev *m, size_t bytes, uint32_t inodes,
-                                 uint8_t uuid_seed)
+/* A fresh in-memory volume, formatted; returns the device the format went
+ * through. */
+static ext4b_device *format_volume(memdev *m, size_t bytes, uint32_t inodes,
+                                   uint8_t uuid_seed)
 {
     m->len = bytes;
     m->base = calloc(1, bytes);
@@ -81,7 +103,15 @@ static ext4b_device *make_volume(memdev *m, size_t bytes, uint32_t inodes,
 
     ext4b_device *d = attach(m);
     if (!d || ext4b_format(d, &o) != 0) { fprintf(stderr, "format failed\n"); exit(2); }
-    ext4b_device_destroy(d);
+    return d;
+}
+
+/* Format through one device and mount through another, as the extension
+ * does: its format path closes the device it formatted through. */
+static ext4b_device *make_volume(memdev *m, size_t bytes, uint32_t inodes,
+                                 uint8_t uuid_seed)
+{
+    ext4b_device_destroy(format_volume(m, bytes, inodes, uuid_seed));
     return attach(m);
 }
 
@@ -100,7 +130,11 @@ static void require_clean_tables(const char *when)
 int main(void)
 {
     char detail[160];
-    memdev a, b;
+    memdev a, b, c;
+
+    /* A crash is one of the outcomes here, and a pipe's buffer dies with the
+     * process: line-buffer, so the suite sees how far it got. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
 
     printf("two volumes, one process\n");
 
@@ -146,6 +180,41 @@ int main(void)
     ext4b_device_destroy(db);
     free(b.base);
     require_clean_tables("after the second");
+
+    printf("\none device, formatted and then mounted\n");
+
+    ext4b_device *dc = format_volume(&c, 8u << 20, 0, 0x30);
+    r = ext4b_mount(dc, false);
+    snprintf(detail, sizeof detail, "ext4b_mount returned %d", r);
+    check(r == 0, "the device a volume was formatted through mounts it read-write",
+          detail);
+
+    uint32_t made_ino = 0;
+    r = ext4b_create(dc, 2, "y", 1, EXT4B_TYPE_FILE, 0644, 0, 0, &made_ino);
+    snprintf(detail, sizeof detail, "ext4b_create returned %d", r);
+    check(r == 0 && made_ino != 0, "and takes a file", detail);
+
+    r = ext4b_unmount(dc);
+    snprintf(detail, sizeof detail, "ext4b_unmount returned %d", r);
+    check(r == 0, "and unmounts", detail);
+
+    r = ext4b_mount(dc, false);
+    snprintf(detail, sizeof detail, "ext4b_mount returned %d", r);
+    check(r == 0, "and mounts again, still through the same device", detail);
+
+    uint32_t found = 0;
+    ext4b_item_type type;
+    r = ext4b_lookup(dc, 2, "y", 1, &found, &type);
+    snprintf(detail, sizeof detail, "ext4b_lookup returned %d, inode %u; "
+             "the create gave inode %u", r, found, made_ino);
+    check(r == 0 && found == made_ino, "with the file still in it", detail);
+
+    r = ext4b_unmount(dc);
+    snprintf(detail, sizeof detail, "ext4b_unmount returned %d", r);
+    check(r == 0, "and unmounts", detail);
+    ext4b_device_destroy(dc);
+    free(c.base);
+    require_clean_tables("after the third");
 
     printf("\n%s\n", failures ? "FAILED" : "passed");
     return failures ? 1 : 0;

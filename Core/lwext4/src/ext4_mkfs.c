@@ -1143,6 +1143,19 @@ int ext4_mkfs(struct ext4_fs *fs, struct ext4_blockdev *bd,
 	block_fini:
 	ext4_block_fini(bd);
 
+	/* The device is the caller's and outlives this call; the cache lived
+	 * in this frame and does not. Hand the device back bound to nothing,
+	 * the state ext4_mount expects of a device it has not mounted. Left
+	 * bound, the next mount of the same device reached ext4_sb_write with
+	 * lg_bsize still set -- its update of a cached superblock is skipped
+	 * only while that is zero -- and walked the cache in this returned
+	 * frame. bd->bc was never NULL, so no NULL test could have caught it.
+	 * bd->fs is the caller's fs, finished above. */
+	bd->bc = NULL;
+	bd->fs = NULL;
+	bd->lg_bsize = 0;
+	bd->lg_bcnt = 0;
+
 	return r;
 }
 

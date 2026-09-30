@@ -219,17 +219,22 @@ fi
 
 # Two volumes, one process, as the extension mounts them: the second must
 # start clean. The same leak, shown as the user met it -- an empty volume
-# that answers ENOSPC to its first file. tools/mount_sequence.c.
+# that answers ENOSPC to its first file. Then a third, formatted and mounted
+# through one device, which segfaulted until lwext4 0084: mkfs left the
+# device bound to a block cache in its own returned stack frame.
+# tools/mount_sequence.c.
 SEQ="$ROOT/build/bin/mount_sequence"
 if [ ! -x "$SEQ" ]; then
-  bad "a second volume in the same process starts clean" "build/bin/mount_sequence is not built; make tools"
+  bad "volumes mounted in sequence start clean" "build/bin/mount_sequence is not built; make tools"
 else
   out=$(run_deadline 60 "$SEQ" 2>&1); rc=$?
   if [ "$rc" -eq 0 ] && ! grep -qE 'AddressSanitizer|runtime error:' <<<"$out"; then
-    ok "a second volume in the same process starts clean (mount_sequence)"
+    ok "volumes mounted in sequence start clean, and a format's own device mounts it (mount_sequence)"
   else
-    bad "a second volume in the same process starts clean (mount_sequence)" \
-        "$(grep -m1 -E 'FAIL|AddressSanitizer|runtime error:' <<<"$out" | sed 's/^ *//') -- rc=$rc"
+    # A crash prints no FAIL line; the last line printed says where it died.
+    why=$(grep -m1 -E 'FAIL|AddressSanitizer|runtime error:' <<<"$out" | sed 's/^ *//')
+    bad "volumes mounted in sequence start clean, and a format's own device mounts it (mount_sequence)" \
+        "${why:-died after: $(tail -1 <<<"$out" | sed 's/^ *//')} -- rc=$rc"
     grep -E '^ +(FAIL|  )' <<<"$out" | head -6
   fi
 fi

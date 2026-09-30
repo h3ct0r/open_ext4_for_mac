@@ -187,7 +187,7 @@ they stay local — recorded in [docs/HARDWARE.md](docs/HARDWARE.md).
 Testing has found more than twenty genuine bugs in lwext4 — one replayed
 stale journal records over live metadata, one hung the driver forever instead
 of failing. The project carries lwext4 as an in-tree fork with
-83 recorded changes, each with its reason in
+84 recorded changes, each with its reason in
 [docs/lwext4-changes.md](docs/lwext4-changes.md).
 
 ## Documentation
