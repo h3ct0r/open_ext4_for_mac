@@ -5,6 +5,14 @@
 # project, only the Command Line Tools. Xcode is needed only if you prefer its
 # signing workflow; `make sign` uses codesign directly.
 
+# A recipe that fails, or is killed, deletes the target it was writing, so
+# the next make rebuilds it instead of trusting a half-written file. Without
+# this, a swiftc killed mid-link (SIGKILL under memory pressure, 2026-09-30)
+# left an appex directory with no executable and no Info.plist, the next
+# `make app` called it up to date and exited 0, and `make install` would have
+# shipped an app whose extension was empty.
+.DELETE_ON_ERROR:
+
 # macOS is the product; Linux is the oracle. See the TARGET_FLAG block below.
 HOST_OS       := $(shell uname -s)
 
@@ -941,9 +949,12 @@ SWIFTFLAGS += $(EXTRA_SWIFTFLAGS)
 typecheck: core  ## swiftc -typecheck the extension sources
 	swiftc -typecheck $(SWIFT_SRCS) $(SWIFTFLAGS)
 
-extension: $(APPEX)
+extension: $(APPEX)/Contents/Info.plist
 
-$(APPEX): $(SWIFT_SRCS) $(CORE_LIB) Extension/Info.plist $(BUILD)/.build-id
+# The target is the appex's Info.plist, written last and moved into place in
+# one step -- not the appex directory, which exists from the mkdir on and so
+# made an interrupted build look finished (see .DELETE_ON_ERROR above).
+$(APPEX)/Contents/Info.plist: $(SWIFT_SRCS) $(CORE_LIB) Extension/Info.plist $(BUILD)/.build-id
 	@if [ "$(CONFIG)" != "release" ] && [ -z "$(ALLOW_DEBUG_APPEX)" ]; then \
 	  echo "refusing to build the appex against a $(CONFIG) core."; \
 	  echo "the shipping extension must be a release build -- a debug core"; \
@@ -956,10 +967,11 @@ $(APPEX): $(SWIFT_SRCS) $(CORE_LIB) Extension/Info.plist $(BUILD)/.build-id
 	@mkdir -p "$(APPEX)/Contents/MacOS"
 	swiftc $(SWIFT_SRCS) $(SWIFTFLAGS) $(CORE_LIB) \
 	    -o "$(APPEX)/Contents/MacOS/$(EXT_NAME)"
-	@cp Extension/Info.plist "$(APPEX)/Contents/Info.plist"
-	@plutil -replace Ext4BuildID -string "$(BUILD_ID)" "$(APPEX)/Contents/Info.plist"
-	@plutil -replace CFBundleShortVersionString -string "$(VERSION)" "$(APPEX)/Contents/Info.plist"
-	@plutil -replace CFBundleVersion -string "$(BUILD_NUMBER)" "$(APPEX)/Contents/Info.plist"
+	@cp Extension/Info.plist "$@.tmp"
+	@plutil -replace Ext4BuildID -string "$(BUILD_ID)" "$@.tmp"
+	@plutil -replace CFBundleShortVersionString -string "$(VERSION)" "$@.tmp"
+	@plutil -replace CFBundleVersion -string "$(BUILD_NUMBER)" "$@.tmp"
+	@mv "$@.tmp" "$@"
 	@echo "built $(APPEX)"
 
 # The container app exists only to host the extension: macOS discovers FSKit
@@ -1018,11 +1030,12 @@ FORCE:
 
 $(BUILD)/$(APP_NAME).app/Contents/Info.plist: App/Info.plist $(BUILD)/.build-id
 	@mkdir -p $(dir $@)
-	@cp $< $@
-	@plutil -replace Ext4BuildID -string "$(BUILD_ID)" $@
-	@plutil -replace CFBundleShortVersionString -string "$(VERSION)" $@
-	@plutil -replace CFBundleVersion -string "$(BUILD_NUMBER)" $@
-	@plutil -replace CFBundleIconFile -string "Ext4Mac" $@
+	@cp $< $@.tmp
+	@plutil -replace Ext4BuildID -string "$(BUILD_ID)" $@.tmp
+	@plutil -replace CFBundleShortVersionString -string "$(VERSION)" $@.tmp
+	@plutil -replace CFBundleVersion -string "$(BUILD_NUMBER)" $@.tmp
+	@plutil -replace CFBundleIconFile -string "Ext4Mac" $@.tmp
+	@mv $@.tmp $@
 
 # The app links the core so it can read a LUKS header and run the key
 # derivation itself: a gigabyte of argon2id belongs in an ordinary application,
