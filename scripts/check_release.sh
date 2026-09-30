@@ -35,6 +35,14 @@ else
   bad "the extension is inside the app" "no $APPEX"
 fi
 
+# The licences ship inside the app, byte for byte what the tree says: the GPL
+# and lwext4's BSD clause 2 both require the notices with the binary, and a
+# stale copy is a wrong notice.
+for f in LICENSE:LICENSE.txt THIRD_PARTY_NOTICES.md:THIRD_PARTY_NOTICES.txt; do
+  src="$ROOT/${f%%:*}"; dst="$APP/Contents/Resources/${f##*:}"
+  cmp -s "$src" "$dst" && ok "the app carries ${f##*:}, current" \
+                       || bad "the app carries ${f##*:}, current" "missing or different from ${f%%:*}"
+done
 bn=$(plutil -extract CFBundleVersion raw -o - "$APP/Contents/Info.plist" 2>/dev/null)
 [ -n "$bn" ] && [ "$bn" != "0" ] && ok "the build number is stamped ($bn)" \
                                   || bad "the build number is stamped" "CFBundleVersion is '${bn:-?}' -- a placeholder"

@@ -222,6 +222,48 @@ sed -e '/Copyright/d' "$ROOT/Core/lwext4/src/ext4.c" > "$WORK/lwext4/src/ext4.c"
   && ok "self-check: a source without its header is caught" \
   || bad "self-check: a source without its header is caught"
 
+# ---------------------------------------------------- third-party notices --
+# THIRD_PARTY_NOTICES.md is what the app and the DMG carry for the code they
+# contain but this project did not write: BSD clause 2, in every lwext4 BSD
+# licence, requires the notices with the binary. So every copyright line in
+# that code has to be in it -- a new lwext4 file with a new holder, or a new
+# Argon2 release, would otherwise ship without its notice and nothing would say.
+echo ""
+echo "third-party notices"
+echo ""
+check_notices() {  # check_notices <tree-root> <notices-file> -> prints "missing: N"
+  python3 - "$1" "$2" <<'PY'
+import glob, os, re, sys
+root, notices = sys.argv[1], sys.argv[2]
+norm = lambda t: re.sub(r'\s+', ' ', t).strip()
+text = norm(open(notices).read())
+files = []
+for pat in ('Core/lwext4/src/*.c', 'Core/lwext4/include/*.h', 'Core/lwext4/include/misc/*.h',
+            'Core/crypto/argon2/LICENSE', 'Core/crypto/argon2/*.[ch]', 'Core/crypto/argon2/blake2/*.[ch]'):
+    files += sorted(glob.glob(os.path.join(root, pat)))
+seen, missing = set(), 0
+for f in files:
+    # A notice is "Copyright", an optional (c), then a year -- not the phrase
+    # "Copyright and Related Rights" that CC0's own legal text is full of.
+    for m in re.finditer(r'Copyright (?:\([cC]\) )?[0-9][^\n]*', open(f, errors='replace').read()):
+        line = norm(re.sub(r'[\s*/]+$', '', m.group(0)))
+        if line in seen: continue
+        seen.add(line)
+        if line not in text:
+            missing += 1
+            print('  not in the notices: %s (%s)' % (line, os.path.relpath(f, root)))
+print('missing: %d' % missing)
+PY
+}
+n=$(check_notices "$ROOT" "$ROOT/THIRD_PARTY_NOTICES.md" | tee "$WORK/notices.txt" | sed -n 's/^missing: //p')
+grep '^  not in' "$WORK/notices.txt" | head -5
+[ "$n" = "0" ] && ok "THIRD_PARTY_NOTICES.md names every copyright in the third-party code" \
+               || bad "THIRD_PARTY_NOTICES.md names every copyright in the third-party code" "$n missing"
+grep -v "Niels Provos" "$ROOT/THIRD_PARTY_NOTICES.md" > "$WORK/notices-short.md"
+n=$(check_notices "$ROOT" "$WORK/notices-short.md" | sed -n 's/^missing: //p')
+[ "$n" = "1" ] && ok "self-check: a notice with one holder removed is caught" \
+               || bad "self-check: a notice with one holder removed is caught" "counted $n"
+
 # ---------------------------------------------------------- make help ----
 echo ""
 echo "make help"

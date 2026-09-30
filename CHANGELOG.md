@@ -10,6 +10,11 @@ headings to be edited into one.
 ## [Unreleased]
 
 ### Added
+- **The licences travel with the app.** `LICENSE` and a new
+  `THIRD_PARTY_NOTICES.md` -- every copyright notice and licence of the code
+  this project did not write: lwext4's BSD and GPL files, the RSA MD4 notice,
+  Argon2 and BLAKE2 -- ship inside the app's Resources and in the DMG. Changes
+  this project makes to lwext4 keep each file's own licence.
 - **A Setup Assistant.** The first launch now opens one window that walks the
   whole install: approve the extension, start at login, allow notifications,
   add ext2/3/4 to Disk Utility with the standard administrator prompt, mount a

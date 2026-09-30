@@ -1017,7 +1017,18 @@ $(APP_RESOURCES)/ext4.fs: $(shell find Packaging/ext4.fs -type f 2>/dev/null)
 	@rm -rf $@
 	@cp -R Packaging/ext4.fs $@
 
-app: extension $(BUILD)/$(APP_NAME).app/Contents/Info.plist $(BUILD)/$(APP_NAME).app/Contents/MacOS/$(APP_NAME) $(SAMPLE_IMG) $(APP_RESOURCES)/ext4.fs $(APP_RESOURCES)/Ext4Mac.icns  ## build Ext4Mac.app with the FSKit extension inside
+# The licence and the third-party notices travel with the binary: the GPL
+# asks for it, and so does clause 2 of every BSD licence in lwext4. Text, in
+# Resources, where the About window and a curious user can find them.
+$(APP_RESOURCES)/LICENSE.txt: LICENSE
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+$(APP_RESOURCES)/THIRD_PARTY_NOTICES.txt: THIRD_PARTY_NOTICES.md
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+app: extension $(BUILD)/$(APP_NAME).app/Contents/Info.plist $(BUILD)/$(APP_NAME).app/Contents/MacOS/$(APP_NAME) $(SAMPLE_IMG) $(APP_RESOURCES)/ext4.fs $(APP_RESOURCES)/Ext4Mac.icns $(APP_RESOURCES)/LICENSE.txt $(APP_RESOURCES)/THIRD_PARTY_NOTICES.txt  ## build Ext4Mac.app with the FSKit extension inside
 
 # Stamping the plists has to notice a new commit even when no source file
 # changed, or the bundle keeps claiming the revision it was first built at --

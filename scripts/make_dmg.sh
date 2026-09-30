@@ -32,8 +32,10 @@ trap 'rm -rf "$STAGE"' EXIT
 # which a plain cp can strip.
 ditto "$APP" "$STAGE/$(basename "$APP")"
 cp "$GUIDE" "$STAGE/First-Run Guide.txt"
-# GPL distribution carries its license with the binary, sold or given away.
+# GPL distribution carries its license with the binary, sold or given away,
+# and every BSD licence in lwext4 asks for its notices the same way.
 cp "$ROOT/LICENSE" "$STAGE/LICENSE.txt"
+cp "$ROOT/THIRD_PARTY_NOTICES.md" "$STAGE/THIRD_PARTY_NOTICES.txt"
 ln -s /Applications "$STAGE/Applications"
 
 rm -f "$OUT"

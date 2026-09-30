@@ -12,8 +12,12 @@ upstream's lwext4. Bugs in it are this project's to fix, here.
 - **Licences.** Upstream's [LICENSE](LICENSE) is kept verbatim. Every file keeps
   its own header: 47 files are BSD-3-Clause, and `src/ext4_extent.c` and
   `src/ext4_xattr.c` are GPL-2.0-or-later. Both are compatible with this
-  project's GPL-3.0-or-later. A binary distribution must carry the BSD
-  copyright notices and disclaimer.
+  project's GPL-3.0-or-later. Changes made here are offered under the licence
+  of the file they are made to: BSD-3-Clause for the BSD files,
+  GPL-2.0-or-later for the two GPL ones -- so a fix stays reusable by any other
+  lwext4. A binary distribution must carry the BSD notices and disclaimers;
+  [THIRD_PARTY_NOTICES.md](../../THIRD_PARTY_NOTICES.md) is that text, and
+  the app and the DMG ship it.
 - **Taking a fix from upstream or another fork.** Fetch it
   (`git fetch https://github.com/gkostka/lwext4 pull/N/head:refs/lwext4-pr/N`),
   apply its diff against the base with

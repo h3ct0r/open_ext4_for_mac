@@ -214,4 +214,7 @@ findings go through [SECURITY.md](SECURITY.md) rather than a public issue.
 **GPL-3.0-or-later.** This project carries a fork of [lwext4](https://github.com/gkostka/lwext4)
 ([Core/lwext4/FORK.md](Core/lwext4/FORK.md)), whose `ext4_extent.c` and `ext4_xattr.c` are GPL-2.0-or-later and whose
 remainder is BSD-3-Clause; the combined work is distributed under
-GPL-3.0-or-later. See [LICENSE](LICENSE).
+GPL-3.0-or-later. Changes this project makes to lwext4 keep each file's own
+licence. See [LICENSE](LICENSE), and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for every notice the app and
+the DMG carry.
