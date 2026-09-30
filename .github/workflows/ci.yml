@@ -19,12 +19,14 @@ on:
   pull_request:
   workflow_dispatch:
 
-# A second push to the same branch makes the first run's answer irrelevant,
-# and macOS minutes are the scarce resource here (billed 10x on private
-# repositories). Cancel the older run rather than paying for both.
+# On a pull request, a second push makes the first run's answer irrelevant:
+# cancel it. On master every commit is a candidate for install -- the owner
+# builds from master -- and cancelling meant most master commits never got a
+# verdict: lwext4 0080 to 0083 were pushed minutes apart on 2026-09-30 and only
+# the last one was ever judged. Master runs queue instead.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
