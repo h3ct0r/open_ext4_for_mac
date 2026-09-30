@@ -9,17 +9,32 @@ headings to be edited into one.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-30
+
+A first run that sets itself up, Disk Utility erasing a physical disk as
+ext4, and six fixes in the filesystem core, most of them for damaged volumes.
+The core is now this project's own fork of lwext4, kept in this repository.
+
+**Upgrading from 0.1.0.** macOS 26 is now required. Replace the app and open
+it; expect macOS to ask for the extension's approval again, and the Setup
+Assistant opens at that step by itself. If you added ext4 to Disk Utility
+with 0.1.0, the assistant offers "Update Disk Utility Support…": the old copy
+cannot erase a physical disk.
+
 ### Added
 - **The licences travel with the app.** `LICENSE` and a new
   `THIRD_PARTY_NOTICES.md` -- every copyright notice and licence of the code
   this project did not write: lwext4's BSD and GPL files, the RSA MD4 notice,
-  Argon2 and BLAKE2 -- ship inside the app's Resources and in the DMG. Changes
-  this project makes to lwext4 keep each file's own licence.
+  Argon2 and BLAKE2 -- ship inside the app's Resources and in the DMG, and the
+  About panel names the app's licence. Changes this project makes to lwext4
+  keep each file's own licence.
 - **A Setup Assistant.** The first launch now opens one window that walks the
   whole install: approve the extension, start at login, allow notifications,
   add ext2/3/4 to Disk Utility with the standard administrator prompt, mount a
   sample ext4 volume that ships inside the app, and a short tour of the
-  menu-bar icon. Reopen it from the menu, or with `Ext4Mac setup`.
+  menu-bar icon. Reopen it from the menu, or with `Ext4Mac setup`. While it
+  is open the app has a Dock tile and a place in ⌘-Tab, so a window you
+  clicked away from can be found again.
 - `Ext4Mac setup --check [--json]` prints the same checklist without a window
   and exits 1 when something is missing, so a script can ask.
 - `Ext4Mac selftest --mount` mounts the bundled sample volume, reads a file
@@ -39,6 +54,10 @@ headings to be edited into one.
   through a real FSKit mount must read back byte for byte. It is the suite
   that found the preallocated-tail corruption, and until now it ran only by
   hand.
+- A failed nightly fuzz run opens a GitHub issue, and the next green one
+  closes it. The campaign's corpus is distilled after every run and kept
+  within a size budget, instead of growing until it filled the project's
+  cache.
 - The first run is no longer three NSAlerts. They fired before the menu-bar
   icon existed, gave "registered but not approved" and "not registered at all"
   the same sentence, and stopped watching for the approval after two minutes
@@ -58,7 +77,7 @@ headings to be edited into one.
   shows the difference from upstream. `make patch`, `check-patches`,
   `repatch`, `unpatch` and `ALLOW_UNAPPLIED_PATCHES` are gone; a clone needs
   no `git submodule` step, and a GitHub source archive is now the complete
-  source. Build numbers (the commit count) jump by about 82 here.
+  source. Build numbers (the commit count) jump by 86 here.
   Upgrading an existing checkout: `make check-patches` must be green first,
   then `git submodule deinit -f Core/lwext4` before pulling.
 
@@ -100,13 +119,17 @@ headings to be edited into one.
   wrapper re-dispatched the work to the logged-in user, who cannot open a
   device node that belongs to root, so the open failed before this driver was
   asked. The wrapper now keeps the privileges macOS gives it. First Aid on an
-  ext4 volume had the same bug and is fixed with it. Reinstall the Disk
-  Utility integration to pick this up — from the Setup Assistant, or
-  `sudo make install-diskutil`.
+  ext4 volume had the same bug and is fixed with it. A copy installed before
+  this fix is recognised: the Setup Assistant warns that it is outdated and
+  offers to update it, and `sudo make install-diskutil` does the same from a
+  checkout.
 - The app no longer records the Setup Assistant as completed just because the
   extension is enabled. That key was written at launch for every working
   install, so the app believed people had finished a window they had never
   opened — and closing it halfway through therefore asked nothing.
+- Building from source: an interrupted build no longer leaves an empty
+  extension that `make` then treats as finished, and changing the compiler
+  flags rebuilds everything they compile.
 
 ## [0.1.0] - 2026-09-05
 
