@@ -151,6 +151,35 @@ out=$("$DUMP" "$IMG" cat "$first" 2>&1); rc=$?
 [ $rc -eq 0 ] && ok "while a name before the damage is still found" \
               || bad "while a name before the damage is still found" "rc=$rc: $(grep -vm1 'core:' <<<"$out")"
 
+# --- a directory block that fails its checksum is not written through -----
+# Hostile fixture 0024: /lin's one block and a leaf of the indexed /idx each
+# have one name byte changed and their checksums left stale. Every write path
+# used to warn, modify the block and stamp a fresh checksum over it -- so the
+# damage verified and e2fsck lost its evidence. Writes into those blocks now
+# fail EIO; reads, and writes to the good leaves of the same directory, go on
+# (lwext4 0083, the policy 0060 set for bitmaps).
+echo "a directory block that fails its checksum refuses writes"
+IMG="$WORK/dir-bad-csum.img"
+gunzip -c "$ROOT/Tests/fixtures/hostile/0024-directory-blocks-that-fail-their-checksums.img.gz" > "$IMG"
+for op in "create /lin/new" "rm /lin/l_b" "create /idx/n001" "rm /idx/i_004"; do
+  # shellcheck disable=SC2086
+  out=$("$DUMP" "$IMG" $op 2>&1); rc=$?
+  [ $rc -ne 0 ] && grep -qiE "I/O error|input/output" <<<"$out" \
+    && ok "$op fails with EIO" \
+    || bad "$op fails with EIO" "rc=$rc: $(grep -vm1 'core:' <<<"$out")"
+done
+"$DUMP" "$IMG" cat /lin/l_b >/dev/null 2>&1 && "$DUMP" "$IMG" cat /idx/i_004 >/dev/null 2>&1 \
+  && ok "reads from both still go ahead" \
+  || bad "reads from both still go ahead" "cat /lin/l_b or /idx/i_004 failed"
+fsck_out=$(e2fsck -fn "$IMG" 2>&1)
+[ "$(grep -c 'passes checks but fails checksum' <<<"$fsck_out")" = "2" ] \
+  && ok "and e2fsck still sees both failures afterwards (nothing re-stamped)" \
+  || bad "e2fsck still sees both failures afterwards" "$(grep -m2 -iE 'checksum|clean' <<<"$fsck_out" | tr '\n' ' ')"
+# The good leaves of the same directory are not collateral.
+"$DUMP" "$IMG" rm /idx/i_000 >/dev/null 2>&1 && "$DUMP" "$IMG" create /idx/zz_new_in_good >/dev/null 2>&1 \
+  && ok "while the good leaves of /idx still take a removal and a create" \
+  || bad "the good leaves of /idx still take a removal and a create" "rm /idx/i_000 or create /idx/zz_new_in_good failed"
+
 # --- oversize directory-entry name is rejected, not truncated ---------------
 echo
 echo "over-long names"

@@ -1357,6 +1357,12 @@ int ext4_dir_dx_add_entry(struct ext4_inode_ref *parent,
 			 "Block: %" PRIu32"\n",
 			 parent->index,
 			 (uint32_t)0);
+		/* Refuse rather than write through an index that does not
+		 * verify; see ext4_dir_add_entry. EIO, not BAD_DX_DIR: that
+		 * would clear the index flag and fall back to a linear insert,
+		 * a second write to a directory that failed its check. */
+		ext4_block_set(fs->bdev, &root_blk);
+		return EIO;
 	}
 
 	/* Initialize hinfo structure (mainly compute hash) */
@@ -1381,6 +1387,15 @@ int ext4_dir_dx_add_entry(struct ext4_inode_ref *parent,
 		goto release_index;
 	}
 
+	/* Every index node on the path may be rewritten by a split below; the
+	 * walk that found them only warned on a bad checksum. */
+	for (dx_it = dx_blks; dx_it <= dx_blk; ++dx_it) {
+		if (!ext4_dir_dx_csum_verify(parent, (void *)dx_it->b.data)) {
+			r = EIO;
+			goto release_index;
+		}
+	}
+
 	/* Try to insert to existing data block */
 	uint32_t leaf_block_idx = ext4_dir_dx_entry_get_block(dx_blk->position);
 	ext4_fsblk_t leaf_block_addr;
@@ -1388,6 +1403,22 @@ int ext4_dir_dx_add_entry(struct ext4_inode_ref *parent,
 						&leaf_block_addr, false);
 	if (r != EOK)
 		goto release_index;
+
+	/* And the leaf, before anything on the path is split: a split writes
+	 * index blocks, and a leaf that fails its checksum has to stop the
+	 * insert before its first write, not after it. */
+	{
+		struct ext4_block leaf;
+		r = ext4_trans_block_get(fs->bdev, &leaf, leaf_block_addr);
+		if (r != EOK)
+			goto release_index;
+		bool leaf_ok = ext4_dir_csum_verify(parent, (void *)leaf.data);
+		ext4_block_set(fs->bdev, &leaf);
+		if (!leaf_ok) {
+			r = EIO;
+			goto release_index;
+		}
+	}
 
 	/*
 	 * Check if there is needed to split index node
@@ -1409,6 +1440,9 @@ int ext4_dir_dx_add_entry(struct ext4_inode_ref *parent,
 				"Block: %" PRIu32"\n",
 				parent->index,
 				leaf_block_idx);
+		/* Refuse rather than write through it; see ext4_dir_add_entry. */
+		r = EIO;
+		goto release_target_index;
 	}
 
 	/* Check if insert operation passed */

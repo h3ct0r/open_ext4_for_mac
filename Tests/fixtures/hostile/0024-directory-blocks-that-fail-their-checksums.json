@@ -1,0 +1,20 @@
+{
+  "id": "0024",
+  "slug": "directory-blocks-that-fail-their-checksums",
+  "found_by": "the pre-hardware audit (finding C3, confirmed by its verifier): every directory write path logged a checksum failure and then re-stamped the block",
+  "base": "mke2fs -t ext4 -b 1024 -I 256 -N 512 -O metadata_csum,dir_index,^64bit,^has_journal on 4 MiB (fixed UUID and hash seed 2a2a2a2a-0024-4024-8024-2a2a2a2a2a2a, E2FSPROGS_FAKE_TIME=1790000000); debugfs makes /lin with l_a, l_b, l_c and /idx with i_000..i_119; e2fsck -fyD indexes /idx (three leaves: blocks 1, 2, 3 at hashes 0, 0x6728801c, 0xcdcd0166) and leaves /lin linear; e2fsck -fn is clean",
+  "edits": [
+    {
+      "what": "in /lin's one block, the name l_a changed to l_z",
+      "note": "the block's checksum tail left as it was: e2fsck, 'Directory inode 12, block #0: directory passes checks but fails checksum'"
+    },
+    {
+      "what": "in /idx's leaf at logical block 1, the name i_067 changed to j_067",
+      "note": "the leaf's checksum left as it was: e2fsck, 'Directory inode 13, block #1: directory passes checks but fails checksum'. Names hashing below 0x6728801c (n001, i_004) land in this leaf; i_000 and zz_new_in_good land in good ones"
+    }
+  ],
+  "symptom": "A create, link, rename or removal in either directory warned 'Leaf block checksum failed', modified the block, and wrote it back with a freshly computed checksum. The corrupt block then verified: e2fsck no longer reported it, and the damage was indistinguishable from content.",
+  "fixed_by": "lwext4 0083 (docs/lwext4-changes.md) -- a directory block, htree root, index node or leaf that fails its checksum is not written through: writes into it return EIO, reads still go ahead",
+  "reproduce": "build/bin/ext4dump <img> create /lin/new; e2fsck -fn <img>   # without 0083 the create succeeds and e2fsck stops reporting block #0 of inode 12",
+  "note_on_detection": "Not a memory-safety finding: the release build shows it. Tests/run_bounds_tests.sh asserts the refusals, that good leaves of the same directory still take writes, and that e2fsck still sees both failures afterwards."
+}

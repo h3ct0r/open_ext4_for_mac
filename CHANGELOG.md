@@ -51,6 +51,11 @@ headings to be edited into one.
   then `git submodule deinit -f Core/lwext4` before pulling.
 
 ### Fixed
+- **A directory block that fails its checksum is no longer rewritten.**
+  Writing to it used to stamp a fresh checksum over the damage, which then
+  looked valid to e2fsck. Creating, renaming into or deleting from such a
+  block now fails with an I/O error; reading it still works. A volume that
+  hits this needs `e2fsck` (lwext4 0083).
 - **A damaged directory no longer takes new names.** A directory block the
   driver could not read was treated as "no room here" or "no such name", so a
   create, link or rename went ahead and added an entry whose uniqueness

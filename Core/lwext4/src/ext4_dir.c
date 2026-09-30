@@ -396,6 +396,18 @@ int ext4_dir_add_entry(struct ext4_inode_ref *parent, const char *name,
 				 "Block: %" PRIu32"\n",
 				 parent->index,
 				 iblock);
+			/*
+			 * Refuse rather than write through a directory block
+			 * that does not verify -- 0060's policy for bitmaps. The
+			 * insert would recompute the checksum over whatever the
+			 * block holds and write that back, turning a corrupt
+			 * block into one that verifies and destroying the only
+			 * evidence e2fsck had. Reads still go ahead; only writes
+			 * stop, and only on a read-write mount, which has
+			 * replayed its journal before anything can land here.
+			 */
+			ext4_block_set(fs->bdev, &block);
+			return EIO;
 		}
 
 		/* If adding is successful, function can finish */
@@ -556,6 +568,13 @@ int ext4_dir_remove_entry(struct ext4_inode_ref *parent, const char *name,
 	int rc = ext4_dir_find_entry(&result, parent, name, name_len);
 	if (rc != EOK)
 		return rc;
+
+	/* The lookup only warns on a block that fails its checksum; removing
+	 * from it would re-stamp it. Refuse, as ext4_dir_add_entry does. */
+	if (!ext4_dir_csum_verify(parent, (void *)result.block.data)) {
+		ext4_dir_destroy_result(parent, &result);
+		return EIO;
+	}
 
 	/* Invalidate entry */
 	ext4_dir_en_set_inode(result.dentry, 0);
