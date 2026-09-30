@@ -113,7 +113,7 @@ how each suite came to exist is in the notebook.
 | Disk Utility on hardware | 2026-09-07: a 256 GB stick erased as ext4 from Disk Utility's GUI with no terminal and nothing chowned — the first time that has worked. The failure, the measurement that located it and the fix are in [HARDWARE §5](HARDWARE.md#5-sessions) | `make test-diskutil` |
 | hardware loop | 2026-09-05 on `7bd5746`, a 256 GB USB stick: every rung green — 2,032-file copy byte-exact after a cold replug, e2fsck clean, kill-recovery 18/18 with 1 s remounts, three pulls with no synced file lost; two findings fixed red-first on the day | [HARDWARE.md §5](HARDWARE.md#5-sessions) |
 | fuzzing | 23 hostile fixtures, one per finding; the latest the nightly's (a directory entry four bytes short of its block, fixed by lwext4 0081, 2026-09-30) | `Tests/fixtures/hostile/MANIFEST` |
-| bugs found in lwext4 | 81 recorded changes, each with its reason | [lwext4-changes.md](lwext4-changes.md) |
+| bugs found in lwext4 | 82 recorded changes, each with its reason | [lwext4-changes.md](lwext4-changes.md) |
 
 The counts on this page are checked against the tree by
 `Tests/run_docs_tests.sh` where they can be, and dated where they cannot.

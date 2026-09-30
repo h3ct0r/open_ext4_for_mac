@@ -51,6 +51,11 @@ headings to be edited into one.
   then `git submodule deinit -f Core/lwext4` before pulling.
 
 ### Fixed
+- **A damaged directory no longer takes new names.** A directory block the
+  driver could not read was treated as "no room here" or "no such name", so a
+  create, link or rename went ahead and added an entry whose uniqueness
+  nobody had checked. Those now fail with an I/O error, and so does a lookup
+  that meets the damage, as Linux does (lwext4 0082).
 - **Creating a file in a damaged directory could read past a buffer.** A
   directory block whose entries ended a few bytes short of the block's end
   sent the insert walk reading an entry length from outside the block. The

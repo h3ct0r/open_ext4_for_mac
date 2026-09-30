@@ -2963,12 +2963,20 @@ static int create_common(ext4b_device *dev, struct ext4_fs *fs,
         return txn_finish(dev, fs, ENOTDIR);
     }
 
-    /* Refuse to shadow an existing name rather than silently replacing it. */
+    /* Refuse to shadow an existing name rather than silently replacing it.
+     * Only a clean ENOENT means the name is free: any other answer is a
+     * directory that could not be searched, and adding to it adds a name
+     * whose uniqueness nobody checked (lwext4 0082). */
     struct ext4_dir_search_result probe_res;
-    if (ext4_dir_find_entry(&probe_res, &parent, name, (uint32_t)name_len) == EOK) {
+    r = ext4_dir_find_entry(&probe_res, &parent, name, (uint32_t)name_len);
+    if (r == EOK) {
         ext4_dir_destroy_result(&parent, &probe_res);
         ext4_fs_put_inode_ref(&parent);
         return txn_finish(dev, fs, EEXIST);
+    }
+    if (r != ENOENT) {
+        ext4_fs_put_inode_ref(&parent);
+        return txn_finish(dev, fs, r);
     }
 
     struct ext4_inode_ref child;
@@ -3141,11 +3149,18 @@ int ext4b_hardlink(ext4b_device *dev,
      * silently adding a second directory entry for the same name corrupts
      * the directory. create_common guards this; hardlink did not. */
     struct ext4_dir_search_result exists;
-    if (ext4_dir_find_entry(&exists, &parent, name, (uint32_t)name_len) == EOK) {
+    r = ext4_dir_find_entry(&exists, &parent, name, (uint32_t)name_len);
+    if (r == EOK) {
         ext4_dir_destroy_result(&parent, &exists);
         ext4_fs_put_inode_ref(&child);
         ext4_fs_put_inode_ref(&parent);
         return txn_finish(dev, fs, EEXIST);
+    }
+    if (r != ENOENT) {
+        /* Not searchable is not free (see create_common). */
+        ext4_fs_put_inode_ref(&child);
+        ext4_fs_put_inode_ref(&parent);
+        return txn_finish(dev, fs, r);
     }
 
     r = link_child(fs, &parent, &child, name, (uint32_t)name_len, false);
@@ -3752,7 +3767,10 @@ int ext4b_rename(ext4b_device *dev,
     /* If something already occupies the destination, remove it first --
      * rename(2) replaces the target atomically. */
     struct ext4_dir_search_result dst_res;
-    if (ext4_dir_find_entry(&dst_res, &dp, dst_name, (uint32_t)dst_len) == EOK) {
+    r = ext4_dir_find_entry(&dst_res, &dp, dst_name, (uint32_t)dst_len);
+    if (r != EOK && r != ENOENT)
+        goto out;   /* not searchable is not free (see create_common) */
+    if (r == EOK) {
         uint32_t victim_ino = ext4_dir_en_get_inode(dst_res.dentry);
         ext4_dir_destroy_result(&dp, &dst_res);
 

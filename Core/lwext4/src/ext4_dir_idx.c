@@ -1417,6 +1417,12 @@ int ext4_dir_dx_add_entry(struct ext4_inode_ref *parent,
 	if (r == EOK)
 		goto release_target_index;
 
+	/* Only a full leaf is split. A leaf the walk could not read is
+	 * corruption: splitting it re-sorted and re-stamped entries that
+	 * could not be trusted, and the create went through. */
+	if (r != ENOSPC)
+		goto release_target_index;
+
 	/* Split entries to two blocks (includes sorting by hash value) */
 	struct ext4_block new_block;
 	r = ext4_dir_dx_split_data(parent, &hinfo, &target_block, dx_blk,

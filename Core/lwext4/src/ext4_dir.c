@@ -403,6 +403,13 @@ int ext4_dir_add_entry(struct ext4_inode_ref *parent, const char *name,
 						name, name_len);
 		if (r == EOK)
 			success = true;
+		else if (r != ENOSPC) {
+			/* Corruption (0081's EIO), not a full block: moving on
+			 * appended a fresh block to a directory whose existing
+			 * blocks could not be read, and the create "succeeded". */
+			ext4_block_set(fs->bdev, &block);
+			return r;
+		}
 
 		r = ext4_block_set(fs->bdev, &block);
 		if (r != EOK)
@@ -515,6 +522,15 @@ int ext4_dir_find_entry(struct ext4_dir_search_result *result,
 			result->block = b;
 			result->dentry = res_entry;
 			return EOK;
+		}
+
+		/* A block the walk cannot read as entries is corruption, not the
+		 * absence of the name. The htree lookup already says so; the
+		 * linear one moved on to the next block and could end in ENOENT,
+		 * which a create reads as "safe to add this name". */
+		if (r != ENOENT) {
+			ext4_block_set(parent->fs->bdev, &b);
+			return r;
 		}
 
 		/* Entry not found - put block and continue to the next block */
@@ -741,14 +757,19 @@ int ext4_dir_find_in_block(struct ext4_block *block, struct ext4_sblock *sb,
 		 * is only checked for zero, so de can land at any offset. Bound
 		 * the header first, then the name the entry itself claims.
 		 */
+		/* A tail too short to hold a header is corruption, as it is to
+		 * the insert walk (0081) -- not a clean end of the block. It
+		 * used to end the search quietly, so the lookup said ENOENT for
+		 * a block it could not read, and a create went on to add a name
+		 * whose uniqueness nobody had checked. */
 		if ((uint8_t *)de + sizeof(struct ext4_fake_dir_entry) > addr_limit)
-			break;
+			return EIO;
 
 		/* Valid entry - check it */
 		if (ext4_dir_en_get_inode(de) != 0) {
 			if ((uint8_t *)de->name + ext4_dir_en_get_name_len(sb, de)
 			    > addr_limit)
-				return EINVAL;
+				return EIO;
 			/* For more efficient compare only lengths firstly*/
 			uint16_t el = ext4_dir_en_get_name_len(sb, de);
 			if (el == name_len) {
@@ -762,9 +783,13 @@ int ext4_dir_find_in_block(struct ext4_block *block, struct ext4_sblock *sb,
 
 		uint16_t de_len = ext4_dir_en_get_entry_len(de);
 
-		/* Corrupted entry */
-		if (de_len == 0)
-			return EINVAL;
+		/* Corrupted entry. EIO, not EINVAL: this is the medium, not
+		 * the caller's argument, and a lookup that answers "invalid
+		 * argument" for a damaged directory reads as a bug in the app. */
+		if (de_len < sizeof(struct ext4_fake_dir_entry) ||
+		    (de_len % 4) != 0 ||
+		    (uint8_t *)de + de_len > addr_limit)
+			return EIO;
 
 		/* Jump to next entry */
 		de = (struct ext4_dir_en *)((uint8_t *)de + de_len);

@@ -122,6 +122,35 @@ e2fsck -fn "$IMG" >/dev/null 2>&1 \
   && ok "e2fsck clean after the refused hardlink" \
   || bad "e2fsck clean after the refused hardlink"
 
+# --- a directory that cannot be searched is not free space -----------------
+# Hostile fixture 0023: a root directory whose entries end four bytes short of
+# its block. After lwext4 0081 the walk no longer reads past the block, but
+# every caller still took its EIO for "no room here" or "no such name": a
+# create appended a fresh block to the damaged directory and succeeded, a
+# link and a rename did the same, and a lookup of a missing name said ENOENT.
+# A name added that way is one whose uniqueness nobody checked (lwext4 0082).
+echo "a damaged directory refuses new names"
+IMG="$WORK/dir-short-tail.img"
+gunzip -c "$ROOT/Tests/fixtures/hostile/0023-a-directory-entry-four-bytes-short-of-its-block.img.gz" > "$IMG"
+first=$("$DUMP" "$IMG" ls / 2>/dev/null | awk '$1 == "file" { print $NF; exit }')
+for op in "create /a" "ln $first /b" "mv $first /c"; do
+  # shellcheck disable=SC2086
+  out=$("$DUMP" "$IMG" $op 2>&1); rc=$?
+  [ $rc -ne 0 ] && grep -qiE "I/O error|input/output" <<<"$out" \
+    && ok "${op%% *} into it fails with EIO" \
+    || bad "${op%% *} into it fails with EIO" "rc=$rc: $(grep -vm1 'core:' <<<"$out")"
+done
+size=$(debugfs -R "stat /" "$IMG" 2>/dev/null | sed -nE 's/.*Size: ([0-9]+).*/\1/p' | head -1)
+[ "$size" = "1024" ] && ok "and it is still one block (no block appended)" \
+                     || bad "and it is still one block" "root directory size is ${size:-unknown}"
+out=$("$DUMP" "$IMG" cat /nope 2>&1); rc=$?
+[ $rc -ne 0 ] && grep -qiE "I/O error|input/output" <<<"$out" \
+  && ok "a lookup of a missing name there reports the damage, not ENOENT" \
+  || bad "a lookup of a missing name there reports the damage, not ENOENT" "rc=$rc: $(grep -vm1 'core:' <<<"$out")"
+out=$("$DUMP" "$IMG" cat "$first" 2>&1); rc=$?
+[ $rc -eq 0 ] && ok "while a name before the damage is still found" \
+              || bad "while a name before the damage is still found" "rc=$rc: $(grep -vm1 'core:' <<<"$out")"
+
 # --- oversize directory-entry name is rejected, not truncated ---------------
 echo
 echo "over-long names"
