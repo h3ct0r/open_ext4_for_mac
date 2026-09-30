@@ -7,7 +7,6 @@ stays found.
 ## Build and test
 
 ```bash
-git submodule update --init
 brew install e2fsprogs              # mke2fs, e2fsck, debugfs
 make                                # Ext4Mac.app
 make test                           # read + write suites, offline
@@ -27,16 +26,15 @@ and approved.
    test runs red against the unfixed code — the fix reverted, or a fault
    injected — and the red result is recorded in the commit message alongside
    the green. A test that has never failed has not demonstrated it tests
-   anything. `scripts/red_first_patch.sh NNNN --suite <suite>` does this for
-   an lwext4 patch.
+   anything.
 
-2. **lwext4 changes only as numbered patches.** `Core/lwext4` is a submodule
-   pinned at an upstream commit; every change to it lives in
-   `patches/lwext4/00NN-<slug>.patch` with a row in `patches/lwext4/README.md`
-   saying what and why. `make check-patches` replays the set onto the pinned
-   commit and diffs; the build refuses an unpatched tree. While developing a
-   patch, build with `ALLOW_UNAPPLIED_PATCHES=1`. A patch may not disturb
-   another patch's context (see the README there for why).
+2. **lwext4 changes are numbered, one per commit.** `Core/lwext4` is this
+   project's fork ([FORK.md](Core/lwext4/FORK.md)), edited in place like any
+   other source. A change to it is one commit, subject
+   `lwext4 NNNN: <what>` with the trailer `Lwext4-Change: NNNN`, and a row in
+   [docs/lwext4-changes.md](docs/lwext4-changes.md) saying what and why, added
+   in the same commit. IDs are never reused. Changes that alter no behaviour
+   are `lwext4 vendor: <what>`. Do not reformat upstream code.
 
 3. **The shipping core reads no environment.** Test-only hooks go behind
    `EXT4B_TEST_HOOKS`; `getenv` is allowed only under `tools/`.

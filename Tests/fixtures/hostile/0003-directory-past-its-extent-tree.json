@@ -15,6 +15,6 @@
   ],
   "symptom": "ext4_extent_get_blocks returns EOK with fblock 0 for a logical block the tree does not map; the directory walk passes support_unwritten = false, and ext4_assert(*fblock || support_unwritten) aborted. CONFIG_DEBUG_ASSERT ships, so on the installed extension this is a corrupt directory taking the mount down from an `ls`.",
   "note": "The inode checksum is left wrong on purpose -- lwext4 warns and continues, which is its own observation about how far a bad inode gets.",
-  "fixed_by": "patches/lwext4/0064-a-directory-with-a-hole-is-an-error-not-an-assertion.patch",
+  "fixed_by": "lwext4 0064 (docs/lwext4-changes.md)",
   "reproduce": "build/bin/ext4dump <img> ls /"
 }

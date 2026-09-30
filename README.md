@@ -138,7 +138,6 @@ Requirements: macOS 15.4+, Apple Silicon, Xcode Command Line Tools,
 `brew install e2fsprogs`; Docker for the Linux-kernel stages.
 
 ```bash
-git submodule update --init
 make            # Ext4Mac.app with the extension inside
 make test       # read + write suites against disk images
 make validate   # everything, including the Linux-kernel and mounted stages
@@ -185,10 +184,11 @@ where the Linux kernel judges. A nightly fuzzes for an hour each way. The
 mounted stages and the pull test need an approved extension and a stick, so
 they stay local — recorded in [docs/HARDWARE.md](docs/HARDWARE.md).
 
-Testing has found more than twenty genuine bugs in the vendored lwext4 —
-one replayed stale journal records over live metadata, one hung the driver
-forever instead of failing — carried as 79 numbered patches, each with its
-reason in [patches/lwext4/README.md](patches/lwext4/README.md).
+Testing has found more than twenty genuine bugs in lwext4 — one replayed
+stale journal records over live metadata, one hung the driver forever instead
+of failing. The project carries lwext4 as an in-tree fork with
+79 recorded changes, each with its reason in
+[docs/lwext4-changes.md](docs/lwext4-changes.md).
 
 ## Documentation
 
@@ -201,7 +201,7 @@ reason in [patches/lwext4/README.md](patches/lwext4/README.md).
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | how it fits together and the decisions that shaped it |
 | [docs/SIGNING.md](docs/SIGNING.md) | certificates, entitlements, profiles, releasing from CI |
 | [docs/HARDWARE.md](docs/HARDWARE.md) | the runbook for a day with real media |
-| [patches/lwext4/README.md](patches/lwext4/README.md) | every change to lwext4 and why |
+| [docs/lwext4-changes.md](docs/lwext4-changes.md) | every change to lwext4 and why |
 | [Tests/fuzz/README.md](Tests/fuzz/README.md) | the fuzzing instruments |
 | [CHANGELOG.md](CHANGELOG.md) | what changed, by version |
 
@@ -211,7 +211,7 @@ Contributions are welcome under the rules in [CONTRIBUTING.md](CONTRIBUTING.md)
 — every fix arrives with a test shown failing first. Data-loss or memory-safety
 findings go through [SECURITY.md](SECURITY.md) rather than a public issue.
 
-**GPL-3.0-or-later.** This project vendors [lwext4](https://github.com/gkostka/lwext4),
-whose `ext4_extent.c` and `ext4_xattr.c` are GPL-2.0-or-later and whose
+**GPL-3.0-or-later.** This project carries a fork of [lwext4](https://github.com/gkostka/lwext4)
+([Core/lwext4/FORK.md](Core/lwext4/FORK.md)), whose `ext4_extent.c` and `ext4_xattr.c` are GPL-2.0-or-later and whose
 remainder is BSD-3-Clause; the combined work is distributed under
 GPL-3.0-or-later. See [LICENSE](LICENSE).

@@ -38,7 +38,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          submodules: recursive
           # The whole history, not the default single commit: the build number
           # stamped into the bundles is `git rev-list --count HEAD`, and on a
           # shallow checkout that is 1 for every build.
@@ -46,13 +45,12 @@ jobs:
 
       # git 2.35+ refuses to operate on a working tree whose owner does not
       # match the user running git ("detected dubious ownership", exit 128),
-      # and a GitHub runner's checkout trips exactly that in check_patches'
-      # `git ls-tree`/`git archive`. Mark the workspace and its submodule
-      # trusted. Harmless locally; the developer owns their own checkout.
+      # and the build asks git for its build id and build number. Trust the
+      # workspace, and only the workspace: this used to be "*", for the
+      # lwext4 submodule that no longer exists.
       - name: trust the checkout
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config --global --add safe.directory "*"
 
       # The SDK has to be the one this driver is written against. FSKit moved
       # between SDKs twice in this project's life: the macOS 15.x SDK wants the
@@ -68,8 +66,6 @@ jobs:
           echo "SDK: $(xcrun --show-sdk-version) at $(xcrun --show-sdk-path)"
           xcodebuild -version | head -1
 
-      # The suites patch the pinned lwext4 commit; a shallow submodule with no
-      # history still has the pinned tree, which is all check_patches.sh reads.
       - name: toolchain
         run: |
           sw_vers
@@ -127,18 +123,15 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: recursive
 
       # git 2.35+ refuses to operate on a working tree whose owner does not
       # match the user running git ("detected dubious ownership", exit 128),
-      # and a GitHub runner's checkout trips exactly that in check_patches'
-      # `git ls-tree`/`git archive`. Mark the workspace and its submodule
-      # trusted. Harmless locally; the developer owns their own checkout.
+      # and the build asks git for its build id and build number. Trust the
+      # workspace, and only the workspace: this used to be "*", for the
+      # lwext4 submodule that no longer exists.
       - name: trust the checkout
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config --global --add safe.directory "*"
 
       # The SDK has to be the one this driver is written against. FSKit moved
       # between SDKs twice in this project's life: the macOS 15.x SDK wants the
@@ -199,18 +192,15 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: recursive
 
       # git 2.35+ refuses to operate on a working tree whose owner does not
       # match the user running git ("detected dubious ownership", exit 128),
-      # and a GitHub runner's checkout trips exactly that in check_patches'
-      # `git ls-tree`/`git archive`. Mark the workspace and its submodule
-      # trusted. Harmless locally; the developer owns their own checkout.
+      # and the build asks git for its build id and build number. Trust the
+      # workspace, and only the workspace: this used to be "*", for the
+      # lwext4 submodule that no longer exists.
       - name: trust the checkout
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config --global --add safe.directory "*"
 
       # The SDK has to be the one this driver is written against. FSKit moved
       # between SDKs twice in this project's life: the macOS 15.x SDK wants the
@@ -299,18 +289,15 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: recursive
 
       # git 2.35+ refuses to operate on a working tree whose owner does not
       # match the user running git ("detected dubious ownership", exit 128),
-      # and a GitHub runner's checkout trips exactly that in check_patches'
-      # `git ls-tree`/`git archive`. Mark the workspace and its submodule
-      # trusted. Harmless locally; the developer owns their own checkout.
+      # and the build asks git for its build id and build number. Trust the
+      # workspace, and only the workspace: this used to be "*", for the
+      # lwext4 submodule that no longer exists.
       - name: trust the checkout
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config --global --add safe.directory "*"
 
       # The SDK has to be the one this driver is written against. FSKit moved
       # between SDKs twice in this project's life: the macOS 15.x SDK wants the

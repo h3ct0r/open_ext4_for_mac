@@ -421,7 +421,7 @@ digest_before=$(sha256 "$IMG")
 
 # A volume whose UUID was changed after creation keeps the checksum seed it was
 # made with, so the seed and the UUID no longer agree. Deriving the seed from
-# the UUID -- which is all lwext4 could do before patches/lwext4/0012 -- makes
+# the UUID -- which is all lwext4 could do before lwext4 change 0012 -- makes
 # every checksum written to it wrong, and this is the check that says so:
 # without the patch e2fsck reports invalid group descriptor and inode
 # checksums here, nine complaints on the first write.

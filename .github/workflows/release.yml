@@ -35,12 +35,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          submodules: recursive
           fetch-depth: 0
 
       - name: trust the checkout and pick the SDK
         run: |
-          git config --global --add safe.directory "*"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           sudo xcode-select -s /Applications/Xcode_26.5.app/Contents/Developer
           echo "SDK: $(xcrun --show-sdk-version)"
 

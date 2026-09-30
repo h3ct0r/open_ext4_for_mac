@@ -33,10 +33,10 @@ and documentation.
 `$argon2id$...` string form is not used here. LUKS stores its parameters in its
 own header.
 
-**The sources are unmodified.** If they ever need patching, do it the way
-`patches/lwext4/` does — as a recorded patch against pristine upstream, not an
-edit in place, so the next update is a merge rather than an archaeology
-exercise.
+**The sources are unmodified.** If they ever need changing, do it the way
+lwext4 is changed ([docs/lwext4-changes.md](../../../docs/lwext4-changes.md)):
+one commit per change, `argon2: <what>`, with a line in this README saying
+what and why -- so the difference from upstream stays one `git log` away.
 
 ## Updating
 

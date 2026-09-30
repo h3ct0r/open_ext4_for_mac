@@ -961,7 +961,7 @@ int ext4b_probe(ext4b_device *dev, ext4b_probe_info *out)
      * lwext4 used to derive the seed from the UUID everywhere and had no
      * notion of the field, so a volume whose UUID had been changed was
      * downgraded to read-only here -- every checksum lwext4 wrote would have
-     * been wrong. patches/lwext4/0012 gives it ext4_sb_csum_seed(), which
+     * been wrong. lwext4 change 0012 gives it ext4_sb_csum_seed(), which
      * honours the stored value, so the volume is now writable and the
      * downgrade is gone. The suites write to that fixture and hand it to
      * e2fsck, which is what a wrong seed would fail.

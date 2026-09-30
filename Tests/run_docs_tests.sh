@@ -103,26 +103,17 @@ echo "counts"
 echo ""
 
 fixtures=$(grep -cE '^[0-9]{4}-' "$ROOT/Tests/fixtures/hostile/MANIFEST")
-patches=$(ls "$ROOT"/patches/lwext4/*.patch | wc -l | tr -d ' ')
+changes=$(grep -cE '^\| `[0-9]{4}-' "$ROOT/docs/lwext4-changes.md")
 
 # The README states both as digits, so a reader can check them, so we do.
 grep -qE "\b$fixtures hostile fixtures" "$ROOT/README.md" \
   && ok "README says $fixtures hostile fixtures, which is the MANIFEST's count" \
   || bad "README says how many hostile fixtures there are" \
          "MANIFEST has $fixtures; README: $(grep -oE '[0-9]+ hostile fixtures' "$ROOT/README.md" | head -1)"
-grep -qE "\b$patches numbered patches" "$ROOT/README.md" \
-  && ok "README says $patches numbered patches, which is how many there are" \
-  || bad "README says how many lwext4 patches there are" \
-         "$patches files; README: $(grep -oE '[0-9]+ numbered patches' "$ROOT/README.md" | head -1)"
-
-# Every patch file has a row in the patches README, by its full name.
-missing=0
-for p in "$ROOT"/patches/lwext4/*.patch; do
-  name=$(basename "$p" .patch)
-  grep -q "$name" "$ROOT/patches/lwext4/README.md" || { missing=$((missing+1)); echo "  no row: $name"; }
-done
-[ "$missing" = "0" ] && ok "every patch file has a row in patches/lwext4/README.md" \
-                     || bad "every patch file has a row in patches/lwext4/README.md" "$missing without one"
+grep -qE "\b$changes recorded changes" "$ROOT/README.md" \
+  && ok "README says $changes recorded changes to lwext4, which is the ledger's count" \
+  || bad "README says how many lwext4 changes there are" \
+         "ledger has $changes; README: $(grep -oE '[0-9]+ recorded changes' "$ROOT/README.md" | head -1)"
 
 # Self-check: the fixture assertion must go red on a README that is off by one.
 # No \b: BSD sed has none, and a substitution that silently does nothing
@@ -133,6 +124,90 @@ if grep -qE "\b$fixtures hostile fixtures" "$WORK/offbyone.md"; then
 else
   ok "self-check: an off-by-one fixture count is caught"
 fi
+
+# ------------------------------------------------------ lwext4 ledger ----
+# lwext4 is an in-tree fork, and docs/lwext4-changes.md is the ledger of every
+# change to it. Its IDs are cited all over the tree -- "patch 0067" in a code
+# comment, "lwext4 0048" in a fixture's fixed_by, a bare 0071 in the MANIFEST's
+# fix column, patches/lwext4/0012 in the notebook from when they were files --
+# and a citation of an ID the ledger does not have is a pointer to nothing.
+echo ""
+echo "lwext4 ledger"
+echo ""
+check_citations() {  # check_citations <tree-root> -> prints "unknown: N"
+  python3 - "$1" <<'PY'
+import os, re, sys
+root = sys.argv[1]
+ledger = open(os.path.join(root, 'docs/lwext4-changes.md')).read()
+known = set(re.findall(r'^\| `(\d{4})-', ledger, re.M))
+cite = re.compile(r'(?:\bpatch(?:es)?|\blwext4(?: change)?|Lwext4-Change:|patches/lwext4/)\s+?(\d{4})(?:\s*[-/\u2013]\s*(\d{4}))?\b'
+                  r'|patches/lwext4/(\d{4})')
+where = ['Core/shim', 'Core/crypto', 'Core/lwext4/src', 'Core/lwext4/include', 'tools',
+         'Tests', 'scripts', 'docs', 'App', 'Extension', 'Shared', 'Makefile',
+         'README.md', 'CHANGELOG.md', 'CONTRIBUTING.md', 'SECURITY.md']
+unknown = 0
+def scan(path):
+    global unknown
+    try: text = open(path, errors='replace').read()
+    except (IsADirectoryError, FileNotFoundError): return
+    for m in cite.finditer(text):
+        lo, hi, bare = m.group(1), m.group(2), m.group(3)
+        ids = [bare] if bare else ([f'{i:04d}' for i in range(int(lo), int(hi) + 1)] if hi and int(hi) - int(lo) < 100 else [lo])
+        for i in ids:
+            if i not in known:
+                unknown += 1
+                print(f'  unknown lwext4 change {i}: {os.path.relpath(path, root)}')
+    if path.endswith('MANIFEST'):
+        for line in text.splitlines():
+            cols = line.split()
+            if len(cols) > 3 and re.fullmatch(r'\d{4}', cols[0]) and re.fullmatch(r'\d{4}', cols[3]) and cols[3] not in known:
+                unknown += 1
+                print(f'  unknown lwext4 change {cols[3]}: MANIFEST row {cols[0]}')
+for w in where:
+    p = os.path.join(root, w)
+    if os.path.isfile(p): scan(p); continue
+    for dp, dn, fn in os.walk(p):
+        dn[:] = [d for d in dn if d not in ('__pycache__',)]
+        for f in fn:
+            if f.endswith(('.img', '.gz', '.a', '.o', '.pyc', '.icns', '.png')): continue
+            scan(os.path.join(dp, f))
+print(f'unknown: {unknown}')
+PY
+}
+n=$(check_citations "$ROOT" | tee "$WORK/citations.txt" | sed -n 's/^unknown: //p')
+grep '^  unknown' "$WORK/citations.txt" | head -10
+[ "$n" = "0" ] && ok "every cited lwext4 change has a ledger row" \
+               || bad "every cited lwext4 change has a ledger row" "$n citation(s) of IDs the ledger does not have"
+
+# Self-check: the same walk over a copy with one citation of an ID that does
+# not exist must count exactly one more.
+mkdir -p "$WORK/ledger/docs" "$WORK/ledger/Core/shim"
+cp "$ROOT/docs/lwext4-changes.md" "$WORK/ledger/docs/"
+printf '/* see patch %s */\n' 0999 > "$WORK/ledger/Core/shim/x.c"
+n=$(check_citations "$WORK/ledger" | sed -n 's/^unknown: //p')
+[ "$n" = "1" ] && ok "self-check: a citation of an unknown change is caught" \
+               || bad "self-check: a citation of an unknown change is caught" "counted $n"
+
+# Upstream's licence terms travel with its files: the BSD-3 ones require the
+# notice to be kept, and GPL-2.0 requires it too. A reformat or a careless
+# edit that drops a header is a licence problem, not a style one.
+check_headers() {  # check_headers <lwext4-dir> -> prints the files missing a header
+  local f
+  for f in "$1"/src/*.c "$1"/include/*.h "$1"/include/misc/*.h; do
+    [ -e "$f" ] || continue
+    grep -q "Copyright" "$f" \
+      && grep -qE "Redistribution and use in source and binary forms|GNU General Public License" "$f" \
+      || echo "${f#$1/}"
+  done
+}
+missing=$(check_headers "$ROOT/Core/lwext4")
+[ -z "$missing" ] && ok "every lwext4 source keeps its copyright and licence header" \
+                  || bad "every lwext4 source keeps its copyright and licence header" "$(echo $missing)"
+mkdir -p "$WORK/lwext4/src"
+sed -e '/Copyright/d' "$ROOT/Core/lwext4/src/ext4.c" > "$WORK/lwext4/src/ext4.c"
+[ "$(check_headers "$WORK/lwext4")" = "src/ext4.c" ] \
+  && ok "self-check: a source without its header is caught" \
+  || bad "self-check: a source without its header is caught"
 
 # ---------------------------------------------------------- make help ----
 echo ""

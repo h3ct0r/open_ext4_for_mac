@@ -33,7 +33,7 @@ land — with credit unless you prefer none.
 ## Scope
 
 In scope: `Core/`, `Extension/`, `Shared/`, `App/`, the build and release
-scripts, and the vendored lwext4 as patched here.
+scripts, and this project's lwext4 fork (`Core/lwext4`).
 
 Out of scope: the upstream lwext4 tree as shipped by its author (report those
 there as well), macOS and FSKit themselves, and the limits already documented

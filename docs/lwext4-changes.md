@@ -1,31 +1,31 @@
-# lwext4 patches
+# Changes to lwext4
 
-Applied automatically by the build (`make patch`, and as a prerequisite of every
-object file). Idempotent — a clean checkout builds with a plain `make`.
+`Core/lwext4` is this project's fork of
+[gkostka/lwext4](https://github.com/gkostka/lwext4). It was imported as plain
+files at upstream `58bcf89a` (2022-09-22), in the commit tagged
+`lwext4-upstream-58bcf89a` (f2aa90b), whose tree is upstream's byte for byte.
+Upstream has merged nothing since 2022; nothing here waits on it.
+[Core/lwext4/FORK.md](../Core/lwext4/FORK.md) has the provenance and licences.
 
-**These files are the only copy of our changes to lwext4.** The submodule is
-pinned at an upstream commit; anything edited into its working tree and not
-written down here exists on one machine and nowhere else. `make check-patches`
-replays the whole set onto the pinned commit in a temporary directory and
-diffs the result against `Core/lwext4`, so that cannot go unnoticed again — it
-had happened twice by the time it was checked, and both times the build was
-green.
+This is the ledger: every change made to that code, and why.
 
-Two rules follow from `git apply` being all-or-nothing:
+* **Every change has an ID and a commit.** The subject is
+  `lwext4 NNNN: <what>` and the message carries the trailer
+  `Lwext4-Change: NNNN`, so `git log --grep '^Lwext4-Change: 0048$'` finds it
+  and `git show` of that commit *is* the change.
+* **Every ID has a row below**, added in the same commit: what it does, why,
+  and the test or hostile fixture that proves it.
+* **IDs are never reused.** 0001-0079 began as a patch series applied at build
+  time. Each was replayed as its own commit with its original prose, author
+  and date, and `Introduced-In:` names the commit that first added it as a
+  patch. New changes continue at 0080.
+* **A change that alters no behaviour** -- a licence notice, a removed unused
+  upstream file -- is `lwext4 vendor: <what>` and needs no row.
+* **Upstream's code keeps its shape.** Keep every file's copyright and licence
+  header, and do not reformat upstream code: it buys nothing and costs the
+  diff against upstream, which `make lwext4-diff` prints.
 
-* **A patch may not disturb another patch's context.** Adding a line in the
-  middle of a hunk an earlier patch already touched means that earlier patch
-  can no longer be checked on its own, and the build's per-patch "is this still
-  applied?" test starts failing on a tree that is perfectly correct. 0016 put
-  an `#include` between two lines of 0010's context and did exactly this.
-* **Regenerate a patch against the patches before it, not against the working
-  tree.** 0014 was first produced as a whole-tree diff, so it carried hunks
-  belonging to 0005 and 0008. Applied in order those hunks were already
-  present, the patch failed as a unit, and the build skipped it with a note —
-  a clone got a driver with no write barrier and no visible error.
-
-There are 79 patches; `Tests/run_docs_tests.sh` checks that every file has
-a row here and that the README's count matches. The bold tag on each row is
+The bold tag on each row below is
 its severity: **Bug fix, corruption** and **data loss** wrote or replayed
 wrong bytes onto a volume; **memory safety** and **use-after-free** are
 sanitizer findings on hostile or fuzzed input; **availability** hung or
@@ -33,7 +33,7 @@ aborted the driver; **Conformance** matches `mke2fs`/Linux where lwext4
 diverged without being wrong; **Portability** and **Observability** are
 build and logging. Untagged rows are plumbing the shim needed.
 
-| Patch | What it does |
+| Change | What it does |
 |---|---|
 | `0001-guard-EXT_FINCOM_IGNORED` | Lets the build extend the INCOMPAT bits lwext4 tolerates, so we can accept `metadata_csum_seed` (which modern `mke2fs` enables by default) after the bridge has verified the seed still matches the UUID. |
 | `0002-fix-xattr-remove-ibody-finder` | **Bug fix.** NULL dereference (SIGSEGV) when removing an xattr stored in the inode body — the common case. |

@@ -41,7 +41,7 @@ done
 # A volume whose UUID was changed after creation carries a checksum seed that
 # no longer matches it. That used to force read-only, because lwext4 derived
 # the seed from the UUID and would have written wrong checksums everywhere;
-# patches/lwext4/0012 makes it read s_checksum_seed instead. The write suite is
+# lwext4 change 0012 makes it read s_checksum_seed instead. The write suite is
 # what proves the seed is actually right -- this only records that the volume
 # is no longer refused.
 v=$("$DUMP" "$FIX/ext4_uuid_changed.img" probe | awk '/^verdict:/{print $2}')

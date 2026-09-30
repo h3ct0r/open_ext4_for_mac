@@ -15,7 +15,7 @@
   ],
   "symptom": "ext4_xattr_is_ibody_valid dereferenced the header's magic, computed min_offs as an underflowed size_t, and read the first entry through EXT4_XATTR_IS_LAST_ENTRY -- all before checking that any of them were inside the inode buffer. AddressSanitizer heap-buffer-overflow at ext4_xattr.c:591, reached from ext4b_listxattr, which is what a directory walk does to every inode it meets.",
   "note": "The seed has metadata_csum off, so a single raw byte flip reaches the parser with no re-stamping. That is why s02 exists.",
-  "fixed_by": "patches/lwext4/0065-an-xattr-walk-checks-its-bounds-before-it-dereferences.patch",
+  "fixed_by": "lwext4 0065 (docs/lwext4-changes.md)",
   "reproduce": "build/bin/ext4dump <img> xattrwalk /",
   "note_on_verb": "xattrwalk, not xattr: the named file cannot be resolved on this image, and `ls` does not read attributes. The verb was added to ext4dump for this finding, because a finding the release tool cannot reproduce is a finding nobody else can confirm.",
   "note_on_size": "Kept at the fuzzer's own size, unlike 0002. The seed it came from carries 300 KiB of incompressible random data, so it gzips to 315 KB; a rebuilt minimal version would have to guess which garbage the relocated inode table happens to contain, and the value of this fixture is that it is the artifact that actually crashed."

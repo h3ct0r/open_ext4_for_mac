@@ -38,6 +38,17 @@ headings to be edited into one.
   instead of starting a second one, which would have been a second identical
   menu-bar icon watching the same disks. The window also opens on the display
   the pointer is on, rather than wherever `center()` decided.
+- **lwext4 is an in-tree fork, not a submodule plus 79 patch files.**
+  `Core/lwext4` is tracked source ([FORK.md](Core/lwext4/FORK.md)); its
+  history is upstream `58bcf89a` as imported, then one commit per former
+  patch with its original reason, author and date. Every change and why is in
+  [docs/lwext4-changes.md](docs/lwext4-changes.md), and `make lwext4-diff`
+  shows the difference from upstream. `make patch`, `check-patches`,
+  `repatch`, `unpatch` and `ALLOW_UNAPPLIED_PATCHES` are gone; a clone needs
+  no `git submodule` step, and a GitHub source archive is now the complete
+  source. Build numbers (the commit count) jump by about 82 here.
+  Upgrading an existing checkout: `make check-patches` must be green first,
+  then `git submodule deinit -f Core/lwext4` before pulling.
 
 ### Fixed
 - **Disk Utility can erase a physical disk as ext4.** It failed with "File
