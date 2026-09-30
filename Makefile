@@ -266,7 +266,20 @@ lwext4-diff:  ## what Core/lwext4 changes against the upstream it was imported f
 # untouched images as a clean pass.
 LWEXT4_HEADERS := $(wildcard $(LWEXT4_DIR)/include/*.h $(LWEXT4_DIR)/include/misc/*.h)
 
-$(OBJ)/lwext4/%.o: $(LWEXT4_DIR)/src/%.c $(LWEXT4_HEADERS)
+# What decides the object code, and nothing that does not: when any of it
+# changes -- DEPLOY_TARGET, OPT, EXTRA_CFLAGS, the lwext4 defines -- every
+# object of this CONFIG rebuilds. Before this, a flag change rebuilt nothing:
+# raising DEPLOY_TARGET left the core full of objects built for the old floor,
+# and a red-first build with EXTRA_CFLAGS stayed in place after the flag was
+# gone. The build id is left out, because it changes on every commit and would
+# rebuild the world; the shim objects follow it through .build-id instead.
+# Quotes are dropped from the recorded text: it is compared, never executed.
+CFLAGS_NOW := $(subst ",,$(subst ',,$(CC)|$(TARGET_FLAG)|$(OPT)|$(INCLUDES)|$(LWEXT4_DEFS)|$(NO_WARN)|$(EXTRA_CFLAGS)))
+$(OBJ)/.cflags: FORCE
+	@mkdir -p $(dir $@)
+	@printf '%s' '$(CFLAGS_NOW)' | cmp -s - $@ 2>/dev/null || printf '%s' '$(CFLAGS_NOW)' > $@
+
+$(OBJ)/lwext4/%.o: $(LWEXT4_DIR)/src/%.c $(LWEXT4_HEADERS) $(OBJ)/.cflags
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(LWEXT4_CFLAGS) -c $< -o $@
 
@@ -275,20 +288,20 @@ $(OBJ)/lwext4/%.o: $(LWEXT4_DIR)/src/%.c $(LWEXT4_HEADERS)
 # changes even though no source file did -- otherwise the log lines keep
 # naming the commit they were first built at while the re-stamped plists name
 # the current one, and a hardware session reads as fresh when it is not.
-$(OBJ)/shim/%.o: $(SHIM_DIR)/%.c $(SHIM_DIR)/ext4_bridge.h $(LWEXT4_HEADERS) $(BUILD)/.build-id
+$(OBJ)/shim/%.o: $(SHIM_DIR)/%.c $(SHIM_DIR)/ext4_bridge.h $(LWEXT4_HEADERS) $(BUILD)/.build-id $(OBJ)/.cflags
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(SHIM_CFLAGS) -c $< -o $@
 
 # Test shim: EXT4B_TEST_HOOKS exposes the orphan-inspection API the suites use.
-$(OBJ)/shim-test/%.o: $(SHIM_DIR)/%.c $(SHIM_DIR)/ext4_bridge.h $(LWEXT4_HEADERS) $(BUILD)/.build-id
+$(OBJ)/shim-test/%.o: $(SHIM_DIR)/%.c $(SHIM_DIR)/ext4_bridge.h $(LWEXT4_HEADERS) $(BUILD)/.build-id $(OBJ)/.cflags
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(SHIM_CFLAGS) -DEXT4B_TEST_HOOKS=1 -c $< -o $@
 
-$(OBJ)/crypto/argon2/%.o: $(ARGON2_DIR)/%.c
+$(OBJ)/crypto/argon2/%.o: $(ARGON2_DIR)/%.c $(OBJ)/.cflags
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(ARGON2_CFLAGS) -c $< -o $@
 
-$(OBJ)/crypto/%.o: $(CRYPTO_DIR)/%.c
+$(OBJ)/crypto/%.o: $(CRYPTO_DIR)/%.c $(OBJ)/.cflags
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(SHIM_CFLAGS) -I$(ARGON2_DIR) -c $< -o $@
 
@@ -946,6 +959,14 @@ endif
 # `Ext4Mac selftest` must fail with that and pass without it.
 SWIFTFLAGS += $(EXTRA_SWIFTFLAGS)
 
+# The Swift half of the flags stamp above: a red-first `make app
+# EXTRA_SWIFTFLAGS=-DLUKS_NO_MLOCK` has to be rebuilt away by the next plain
+# `make app`, not left in the bundle `make install` copies.
+SWIFTFLAGS_NOW := $(subst ",,$(subst ',,$(SWIFTFLAGS)|$(DEPLOY_TARGET)|$(EXTRA_SWIFTFLAGS)))
+$(BUILD)/.swiftflags-$(CONFIG): FORCE
+	@mkdir -p $(dir $@)
+	@printf '%s' '$(SWIFTFLAGS_NOW)' | cmp -s - $@ 2>/dev/null || printf '%s' '$(SWIFTFLAGS_NOW)' > $@
+
 typecheck: core  ## swiftc -typecheck the extension sources
 	swiftc -typecheck $(SWIFT_SRCS) $(SWIFTFLAGS)
 
@@ -954,7 +975,7 @@ extension: $(APPEX)/Contents/Info.plist
 # The target is the appex's Info.plist, written last and moved into place in
 # one step -- not the appex directory, which exists from the mkdir on and so
 # made an interrupted build look finished (see .DELETE_ON_ERROR above).
-$(APPEX)/Contents/Info.plist: $(SWIFT_SRCS) $(CORE_LIB) Extension/Info.plist $(BUILD)/.build-id
+$(APPEX)/Contents/Info.plist: $(SWIFT_SRCS) $(CORE_LIB) Extension/Info.plist $(BUILD)/.build-id $(BUILD)/.swiftflags-$(CONFIG)
 	@if [ "$(CONFIG)" != "release" ] && [ -z "$(ALLOW_DEBUG_APPEX)" ]; then \
 	  echo "refusing to build the appex against a $(CONFIG) core."; \
 	  echo "the shipping extension must be a release build -- a debug core"; \
@@ -1053,7 +1074,7 @@ $(BUILD)/$(APP_NAME).app/Contents/Info.plist: App/Info.plist $(BUILD)/.build-id
 # not in a sandboxed app extension that pays for it once per load.
 APP_SRCS := $(wildcard App/*.swift) $(SHARED_SRCS)
 
-$(BUILD)/$(APP_NAME).app/Contents/MacOS/$(APP_NAME): $(APP_SRCS) $(CORE_LIB)
+$(BUILD)/$(APP_NAME).app/Contents/MacOS/$(APP_NAME): $(APP_SRCS) $(CORE_LIB) $(BUILD)/.swiftflags-$(CONFIG)
 	@mkdir -p $(dir $@)
 	swiftc $(APP_SRCS) -target arm64-apple-macos$(DEPLOY_TARGET) -O -parse-as-library \
 	    -I $(SHIM_DIR) $(EXTRA_SWIFTFLAGS) $(CORE_LIB) -o $@
