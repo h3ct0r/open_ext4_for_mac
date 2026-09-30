@@ -316,7 +316,7 @@ $(BUILD)/.tools-config: FORCE
 	@mkdir -p $(BUILD)
 	@printf '%s' "$(CONFIG)" | cmp -s - $@ 2>/dev/null || printf '%s' "$(CONFIG)" > $@
 
-tools: check-lwext4 $(BUILD)/bin/ext4dump $(BUILD)/bin/cryptotest $(BUILD)/bin/datafile $(BUILD)/bin/ext4_stampcheck $(EVENT_PROBE)  ## ext4dump, cryptotest, datafile and friends
+tools: check-lwext4 $(BUILD)/bin/ext4dump $(BUILD)/bin/cryptotest $(BUILD)/bin/datafile $(BUILD)/bin/ext4_stampcheck $(BUILD)/bin/ext4_replay $(BUILD)/bin/mount_sequence $(EVENT_PROBE)  ## ext4dump, cryptotest, datafile and friends
 
 # The fuzzing stamper's oracle. Built with the ordinary compiler and linked
 # against nothing of ours -- it is a SECOND implementation of ext4's
@@ -383,6 +383,12 @@ test-crypto: $(BUILD)/bin/cryptotest
 # orphan-inspection declarations it calls, and links the test library that
 # actually defines them.
 $(BUILD)/bin/ext4dump: tools/ext4dump.c $(CORE_TEST_LIB) $(BUILD)/.build-id $(BUILD)/.tools-config
+	@mkdir -p $(dir $@)
+	$(CC) $(TARGET_FLAG) $(CFLAGS) -DEXT4B_TEST_HOOKS=1 $< $(CORE_TEST_LIB) $(CORE_LDLIBS) -o $@
+
+# Two volumes mounted one after the other in one process, as the extension
+# does: the second must start clean (lwext4 0080). In-memory, no fixtures.
+$(BUILD)/bin/mount_sequence: tools/mount_sequence.c $(CORE_TEST_LIB) $(BUILD)/.tools-config
 	@mkdir -p $(dir $@)
 	$(CC) $(TARGET_FLAG) $(CFLAGS) -DEXT4B_TEST_HOOKS=1 $< $(CORE_TEST_LIB) $(CORE_LDLIBS) -o $@
 
@@ -622,8 +628,21 @@ FUZZ_MERGE_RSS_MB ?= 8192
 
 # Every source under tools/fuzz/ except the ones carrying their own main().
 # A wildcard so that the later phases add a file rather than edit this line.
-FUZZ_SRCS  := $(filter-out tools/fuzz/ext4_stampcheck.c,$(wildcard tools/fuzz/*.c))
+FUZZ_SRCS  := $(filter-out tools/fuzz/ext4_stampcheck.c tools/fuzz/replay_main.c,$(wildcard tools/fuzz/*.c))
 FUZZ_BIN   := $(BUILD)/bin/ext4_fuzz
+
+# Defined here, after FUZZ_SRCS, because make expands a rule's prerequisites
+# as it reads them: above this line $(FUZZ_SRCS) is empty.
+#
+# The fuzz harness with a plain main() instead of libFuzzer: it replays files
+# through the same ro/rw scripts, in one process, in whatever CONFIG this is --
+# so the hostile fixtures get the harness's whole script, under ASan in
+# test-asan, with no Homebrew LLVM. tools/fuzz/replay_main.c says why.
+$(BUILD)/bin/ext4_replay: tools/fuzz/replay_main.c $(FUZZ_SRCS) $(CORE_TEST_LIB) $(BUILD)/.tools-config
+	@mkdir -p $(dir $@)
+	$(CC) $(TARGET_FLAG) $(CFLAGS) -DEXT4B_TEST_HOOKS=1 \
+	    -DEXT4_FUZZ_WEIGHTS_PATH='"$(CURDIR)/tools/fuzz/mutweights.json"' \
+	    tools/fuzz/replay_main.c $(FUZZ_SRCS) $(CORE_TEST_LIB) $(CORE_LDLIBS) -o $@
 
 # Common flags for a libFuzzer run. -max_len covers the largest seed (8 MiB);
 # -rss_limit_mb is generous because ASan's shadow accounts against it.

@@ -51,6 +51,13 @@ headings to be edited into one.
   then `git submodule deinit -f Core/lwext4` before pulling.
 
 ### Fixed
+- **A volume mounted after another one could refuse every new file.** The
+  driver reuses one slot for every mount it makes, and a volume inherited
+  the previous volume's inode-allocator position: when the earlier volume was
+  bigger, an empty one mounted after it by the same extension process
+  answered its very first new file with "disk full". Each mount now starts
+  from nothing. Found by the nightly fuzzer, whose inputs share a process the
+  same way (lwext4 0080).
 - **Disk Utility can erase a physical disk as ext4.** It failed with "File
   system formatter failed (-69832)" for every real disk: the `.fs` bundle's
   wrapper re-dispatched the work to the logged-in user, who cannot open a

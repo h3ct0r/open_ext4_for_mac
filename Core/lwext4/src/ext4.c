@@ -420,28 +420,40 @@ int ext4_mount(const char *dev_name, const char *mount_point,
 	if (!bd)
 		return ENODEV;
 
+	/* A name that is already mounted is a second mount of it, not a
+	 * success. This returned EOK without binding the new device, so every
+	 * call after it ran against the volume mounted before. */
+	for (size_t i = 0; i < CONFIG_EXT4_MOUNTPOINTS_COUNT; ++i) {
+		if (s_mp[i].mounted && !strcmp(s_mp[i].name, mount_point))
+			return EBUSY;
+	}
+
 	for (size_t i = 0; i < CONFIG_EXT4_MOUNTPOINTS_COUNT; ++i) {
 		if (!s_mp[i].mounted) {
-			strcpy(s_mp[i].name, mount_point);
 			mp = &s_mp[i];
 			break;
 		}
-
-		if (!strcmp(s_mp[i].name, mount_point))
-			return EOK;
 	}
 
 	if (!mp)
 		return ENOMEM;
 
+	/* A slot starts from nothing. ext4_fs_init sets the fields it knows
+	 * about and leaves the rest, so the inode allocator's starting group,
+	 * the journal pointers and the running transaction all arrived holding
+	 * the previous volume's values -- and a starting group past the end of
+	 * a smaller volume made every inode allocation on it fail ENOSPC. */
+	memset(mp, 0, sizeof(*mp));
+	strcpy(mp->name, mount_point);
+
 	r = ext4_block_init(bd);
 	if (r != EOK)
-		return r;
+		goto fail;
 
 	r = ext4_fs_init(&mp->fs, bd, read_only);
 	if (r != EOK) {
 		ext4_block_fini(bd);
-		return r;
+		goto fail;
 	}
 
 	bsize = ext4_sb_get_block_size(&mp->fs.sb);
@@ -451,11 +463,17 @@ int ext4_mount(const char *dev_name, const char *mount_point,
 	r = ext4_bcache_init_dynamic(bc, CONFIG_BLOCK_DEV_CACHE_SIZE, bsize);
 	if (r != EOK) {
 		ext4_block_fini(bd);
-		return r;
+		goto fail;
 	}
 
-	if (bsize != bc->itemsize)
-		return ENOTSUP;
+	if (bsize != bc->itemsize) {
+		/* This path used to return with the cache allocated and the
+		 * device still open. */
+		ext4_bcache_fini_dynamic(bc);
+		ext4_block_fini(bd);
+		r = ENOTSUP;
+		goto fail;
+	}
 
 	/*Bind block cache to block device*/
 	r = ext4_block_bind_bcache(bd, bc);
@@ -463,23 +481,27 @@ int ext4_mount(const char *dev_name, const char *mount_point,
 		ext4_bcache_cleanup(bc);
 		ext4_block_fini(bd);
 		ext4_bcache_fini_dynamic(bc);
-		return r;
+		goto fail;
 	}
 
 	bd->fs = &mp->fs;
 	mp->mounted = 1;
+	return r;
+
+fail:
+	/* And a mount that fails leaves the slot as it found it. */
+	memset(mp, 0, sizeof(*mp));
 	return r;
 }
 
 
 int ext4_umount(const char *mount_point)
 {
-	int i;
-	int r;
+	int r, step;
 	struct ext4_mountpoint *mp = 0;
 
-	for (i = 0; i < CONFIG_EXT4_MOUNTPOINTS_COUNT; ++i) {
-		if (!strcmp(s_mp[i].name, mount_point)) {
+	for (size_t i = 0; i < CONFIG_EXT4_MOUNTPOINTS_COUNT; ++i) {
+		if (s_mp[i].mounted && !strcmp(s_mp[i].name, mount_point)) {
 			mp = &s_mp[i];
 			break;
 		}
@@ -488,24 +510,28 @@ int ext4_umount(const char *mount_point)
 	if (!mp)
 		return ENODEV;
 
+	/* Every step runs, and the first failure is the one returned. A
+	 * superblock write that failed used to skip the rest: the cache was
+	 * never released, the slot stayed marked mounted, and the next mount of
+	 * this name was told EOK without its device ever being bound. */
 	r = ext4_fs_fini(&mp->fs);
-	if (r != EOK)
-		goto Finish;
-
-	mp->mounted = 0;
 
 	ext4_bcache_cleanup(mp->fs.bdev->bc);
 	/* The cleanup sweep was this volume's last writer; a flush it could
 	 * not land is the unmount failing, read out before the cache goes. */
-	r = ext4_bcache_take_error(mp->fs.bdev->bc);
+	step = ext4_bcache_take_error(mp->fs.bdev->bc);
+	if (r == EOK)
+		r = step;
 	ext4_bcache_fini_dynamic(mp->fs.bdev->bc);
 
+	step = ext4_block_fini(mp->fs.bdev);
 	if (r == EOK)
-		r = ext4_block_fini(mp->fs.bdev);
-	else
-		(void)ext4_block_fini(mp->fs.bdev);
-Finish:
+		r = step;
+
 	mp->fs.bdev->fs = NULL;
+
+	/* Nothing of this volume stays behind for the next one. */
+	memset(mp, 0, sizeof(*mp));
 	return r;
 }
 

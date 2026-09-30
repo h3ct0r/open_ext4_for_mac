@@ -868,14 +868,47 @@ size_t LLVMFuzzerCustomCrossOver(const uint8_t *a, size_t a_len,
     return ext4_crossover(a, a_len, b, b_len, out, max_out, seed);
 }
 
+/*
+ * Every input must leave the process as it found it. lwext4 keeps its block
+ * devices and mount points in global tables that outlive any one mount, and
+ * a mount-point slot is reused by the next mount: whatever an input leaves in
+ * one, every input after it inherits. That is not hypothetical. A merged
+ * corpus replayed ahead of the seeds made the seeds lose coverage they reach
+ * on their own (284 functions alone, 271 behind 915 corpus units): the inode
+ * allocator's starting group survived from a volume with more groups, and on
+ * a volume with fewer every allocation failed ENOSPC. A finding made that way
+ * would not reproduce from its own input.
+ *
+ * So all three counts must be zero after every pass -- devices registered,
+ * mount points mounted, and unmounted slots holding anything at all -- and a
+ * dirty table is a finding charged to the input that dirtied it: abort, and
+ * libFuzzer writes that input out.
+ */
+static void require_clean_slots(const char *mode)
+{
+    size_t devices = 0, mounted = 0, residue = 0;
+    ext4b_lwext4_slots(&devices, &mounted, &residue);
+    if (devices == 0 && mounted == 0 && residue == 0)
+        return;
+    fprintf(stderr, "ext4_fuzz: this input left lwext4's global tables dirty "
+                    "after the %s pass: %zu block device(s) still registered, "
+                    "%zu mount point(s) still mounted, %zu unmounted slot(s) "
+                    "still holding state\n", mode, devices, mounted, residue);
+    abort();
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     g_inputs++;
     if (size < 2048) return 0;
 
-    if (g_mode == MODE_RO || g_mode == MODE_BOTH)
+    if (g_mode == MODE_RO || g_mode == MODE_BOTH) {
         fuzz_one_ro(data, size);
-    if (g_mode == MODE_RW || g_mode == MODE_BOTH)
+        require_clean_slots("read-only");
+    }
+    if (g_mode == MODE_RW || g_mode == MODE_BOTH) {
         fuzz_one_rw(data, size);
+        require_clean_slots("read-write");
+    }
     return 0;
 }

@@ -178,6 +178,62 @@ if [ "$rows" -eq 0 ]; then
   bad "the manifest lists any fixtures" "zero rows is not a clean run"
 fi
 
+# ------------------------------------------ the harness's whole script ------
+# ext4dump asks each fixture a handful of verbs. The fuzz harness runs its
+# whole read-only and read-write script, which is how the nightly reaches what
+# those verbs never ask. build/bin/ext4_replay is that harness without
+# libFuzzer, so it runs here in every configuration -- under ASan in
+# test-asan. Every fixture goes through it in ONE process, from a pristine
+# copy: the harness requires each input to leave lwext4's global tables empty,
+# and a leak between inputs only shows to the input after it. That leak was
+# real (lwext4 0080): a mount inherited the inode allocator's starting group
+# from the volume before, and a smaller volume then refused every create.
+REPLAY="$ROOT/build/bin/ext4_replay"
+echo ""
+if [ ! -x "$REPLAY" ]; then
+  bad "the fuzz harness replays every fixture" "build/bin/ext4_replay is not built; make tools"
+else
+  mkdir -p "$WORK/replay"
+  replay_imgs=()
+  while read -r file _; do
+    case "$file" in ''|'#'*) continue ;; esac
+    [ -f "$HOSTILE/$file" ] || continue
+    img="$WORK/replay/${file%.img.gz}.img"
+    gunzip -c "$HOSTILE/$file" > "$img" 2>/dev/null && replay_imgs+=("$img")
+  done < "$HOSTILE/MANIFEST"
+  run_deadline 300 env EXT4_FUZZ_MODE=both "$REPLAY" ${replay_imgs[@]+"${replay_imgs[@]}"} \
+    > "$WORK/replay.txt" 2>&1
+  rc=$?
+  last=$(sed -nE 's/^ext4_replay: (.*) \([0-9]+ bytes\)$/\1/p' "$WORK/replay.txt" | tail -1)
+  why=$(grep -m1 -E 'dirty|AddressSanitizer|runtime error:|assert' "$WORK/replay.txt")
+  if [ "$rc" -ne 0 ]; then
+    bad "the fuzz harness replays all ${#replay_imgs[@]} fixtures, both modes, in one process" \
+        "rc=$rc on $(basename "${last:-?}"): ${why:-no reason printed}"
+  elif [ -n "$why" ]; then
+    bad "the fuzz harness replays all ${#replay_imgs[@]} fixtures, both modes, in one process" \
+        "$(basename "${last:-?}"): $why"
+  else
+    ok "the fuzz harness replays all ${#replay_imgs[@]} fixtures, both modes, in one process, each leaving lwext4's tables empty"
+  fi
+fi
+
+# Two volumes, one process, as the extension mounts them: the second must
+# start clean. The same leak, shown as the user met it -- an empty volume
+# that answers ENOSPC to its first file. tools/mount_sequence.c.
+SEQ="$ROOT/build/bin/mount_sequence"
+if [ ! -x "$SEQ" ]; then
+  bad "a second volume in the same process starts clean" "build/bin/mount_sequence is not built; make tools"
+else
+  out=$(run_deadline 60 "$SEQ" 2>&1); rc=$?
+  if [ "$rc" -eq 0 ] && ! grep -qE 'AddressSanitizer|runtime error:' <<<"$out"; then
+    ok "a second volume in the same process starts clean (mount_sequence)"
+  else
+    bad "a second volume in the same process starts clean (mount_sequence)" \
+        "$(grep -m1 -E 'FAIL|AddressSanitizer|runtime error:' <<<"$out" | sed 's/^ *//') -- rc=$rc"
+    grep -E '^ +(FAIL|  )' <<<"$out" | head -6
+  fi
+fi
+
 echo ""
 echo "  $rows fixture(s)"
 finish

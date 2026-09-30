@@ -1377,21 +1377,23 @@ int ext4b_mount(ext4b_device *dev, bool read_only)
     r = ext4_device_register(&dev->bdev, BRIDGE_DEV_NAME);
     if (r == EEXIST) {
         /*
-         * DIAGNOSTIC. The device name is a single global slot, and lwext4
-         * keeps the FIRST registrant: ext4_mount looks the device up by name
-         * and binds s_bdevices[i].bd. So a mount that lands here is about to
-         * be wired to a different volume's block device, while the
-         * unwritten-extent fast path writes through &dev->bdev -- this
-         * volume's own. Metadata to one medium, data to another.
-         *
-         * Whether that ever happens in the field is the open question this
-         * line exists to answer; it is not yet known to occur.
+         * The device name and the mount point are single global slots, and
+         * lwext4 keeps the FIRST registrant: a mount that went ahead from
+         * here would be wired to another volume's block device, while the
+         * unwritten-extent fast path wrote through &dev->bdev -- this
+         * volume's own. Metadata to one medium, data to another. This used to
+         * log and carry on, as a diagnostic; it never fired in the field, and
+         * once ext4_mount refuses a mount point already in use (lwext4 0080)
+         * carrying on would end in the failure path below unregistering the
+         * OTHER volume's device. One volume per process: refuse, touching
+         * nothing.
          */
-        bridge_logf(3, "device slot %s was already registered: this mount "
-                       "binds another volume's block device [build %s]",
-                    BRIDGE_DEV_NAME, EXT4B_BUILD_ID);
+        bridge_logf(3, "device slot %s is already registered: another volume "
+                       "is mounted in this process; refusing this one "
+                       "[build %s]", BRIDGE_DEV_NAME, EXT4B_BUILD_ID);
+        return EBUSY;
     }
-    if (r != EOK && r != EEXIST)
+    if (r != EOK)
         return r;
 
     r = ext4_mount(BRIDGE_DEV_NAME, BRIDGE_MOUNT_POINT, read_only);
