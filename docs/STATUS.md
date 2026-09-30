@@ -91,7 +91,7 @@ measured limit, is in [ENVELOPE.md](ENVELOPE.md).
 
 ## How it is tested
 
-The oracle is never this driver. `make validate` runs 32 stages unattended
+The oracle is never this driver. `make validate` runs 33 stages unattended
 in about twelve minutes: every read against `debugfs`, `e2fsck` after every
 write, crash cuts and reordered writes replayed by the Linux kernel, both
 directions of a differential round trip, LUKS containers judged by real

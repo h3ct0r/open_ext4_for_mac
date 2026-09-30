@@ -306,12 +306,19 @@ fi
 
 # Mounted, but Docker-free: e2fsck is their oracle. Gated only on the
 # extension, so a machine without Docker still measures the live driver.
+#
+# Stage 13 is the only suite that writes a file through a real mount and reads
+# it back byte for byte -- the one that found the preallocated-tail corruption
+# (391 of 408 files on a real stick, 2026-08-31). It existed, and ran nowhere:
+# `make test-mount-data` by hand, or as a prerequisite no validation reached.
 if bash scripts/check_extension.sh >/dev/null 2>&1; then
   stage "11. recovery after a kill" bash Tests/run_kill_recovery_tests.sh
   stage "12. newfs through FSKit" bash Tests/run_newfs_tests.sh
+  stage "13. mounted data, byte for byte" bash Tests/run_mount_data_tests.sh
 else
   skip "11. recovery after a kill" "the FSKit extension is not enabled"
   skip "12. newfs through FSKit" "the FSKit extension is not enabled"
+  skip "13. mounted data, byte for byte" "the FSKit extension is not enabled"
 fi
 
 summary

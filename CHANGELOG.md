@@ -32,6 +32,10 @@ headings to be edited into one.
   a setup already completed.
 
 ### Changed
+- `make validate` runs the mounted data suite as stage 13: a file written
+  through a real FSKit mount must read back byte for byte. It is the suite
+  that found the preallocated-tail corruption, and until now it ran only by
+  hand.
 - The first run is no longer three NSAlerts. They fired before the menu-bar
   icon existed, gave "registered but not approved" and "not registered at all"
   the same sentence, and stopped watching for the approval after two minutes
