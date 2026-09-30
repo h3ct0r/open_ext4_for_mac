@@ -101,6 +101,9 @@ jbd_recover
 jbd_journal_start
 jbd_journal_stop
 jbd_journal_commit_trans
+ext4_dir_add_entry
+ext4_dir_try_insert_entry
+ext4_dir_remove_entry
 ext4_dir_dx_init
 ext4_dir_dx_add_entry
 ext4_dir_dx_split_index

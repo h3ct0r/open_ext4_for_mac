@@ -553,10 +553,15 @@ static void fuzz_one_rw(const uint8_t *data, size_t size)
     /*
      * Batching is a correctness dimension, not a speed knob: batch=1 gives a
      * transaction per operation, which is the pre-batching behaviour the
-     * crash suites' oracles compare against, and 16 is what ships. Split by
-     * input parity so a campaign covers both without doubling its cost.
+     * crash suites' oracles compare against, and the device's default is
+     * what ships. Split by input parity so a campaign covers both without
+     * doubling its cost. The default is left alone rather than named here:
+     * this said "16 is what ships" and set 16 for a year of campaigns while
+     * the shim shipped 64 (BRIDGE_TXN_BATCH), so no fuzzer ever ran the
+     * batch the extension runs.
      */
-    ext4b_set_txn_batch(dev, (size & 1) ? 1 : 16);
+    if (size & 1)
+        ext4b_set_txn_batch(dev, 1);
 
     ext4b_probe_info info;
     memset(&info, 0, sizeof(info));
