@@ -1,0 +1,26 @@
+# A clang whose runtime directory has libclang_rt.fuzzer_osx.a. Xcode's may or
+# may not (the macos-26 image's does not); Homebrew LLVM always does. Three
+# jobs picked a compiler three different ways, and the one without the
+# Homebrew fallback -- the nightly soak -- silently fuzzed nothing for a month.
+name: pick a compiler with a libFuzzer runtime
+description: Output the path of a clang that can link -fsanitize=fuzzer, installing Homebrew LLVM if none can.
+outputs:
+  fuzz_cc:
+    description: path to the chosen clang
+    value: ${{ steps.pick.outputs.fuzz_cc }}
+runs:
+  using: composite
+  steps:
+    - id: pick
+      shell: bash
+      run: |
+        for cc in "$(xcrun -f clang)" /opt/homebrew/opt/llvm/bin/clang; do
+          [ -x "$cc" ] || continue
+          rt="$("$cc" -print-libgcc-file-name 2>/dev/null)" || continue
+          if [ -f "$(dirname "$rt")/libclang_rt.fuzzer_osx.a" ]; then
+            echo "fuzz_cc=$cc" >> "$GITHUB_OUTPUT"; echo "fuzz cc: $cc"; exit 0
+          fi
+        done
+        brew install llvm
+        echo "fuzz_cc=/opt/homebrew/opt/llvm/bin/clang" >> "$GITHUB_OUTPUT"
+        echo "fuzz cc: /opt/homebrew/opt/llvm/bin/clang (installed)"
