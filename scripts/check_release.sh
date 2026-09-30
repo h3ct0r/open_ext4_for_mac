@@ -63,6 +63,28 @@ grep -q "^## \[$want\]" "$ROOT/CHANGELOG.md" \
   && ok "CHANGELOG.md has a [$want] section" \
   || bad "CHANGELOG.md has a [$want] section" "a release is not allowed to exist without one"
 
+# The release notes, built here from what the tag will publish. A relative
+# link that works in CHANGELOG.md leads nowhere from a release page, and the
+# notes once named a macOS floor two major versions behind the build's.
+# Judged when this version's DMG is there, as it is in `make release` and the
+# release workflow; `make app` alone has none.
+DMGF="$ROOT/build/Ext4Mac-$want.dmg"
+if [ -f "$DMGF" ]; then
+  if notes=$(bash "$ROOT/scripts/release_notes.sh" "$want" "$DMGF" 2>&1); then
+    ok "the release notes build"
+    rel=$(grep -oE ']\([^)]*\)' <<<"$notes" | grep -vE '^]\((https://|#)' | head -1)
+    [ -z "$rel" ] && ok "every link in the release notes leads somewhere" \
+                  || bad "every link in the release notes leads somewhere" "$rel resolves against the release page"
+    stale=$(grep -oE 'macOS [0-9.]+ or later' <<<"$notes" | grep -v "^macOS ${floor%.0} or later" | head -1)
+    [ -z "$stale" ] && ok "the release notes name no floor but macOS ${floor%.0}" \
+                    || bad "the release notes name no floor but macOS ${floor%.0}" "they say '$stale'"
+  else
+    bad "the release notes build" "$notes"
+  fi
+else
+  echo "  (no $(basename "$DMGF") here; the release-notes cells apply once it is built)"
+fi
+
 # A signed app has to carry the shared keychain group, or `Ext4Mac forget`
 # and `list` cannot reach the keys the extension stored -- a security gap,
 # not a cosmetic one. This went wrong silently once: the release workflow
@@ -93,8 +115,9 @@ fi
 # which is what the first tagged release did (v0.1.0's first run,
 # 2026-09-06), after notarization had said Accepted. Judged only when a DMG
 # is there and the app is Developer-ID signed; `make app` alone has neither.
-DMGF=$(ls "$ROOT"/build/Ext4Mac-*.dmg 2>/dev/null | head -1)
-if [ -n "$DMGF" ] && grep -q "Authority=Developer ID Application" <<<"$sig"; then
+# This version's DMG, by name: the first of build/Ext4Mac-*.dmg is whichever
+# sorts first, and 0.10.0 sorts before 0.2.0.
+if [ -f "$DMGF" ] && grep -q "Authority=Developer ID Application" <<<"$sig"; then
   dsig=$(codesign -dvv "$DMGF" 2>&1 || true)
   if grep -q "Authority=Developer ID Application" <<<"$dsig"; then
     ok "the DMG carries its own Developer ID signature"

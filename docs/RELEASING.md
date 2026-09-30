@@ -22,7 +22,8 @@ GitHub Release whose notes are the changelog section — produced by
 
 ```bash
 make release VERSION=x.y.z
-git push --tags
+make release-notes              # what the tag will publish, to read first
+git push && git push --tags
 ```
 
 `make release` builds, signs, makes the DMG and runs `scripts/check_release.sh`
@@ -65,9 +66,11 @@ keychain, and a failed run leaves only its logs.
 
 ## Release notes
 
-The changelog section verbatim, then these two paragraphs every time, because
-they are the two things a new user most needs to know and a changelog will
-not tell them:
+`scripts/release_notes.sh` writes them and the workflow publishes what it
+prints: the changelog section, its relative links pointed at the tag (a
+release page resolves them against `/releases/tag/`, where they lead
+nowhere), then these two paragraphs every time, because they are the two
+things a new user most needs to know and a changelog will not tell them:
 
 > **Eject before unplugging.** FSKit gives this driver no way to flush a
 > drive's cache, so the journal's ordering guarantee stops at the drive. See
@@ -77,8 +80,10 @@ not tell them:
 > Settings → General → Login Items & Extensions → File System Extensions.
 > macOS grants this by hand only. See docs/INSTALL.md.
 
-Then the DMG's SHA-256 (`shasum -a 256 Ext4Mac-x.y.z.dmg`), and a "known
-limitations" list pulled from ENVELOPE's *Not yet* items.
+Then a pointer to ENVELOPE's limits with the macOS floor read from the built
+app, and the DMG's SHA-256. `make release-notes` prints all of it once the
+DMG exists, and `check_release.sh` stops a release whose notes carry a link
+that leads nowhere or name a floor the build does not target.
 
 ## If CI is down
 

@@ -229,7 +229,7 @@ ARGON2_CFLAGS := $(CFLAGS) $(NO_WARN) -I$(ARGON2_DIR)
 CORE_LIB      := $(BUILD)/lib/$(CONFIG)/libext4core.a
 CORE_TEST_LIB := $(BUILD)/lib/$(CONFIG)/libext4core-test.a
 
-.PHONY: help all core test-docs test-setup fuzz-triage-oom clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-diskutil test-revoke test-bounds test-fuzz test-fuzz-regressions test-reorder test-crypto test-events test-envelope test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-data test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline ci-linux release changelog-draft check-release uninstall test-uninstall print-fuzz-flags fuzz-build fuzz fuzz-rw fuzz-repro fuzz-minimize fuzz-merge fuzz-check fuzz-cov fuzz-cov-gate check-lwext4 lwext4-diff
+.PHONY: help all core test-docs test-setup fuzz-triage-oom clean test test-asan test-crash test-diff test-format test-prealloc test-newfs test-diskutil test-revoke test-bounds test-fuzz test-fuzz-regressions test-reorder test-crypto test-events test-envelope test-orphan test-luks test-eio test-csum test-fragmentation test-scale soak test-mount-crash test-mount-data test-mount-luks test-replay-speed test-kill-recovery test-pull check-extension check-signing check-ship-surface validate validate-asan tools entitlements extension app sign install typecheck install-diskutil uninstall-diskutil uninstall-barrier preflight prepare-device dmg notarize staple ci-offline ci-linux release changelog-draft check-release release-notes uninstall test-uninstall print-fuzz-flags fuzz-build fuzz fuzz-rw fuzz-repro fuzz-minimize fuzz-merge fuzz-check fuzz-cov fuzz-cov-gate check-lwext4 lwext4-diff
 
 all: app  ## build Ext4Mac.app with the FSKit extension inside (same as app)
 
@@ -1212,6 +1212,9 @@ changelog-draft:  ## commits since the last release tag, under Keep-a-Changelog 
 
 check-release:  ## is the built bundle the version VERSION says?
 	@bash scripts/check_release.sh
+
+release-notes:  ## print the notes a release of this VERSION would publish
+	@bash scripts/release_notes.sh
 
 # Everything an install leaves behind, removed -- or, with DRY_RUN=1, named.
 #
