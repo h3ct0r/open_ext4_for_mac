@@ -130,6 +130,18 @@ int ext4_device_unregister(const char *dev_name);
  * @return  Standard error code.*/
 int ext4_device_unregister_all(void);
 
+/**@brief   Account for the global block-device and mount-point tables.
+ *
+ * Both tables outlive any one mount. Between mounts, a host that mounts one
+ * volume at a time expects every count here to be zero; anything else is
+ * state one mount left behind for the next.
+ *
+ * @param   devices  Registered block devices (may be NULL).
+ * @param   mounted  Mount points still marked mounted (may be NULL).
+ * @param   residue  Unmounted mount-point slots that still hold any state
+ *                   from the mount before them (may be NULL).*/
+void ext4_slots_in_use(size_t *devices, size_t *mounted, size_t *residue);
+
 /**@brief   Mount a block device with EXT4 partition to the mount point.
  *
  * @param   dev_name Block device name (@ref ext4_device_register).

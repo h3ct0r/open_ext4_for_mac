@@ -492,6 +492,13 @@ void ext4b_assert_fail(const char *file, int line);
 /// Deliberately trip an lwext4 assertion. Test builds only.
 void ext4b_trip_assert(void);
 
+/// lwext4's global tables, accounted for: block devices still registered,
+/// mount points still mounted, and unmounted mount-point slots that still hold
+/// state from the mount before. Between mounts all three must be zero: what
+/// one mount leaves in a slot, the next mount in it inherits. The fuzz harness
+/// asserts it after every input. Test builds only.
+void ext4b_lwext4_slots(size_t *devices, size_t *mounted, size_t *residue);
+
 /// Turn the automatic mount-time orphan cleanup off. For tests that need to
 /// look at what an interrupted session actually left on the medium, which an
 /// ordinary read-write mount would have tidied away before they could see it.

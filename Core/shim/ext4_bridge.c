@@ -201,6 +201,11 @@ void ext4b_trip_assert(void)
 {
     ext4_assert(0);
 }
+
+void ext4b_lwext4_slots(size_t *devices, size_t *mounted, size_t *residue)
+{
+    ext4_slots_in_use(devices, mounted, residue);
+}
 #endif
 
 /* Commit any batched-but-uncommitted mutations. Defined with the transaction

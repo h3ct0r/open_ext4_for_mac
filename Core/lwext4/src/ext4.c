@@ -154,6 +154,34 @@ int ext4_device_unregister(const char *dev_name)
 	return ENOENT;
 }
 
+void ext4_slots_in_use(size_t *devices, size_t *mounted, size_t *residue)
+{
+	size_t d = 0, m = 0, left = 0;
+
+	for (size_t i = 0; i < CONFIG_EXT4_BLOCKDEVS_COUNT; ++i)
+		if (s_bdevices[i].bd)
+			d++;
+	for (size_t i = 0; i < CONFIG_EXT4_MOUNTPOINTS_COUNT; ++i) {
+		if (s_mp[i].mounted) {
+			m++;
+			continue;
+		}
+		const uint8_t *p = (const uint8_t *)&s_mp[i];
+		for (size_t k = 0; k < sizeof(s_mp[i]); ++k) {
+			if (p[k]) {
+				left++;
+				break;
+			}
+		}
+	}
+	if (devices)
+		*devices = d;
+	if (mounted)
+		*mounted = m;
+	if (residue)
+		*residue = left;
+}
+
 int ext4_device_unregister_all(void)
 {
 	memset(s_bdevices, 0, sizeof(s_bdevices));
