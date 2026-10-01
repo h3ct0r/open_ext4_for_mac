@@ -1,0 +1,18 @@
+{
+  "id": "0027",
+  "slug": "a-superblock-that-asks-for-a-misaligned-extra-inode-size",
+  "found_by": "following 0086 (2026-10-01): the nightly soak met an existing inode whose extra size was not a multiple of 4. The other way to get one is to be born with it: lwext4 gave each new inode the superblock's s_want_extra_isize, checked since 0078 against the inode size but not for alignment.",
+  "base": "mke2fs -t ext4 -b 1024 -I 256 -N 128 -O ^has_journal,^64bit on 4 MiB, metadata_csum on; e2fsck clean",
+  "edits": [
+    {
+      "what": "superblock s_want_extra_isize (byte 0x15E of the superblock), written with debugfs ssv, which re-stamps the superblock checksum",
+      "from": 32,
+      "to": 34,
+      "note": "e2fsck 1.47.4 reports 'Bad desired extra isize in superblock (34)' -- and under -n still exits 0 for it"
+    }
+  ],
+  "symptom": "Every inode lwext4 created took 34 as its i_extra_isize, so e2fsck then reported each new file ('Inode 12 has a extra size (34) which is invalid'), and the first setxattr on one walked an in-body area at a misaligned address (UBSan, as fixture 0026) -- or, with 0086, failed EIO.",
+  "fixed_by": "lwext4 0087 (docs/lwext4-changes.md) -- a want_extra_isize that is not a multiple of 4 gives a new inode no in-body area, the answer 0078 already gave one too big for the inode; its attributes go to a block",
+  "reproduce": "build/bin/ext4dump <img> create /n; debugfs -R 'stat /n' <img>   # 'Size of extra inode fields: 34' without 0087, 0 with it",
+  "note_on_detection": "run_bounds_tests.sh, under any build: a new file there takes an attribute and gives it back, and e2fsck finds no inode with an invalid extra size. The hostile suite's write script creates the same inodes and, without 0086 and 0087, reaches the misaligned loads under make test-asan."
+}

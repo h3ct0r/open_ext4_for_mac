@@ -206,6 +206,27 @@ grep -q 'user\.blk' <<<"$list" && ! grep -q 'user\.in' <<<"$list" \
   && ok "a listing shows the block's attribute and nothing from the misplaced area" \
   || bad "a listing shows the block's attribute and nothing from the misplaced area" "$(tr '\n' ' ' <<<"$list")"
 
+# --- a superblock's misaligned extra size is not given to new inodes -------
+# Hostile fixture 0027: s_want_extra_isize is 34, which e2fsck calls a bad
+# desired extra isize. lwext4 gave every inode it created that size, so each
+# new file was itself an inode e2fsck calls invalid, with an in-body attribute
+# area 0086 refuses -- its first setxattr failed EIO. A new inode now gets no
+# in-body area, as 0078 already gave one whose size did not fit, and its
+# attributes go to a block (lwext4 0087).
+echo "a superblock's misaligned extra size is not given to new inodes"
+IMG="$WORK/want-extra-isize.img"
+gunzip -c "$ROOT/Tests/fixtures/hostile/0027-a-superblock-that-asks-for-a-misaligned-extra-inode-size.img.gz" > "$IMG"
+out=$( { "$DUMP" "$IMG" create /n && "$DUMP" "$IMG" setxattr /n user.x v; } 2>&1); rc=$?
+[ $rc -eq 0 ] && "$DUMP" "$IMG" getxattr /n user.x 2>/dev/null | grep -qx 'v' \
+  && ok "a new file there takes an attribute and gives it back" \
+  || bad "a new file there takes an attribute and gives it back" "rc=$rc: $(grep -vm1 'core:' <<<"$out")"
+fsck_out=$(e2fsck -fn "$IMG" 2>&1)
+if grep -q 'has a extra size' <<<"$fsck_out"; then
+  bad "and e2fsck finds no inode with an invalid extra size" "$(grep -m1 'has a extra size' <<<"$fsck_out")"
+else
+  ok "and e2fsck finds no inode with an invalid extra size"
+fi
+
 # --- oversize directory-entry name is rejected, not truncated ---------------
 echo
 echo "over-long names"

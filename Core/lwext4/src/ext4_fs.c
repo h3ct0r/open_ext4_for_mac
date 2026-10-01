@@ -1038,7 +1038,12 @@ int ext4_fs_alloc_inode(struct ext4_fs *fs, struct ext4_inode_ref *inode_ref,
 		 * thinks of the superblock. */
 		/* + 4: the in-body xattr header is one 32-bit magic number, and
 		 * its struct is private to ext4_xattr.c. */
-		if ((uint32_t)EXT4_GOOD_OLD_INODE_SIZE + size + 4 >
+		/* And a size that is not a multiple of 4 -- e2fsck's "bad
+		 * desired extra isize" -- made every new inode one e2fsck calls
+		 * invalid, with an in-body area ext4_xattr.c will not use: a
+		 * corrupt inode made from a corrupt field. The same answer. */
+		if ((size & 3) ||
+		    (uint32_t)EXT4_GOOD_OLD_INODE_SIZE + size + 4 >
 		    ext4_get16(&fs->sb, inode_size))
 			size = 0;
 		ext4_inode_set_extra_isize(&fs->sb, inode, size);

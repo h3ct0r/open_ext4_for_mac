@@ -12,8 +12,9 @@ headings to be edited into one.
 ## [0.2.0] - 2026-09-30
 
 A first run that sets itself up, Disk Utility erasing a physical disk as
-ext4, and seven fixes in the filesystem core, most of them for damaged volumes.
-The core is now this project's own fork of lwext4, kept in this repository.
+ext4, and eight fixes in the filesystem core, most of them for damaged
+volumes. The core is now this project's own fork of lwext4, kept in this
+repository.
 
 **Upgrading from 0.1.0.** macOS 26 is now required. Replace the app and open
 it; expect macOS to ask for the extension's approval again, and the Setup
@@ -82,6 +83,13 @@ cannot erase a physical disk.
   then `git submodule deinit -f Core/lwext4` before pulling.
 
 ### Fixed
+- **Files created on a volume with a damaged superblock field were
+  themselves damaged.** The superblock says how much extra space each new
+  inode reserves; when that number was not a multiple of four, every file
+  created there was one e2fsck reports as invalid, its extended attributes
+  at a misaligned address. New files on such a volume now reserve none, and
+  their attributes go to a separate block (lwext4 0087; hostile fixture
+  0027).
 - **Setting an extended attribute on a damaged file read memory at the
   wrong alignment.** A file's in-inode attributes start at an offset its
   inode stores; when that offset was not a multiple of four, every read of
