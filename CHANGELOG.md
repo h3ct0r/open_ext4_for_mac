@@ -12,7 +12,7 @@ headings to be edited into one.
 ## [0.2.0] - 2026-09-30
 
 A first run that sets itself up, Disk Utility erasing a physical disk as
-ext4, and six fixes in the filesystem core, most of them for damaged volumes.
+ext4, and seven fixes in the filesystem core, most of them for damaged volumes.
 The core is now this project's own fork of lwext4, kept in this repository.
 
 **Upgrading from 0.1.0.** macOS 26 is now required. Replace the app and open
@@ -82,6 +82,13 @@ cannot erase a physical disk.
   then `git submodule deinit -f Core/lwext4` before pulling.
 
 ### Fixed
+- **Setting an extended attribute on a damaged file read memory at the
+  wrong alignment.** A file's in-inode attributes start at an offset its
+  inode stores; when that offset was not a multiple of four, every read of
+  them was misaligned, and setting one wrote into a place no other ext4 tool
+  looks. Linux refuses such a file outright. Those attributes are now treated
+  as damaged: a listing skips them, and reading or setting one fails with an
+  I/O error (lwext4 0086; hostile fixture 0026). Found by the nightly fuzzer.
 - **Creating a file on a damaged volume could read past a buffer.** A
   block-allocation goal taken from a corrupt volume could lie beyond its end,
   and the search for a free block then ran off the bitmap. The goal is now

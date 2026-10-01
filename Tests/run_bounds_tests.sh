@@ -180,6 +180,32 @@ fsck_out=$(e2fsck -fn "$IMG" 2>&1)
   && ok "while the good leaves of /idx still take a removal and a create" \
   || bad "the good leaves of /idx still take a removal and a create" "rm /idx/i_000 or create /idx/zz_new_in_good failed"
 
+# --- an in-body attribute area off a 4-byte boundary is not used -----------
+# Hostile fixture 0026: /f's inode says i_extra_isize 30, which the kernel
+# refuses ("bad extra_isize") and e2fsck calls invalid, and its in-body
+# attributes sit where 30 puts them. Every walk of them was 32-bit loads at odd
+# addresses -- undefined, and reported only by UBSan -- and a setxattr wrote a
+# new entry into the misplaced area. Such an area is corruption now, like one
+# outside the inode: a set fails EIO and writes nothing, and a listing shows
+# the attribute in the block and nothing from the misplaced area (lwext4 0086).
+echo "an in-body attribute area off a 4-byte boundary is not used"
+IMG="$WORK/xattr-misaligned.img"
+gunzip -c "$ROOT/Tests/fixtures/hostile/0026-an-inode-whose-extra-size-is-not-a-multiple-of-four.img.gz" > "$IMG"
+# Everything but the superblock (bytes 1024-2047 on this 1 KiB volume): a
+# read-write mount records itself there whatever the operation does.
+past_sb() { { head -c 1024 "$1"; tail -c +2049 "$1"; } | { md5 -q 2>/dev/null || md5sum | cut -d' ' -f1; }; }
+before=$(past_sb "$IMG")
+out=$("$DUMP" "$IMG" setxattr /f user.new v 2>&1); rc=$?
+[ $rc -ne 0 ] && grep -qiE "I/O error|input/output" <<<"$out" \
+  && ok "a setxattr on it fails with EIO" \
+  || bad "a setxattr on it fails with EIO" "rc=$rc: $(grep -vm1 'core:' <<<"$out")"
+[ "$(past_sb "$IMG")" = "$before" ] && ok "and writes nothing (past the superblock's mount record)" \
+                                    || bad "and writes nothing (past the superblock's mount record)" "the image changed outside the superblock"
+list=$("$DUMP" "$IMG" xattr /f 2>/dev/null)
+grep -q 'user\.blk' <<<"$list" && ! grep -q 'user\.in' <<<"$list" \
+  && ok "a listing shows the block's attribute and nothing from the misplaced area" \
+  || bad "a listing shows the block's attribute and nothing from the misplaced area" "$(tr '\n' ' ' <<<"$list")"
+
 # --- oversize directory-entry name is rejected, not truncated ---------------
 echo
 echo "over-long names"

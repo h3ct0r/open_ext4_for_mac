@@ -1,0 +1,22 @@
+{
+  "id": "0026",
+  "slug": "an-inode-whose-extra-size-is-not-a-multiple-of-four",
+  "found_by": "the nightly soak on 9a879db (2026-10-01), its ten-minute read-write fuzz pass: crash-210fe8f2a8063561d8de88d6ee247e1f17d30f52 (4 MiB), a setxattr on an inode from a fuzzed inode table whose i_extra_isize was 106. This image is the same finding rebuilt by hand, small enough to read.",
+  "base": "mke2fs -t ext4 -b 1024 -I 256 -N 128 -O ^metadata_csum,^has_journal,^64bit on 4 MiB (no inode checksum, so the edit below needs no re-stamp); debugfs: write /f, ea_set /f user.in x (in the inode body), ea_set /f user.blk with a 200-byte value (too big for the body: an xattr block)",
+  "edits": [
+    {
+      "what": "inode 12 (/f), i_extra_isize at byte 128 of the inode",
+      "from": 32,
+      "to": 30,
+      "note": "not a multiple of 4: the kernel refuses the inode (iget: bad extra_isize) and e2fsck reports 'Inode 12 has a extra size (30) which is invalid'"
+    },
+    {
+      "what": "inode 12, bytes 160..255 moved to 158..253; 254..255 zeroed",
+      "note": "the in-body attribute area -- its magic number and user.in -- moved to where an extra size of 30 puts it; without the move there is no magic number at 158 and nothing is walked"
+    }
+  ],
+  "symptom": "Every path into the in-body attributes walked the entries through 32-bit loads (EXT4_XATTR_IS_LAST_ENTRY) starting at inode+162: UBSan 'load of misaligned address ... for type uint32_t' in ext4_xattr_is_ibody_valid, ext4_xattr_list and ext4_xattr_find_entry, from a listing, a getxattr or a setxattr. The setxattr then succeeded, writing a new entry into the misplaced area.",
+  "fixed_by": "lwext4 0086 (docs/lwext4-changes.md) -- an in-body area off a 4-byte boundary is corruption, like one outside the inode: a listing skips it, a lookup or a set returns EIO, and no header is laid down there",
+  "reproduce": "build/bin/ext4dump <img> xattr /f   # under make tools CONFIG=debug: misaligned loads without 0086, clean with it; setxattr /f user.x v changes the image without 0086 and fails EIO with it, under any build",
+  "note_on_detection": "The loads are misaligned, not out of bounds, so they fault nowhere: arm64 reads them. UBSan names them (the hostile suite under make test-asan); the setxattr that writes into the misplaced area is caught by run_bounds_tests.sh under any build."
+}

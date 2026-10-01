@@ -578,6 +578,24 @@ static bool ext4_xattr_is_block_valid(struct ext4_inode_ref *inode_ref,
 	return true;
 }
 
+/*
+ * The in-body area starts i_extra_isize bytes past the 128-byte base inode,
+ * and that number comes off the medium. Its entries are walked through
+ * 32-bit loads (EXT4_XATTR_IS_LAST_ENTRY), so a size that is not a multiple
+ * of 4 puts the header and every entry after it on a misaligned address. The
+ * kernel refuses such an inode outright ("iget: bad extra_isize") and e2fsck
+ * calls the size invalid: an area there is corruption, and is neither read,
+ * written nor laid down.
+ *
+ * Found by the nightly soak (2026-10-01): a setxattr on an inode from a
+ * fuzzed inode table whose extra size was 106.
+ */
+static bool ext4_xattr_ibody_misaligned(struct ext4_inode_ref *inode_ref)
+{
+	return ext4_inode_get_extra_isize(&inode_ref->fs->sb,
+					  inode_ref->inode) & 3;
+}
+
 /**
  * @brief Check whether the inode buffer's content is valid
  *
@@ -611,9 +629,13 @@ static bool ext4_xattr_is_ibody_valid(struct ext4_inode_ref *inode_ref)
 	 * group's inode table 39 blocks earlier, into the metadata region, and
 	 * listing one file's attributes read off the end of the inode table
 	 * block.
+	 *
+	 * Inside the buffer is not enough: on a misaligned address the walk
+	 * below is undefined from its first load.
 	 */
 	if ((char *)iheader < (char *)inode_ref->inode ||
-	    (char *)entry + sizeof(uint32_t) > (char *)end)
+	    (char *)entry + sizeof(uint32_t) > (char *)end ||
+	    ext4_xattr_ibody_misaligned(inode_ref))
 		return false;
 
 	min_offs = (char *)end - (char *)base;
@@ -714,9 +736,11 @@ static void ext4_xattr_ibody_initialize(struct ext4_inode_ref *inode_ref)
 	 * a negative size, from a setxattr on a fuzzed volume, on the CI smoke.
 	 * An in-body area that does not fit its inode cannot be initialised;
 	 * leave it alone, and the caller's second lookup reports the corruption.
+	 * The same for one that does not start on a 4-byte boundary.
 	 */
 	if (EXT4_GOOD_OLD_INODE_SIZE + extra_isize +
-	    sizeof(struct ext4_xattr_ibody_header) > inode_size)
+	    sizeof(struct ext4_xattr_ibody_header) > inode_size ||
+	    ext4_xattr_ibody_misaligned(inode_ref))
 		return;
 	header = EXT4_XATTR_IHDR(&fs->sb, inode_ref->inode);
 	memset(header, 0, inode_size - EXT4_GOOD_OLD_INODE_SIZE - extra_isize);
@@ -863,11 +887,13 @@ static int ext4_xattr_ibody_find_entry(struct ext4_inode_ref *inode_ref,
 	 * left the one read here unguarded: a corrupt extra_isize puts the
 	 * header past the inode buffer and the magic read runs off the end.
 	 * Found by the CI fuzz smoke, read-only mode, from a getxattr. Bound
-	 * the header itself first; a header outside the inode is corruption.
+	 * the header itself first; a header outside the inode is corruption,
+	 * and so is one off a 4-byte boundary.
 	 */
 	if ((char *)iheader < (char *)inode_ref->inode ||
 	    (char *)iheader + sizeof(*iheader) >
-	    (char *)inode_ref->inode + inode_size)
+	    (char *)inode_ref->inode + inode_size ||
+	    ext4_xattr_ibody_misaligned(inode_ref))
 		return EIO;
 	if (iheader->h_magic != to_le32(EXT4_XATTR_MAGIC)) {
 		finder->s.not_found = true;
