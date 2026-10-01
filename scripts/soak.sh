@@ -208,9 +208,13 @@ fuzz_interlude() {
     # corpus is over its budget on disk, rather than every tenth round --
     # round 2 of the first --fuzz soak died this way with the tenth still
     # eight rounds off.
-    local mode_dir over=0
+    local mode_dir mb over=0
     for mode_dir in ro rw; do
-        [ "$(du -sm "$ROOT/.fuzz/corpus/$mode_dir" 2>/dev/null | cut -f1)" -gt "${FUZZ_CORPUS_BUDGET_MB:-1024}" ] && over=1
+        # No corpus yet -- a fresh runner -- is 0 MB, not an empty string
+        # handed to -gt, which printed "integer expression expected" twice a
+        # night in the nightly's soak log.
+        mb=$(du -sm "$ROOT/.fuzz/corpus/$mode_dir" 2>/dev/null | cut -f1)
+        [ "${mb:-0}" -gt "${FUZZ_CORPUS_BUDGET_MB:-1024}" ] && over=1
     done
     if [ "$over" = 1 ]; then
         printf "      merging the corpus (over budget)  "
