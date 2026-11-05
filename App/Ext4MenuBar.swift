@@ -97,6 +97,12 @@ final class Ext4MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                    accessibilityDescription: "ext4")
             button.image?.isTemplate = true
         }
+        statusItem.isVisible = Ext4MenuVisibility.isVisible()
+        DistributedNotificationCenter.default().addObserver(
+            forName: Ext4MenuVisibility.changed, object: nil, queue: .main) { [weak self] note in
+            guard let value = note.object as? String, ["show", "hide"].contains(value) else { return }
+            MainActor.assumeIsolated { self?.setMenuBarVisible(value == "show") }
+        }
 
         guard let session = DASessionCreate(kCFAllocatorDefault) else {
             statusItem.button?.toolTip = "could not talk to DiskArbitration"
@@ -169,6 +175,22 @@ final class Ext4MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         _ = done.wait(timeout: .now() + 20)
     }
 
+    func applicationShouldHandleReopen(_ sender: NSApplication,
+                                     hasVisibleWindows flag: Bool) -> Bool {
+        setMenuBarVisible(true)
+        return true
+    }
+
+    private func setMenuBarVisible(_ visible: Bool) {
+        Ext4MenuVisibility.save(visible)
+        statusItem.isVisible = visible
+        rebuildMenu()
+    }
+
+    @objc private func toggleMenuBarVisibility() {
+        setMenuBarVisible(!statusItem.isVisible)
+    }
+
     // MARK: - Setup Assistant
 
     @objc func openAssistant() {
@@ -178,6 +200,7 @@ final class Ext4MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func runTour(then resume: @escaping () -> Void) {
+        setMenuBarVisible(true)
         guard let button = statusItem.button else { resume(); return }
         tourResume = resume
         Ext4StatusItemTour.run(on: button) { [weak self] in
@@ -418,6 +441,13 @@ final class Ext4MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         login.target = self
         login.state = Ext4Setup.loginItemEnabled() ? .on : .off
         menu.addItem(login)
+
+        let visibility = NSMenuItem(title: "Show Menu Bar Icon",
+                                    action: #selector(toggleMenuBarVisibility), keyEquivalent: "")
+        visibility.target = self
+        visibility.state = statusItem.isVisible ? .on : .off
+        visibility.toolTip = "To show the icon again, reopen Ext4Mac or run Ext4Mac menu-bar show."
+        menu.addItem(visibility)
 
         let quit = NSMenuItem(title: "Quit Ext4Mac", action: #selector(quit), keyEquivalent: "q")
         quit.target = self

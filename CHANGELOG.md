@@ -9,6 +9,12 @@ headings to be edited into one.
 
 ## [Unreleased]
 
+### Added
+
+- A persistent **Show Menu Bar Icon** preference. Hiding the icon keeps the
+  background agent running; reopen the running app or use `menu-bar show` to
+  restore it. `menu-bar hide` and `menu-bar status` are also available.
+
 ## [0.2.0] - 2026-09-30
 
 A first run that sets itself up, Disk Utility erasing a physical disk as

@@ -42,6 +42,9 @@ struct Ext4MacApp {
         case "menu", "watch":
             Ext4MenuBar.run()
 
+        case "menu-bar":
+            exit(Ext4MenuVisibility.command(arguments))
+
         // Encrypted volumes. The passphrase is handled here and nowhere else:
         // the extension is sandboxed, cannot prompt, and would pay for the key
         // derivation once per resource load.
@@ -365,6 +368,19 @@ struct Ext4MacApp {
         print("Ext4Mac selftest")
         print("")
 
+        // Isolate preferences so selftest never hides the user's real agent.
+        let visibilitySuite = "dev.h3ct0r.ext4mac.selftest.visibility.\(UUID().uuidString)"
+        let visibilityDefaults = UserDefaults(suiteName: visibilitySuite)!
+        defer { visibilityDefaults.removePersistentDomain(forName: visibilitySuite) }
+        check("the menu bar icon is visible on first launch",
+              Ext4MenuVisibility.isVisible(in: visibilityDefaults))
+        Ext4MenuVisibility.save(false, in: visibilityDefaults)
+        check("hiding the icon persists for the next launch",
+              !Ext4MenuVisibility.isVisible(in: UserDefaults(suiteName: visibilitySuite)!))
+        Ext4MenuVisibility.save(true, in: visibilityDefaults)
+        check("showing the icon clears the hidden preference",
+              Ext4MenuVisibility.isVisible(in: UserDefaults(suiteName: visibilitySuite)!))
+
         // A passphrase lives in one of these for as long as argon2id takes to
         // derive from it -- a second or two of deliberately heavy memory
         // traffic, which is exactly when something gets evicted to swap. A
@@ -534,6 +550,8 @@ struct Ext4MacApp {
                                     missing before ext4 volumes will mount
         Ext4Mac mount /dev/diskN    mount a volume whose key is stored
         Ext4Mac menu                watch for encrypted volumes and ask
+        Ext4Mac menu-bar [show|hide|status]
+                                    control the icon without stopping the agent
         Ext4Mac login-item [on|off] start at login, so the extension stays
                                     registered across reboots (default: status)
 

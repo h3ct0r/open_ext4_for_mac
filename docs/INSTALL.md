@@ -222,3 +222,21 @@ If you only have the DMG and no checkout: eject your ext volumes, run
 | `login-item on\|off` | start at login |
 | `version` | which build is installed |
 | `selftest` | what this build can check about itself (key locking) |
+
+## Hide or show the menu-bar icon
+
+Uncheck **Show Menu Bar Icon** in the Ext4Mac menu to hide the icon while
+background monitoring and encrypted-volume prompts keep running. This
+preference is remembered across restarts and does not change Open at Login.
+
+Reopen the running Ext4Mac app from Finder or Spotlight to restore the icon.
+You can also change the saved preference and update a running agent from Terminal:
+
+```bash
+/Applications/Ext4Mac.app/Contents/MacOS/Ext4Mac menu-bar hide
+/Applications/Ext4Mac.app/Contents/MacOS/Ext4Mac menu-bar show
+/Applications/Ext4Mac.app/Contents/MacOS/Ext4Mac menu-bar status
+```
+
+The commands do not start the agent if it is stopped. `show` makes its icon
+visible when it next starts. The Setup Assistant's menu tour also restores it.
