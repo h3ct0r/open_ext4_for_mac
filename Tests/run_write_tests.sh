@@ -205,6 +205,23 @@ op "mv dir"             mv /movedir /dest/moved && ok "move a non-empty director
 debugfs -R "ls /dest/moved" "$IMG" 2>/dev/null | grep -q sub \
   && ok "moved directory kept its contents" || bad "moved directory kept its contents"
 
+# A directory this driver makes is htree-indexed from birth (ext4_dir_dx_init),
+# so the move above re-parents it through ext4_dir_dx_reset_parent_inode. One
+# that Linux, mke2fs or debugfs made stays unindexed until it outgrows a block
+# -- most directories on a disk from Linux -- and re-parenting it rewrites ".."
+# in place in its first block, whose metadata_csum tail covers that entry.
+# /docs/nested is debugfs's.
+new_image ext4_4k
+nested_flags="$(dbg_field /docs/nested Flags)"
+if (( (nested_flags & 0x1000) == 0 )); then
+  ok "/docs/nested is not indexed, as Linux leaves a small directory"
+else
+  bad "/docs/nested is not indexed, as Linux leaves a small directory" "flags $nested_flags"
+fi
+op "mv unindexed dir"   mv /docs/nested /empty_dir/nested && ok "move a directory Linux made to another parent"
+dotdot="$(debugfs -R "ls -l /empty_dir/nested" "$IMG" 2>/dev/null | awk '$NF == ".." { print $1 }')"
+expect_eq "its \"..\" names the new parent" "$(dbg_field /empty_dir Inode)" "$dotdot"
+
 # ==================================================================== links ==
 echo
 echo "links"

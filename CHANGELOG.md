@@ -9,6 +9,14 @@ headings to be edited into one.
 
 ## [Unreleased]
 
+### Fixed
+
+- Moving a directory into another directory corrupted the volume when that
+  directory was not htree-indexed -- the usual case for one Linux made:
+  its ".." was rewritten without its block's metadata checksum, so e2fsck
+  reported "directory passes checks but fails checksum" and the Linux
+  kernel refused to read the directory (`EBADMSG`).
+
 ## [0.2.0] - 2026-09-30
 
 A first run that sets itself up, Disk Utility erasing a physical disk as
