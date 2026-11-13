@@ -2797,6 +2797,8 @@ static int link_child(struct ext4_fs *fs,
             if (r != EOK)
                 return EIO;
             ext4_dir_en_set_inode(res.dentry, parent->index);
+            /* The block carries a metadata_csum tail: it covers "..". */
+            ext4_dir_set_csum(child, (struct ext4_dir_en *)res.block.data);
             ext4_trans_set_block_dirty(res.block.buf);
             r = ext4_dir_destroy_result(child, &res);
             if (r != EOK)
